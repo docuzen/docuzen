@@ -1,0 +1,23 @@
+{
+  "name": "ai-native-doc",
+  "private": true,
+  "type": "module",
+  "bin": {
+    "docuzen": "./packages/cli/dist/cli.js"
+  },
+  "workspaces": [
+    "packages/*",
+    "apps/*"
+  ],
+  "scripts": {
+    "build": "npm run build --workspaces --if-present",
+    "test": "npm test --workspaces --if-present",
+    "parity": "node tools/parity/run.mjs",
+    "visual": "node tools/visual/run.mjs"
+  },
+  "devDependencies": {
+    "pixelmatch": "^7.2.0",
+    "playwright": "^1.49.0",
+    "pngjs": "^7.0.0"
+  }
+}

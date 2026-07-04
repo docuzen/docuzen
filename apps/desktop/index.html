@@ -1,0 +1,316 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <link rel="stylesheet" href="/src/styles.css" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>docuzen</title>
+    <script type="module" src="/src/main.ts" defer></script>
+  </head>
+  <body>
+    <header class="topbar">
+      <div class="brandblock">
+        <div class="title">docuzen <span class="product-badge">live review canvas</span></div>
+      </div>
+      <div class="actions">
+        <button id="htmlEditToggle" class="action htmledittoggle" hidden title="Toggle WYSIWYG editing for this HTML document">✎ Edit</button>
+        <div class="viewcontrols">
+          <button id="searchBtn" class="action searchbtn" title="Search in this document (⌘F)">Search</button>
+          <button id="agentsBtn" class="action agentsbtn" title="Show agent tasks for this document">Agents</button>
+          <button id="toggleLeftBtn" class="action panetoggle" title="Hide Agent discussion pane (⌘⇧L)">◧</button>
+          <button id="toggleRightBtn" class="action panetoggle" title="Hide Review rail (⌘⇧R)">◨</button>
+        </div>
+      </div>
+    </header>
+
+    <div id="tabs" class="tabbar"></div>
+
+    <div class="layout">
+      <aside class="chatpane">
+        <div class="chathead">
+          <div>
+            <div class="chattitle">Agent discussion</div>
+            <div class="panehint">Promote a comment to revise it with agents.</div>
+          </div>
+          <select id="chatThreadSelect" class="threadsel" title="Switch discussion">
+            <option value="">— no discussion —</option>
+          </select>
+        </div>
+        <div id="threadTree" class="threadtree"></div>
+        <div id="chatQuote" class="chatquote" hidden></div>
+        <div id="chatTurns" class="chatturns"></div>
+        <div id="chatEmpty" class="chatempty">
+          Open a review-card discussion to work with an agent on the selected passage.
+        </div>
+        <div id="chatFoot" class="chatfoot" hidden>
+          <div class="chatactions">
+            <button id="chatResolve" class="resolvebtn" title="Mark this discussion resolved">Resolve thread</button>
+            <button id="chatImprove" class="improvebtn" title="Ask the agent to rewrite the highlighted text using this discussion">Improve passage</button>
+          </div>
+          <select id="chatStance" class="stance" title="Agent stance">
+            <option value="none">🗣 none</option>
+            <option value="critiquer">🔍 critiquer</option>
+            <option value="supporter">🤝 supporter</option>
+          </select>
+          <select id="chatModel" class="stance" title="Model"></select>
+          <textarea id="chatInput" rows="2" placeholder="Message the agent…"></textarea>
+          <button id="chatSend" title="Send">Send</button>
+          <button id="chatPanel" title="Ask all configured models at once">Panel</button>
+          <button id="chatStop" title="Stop the agent" hidden>Stop</button>
+        </div>
+      </aside>
+
+      <main class="doc">
+        <div id="editor" class="editor"></div>
+        <div id="htmlHost" class="htmlhost" hidden></div>
+      </main>
+
+      <aside class="panel">
+        <div class="railhead">
+          <div>
+            <h2>Review rail</h2>
+            <p class="hint">Highlight text, comment, then send agents into the thread.</p>
+          </div>
+          <button id="reviewDocBtn" class="reviewdocbtn" title="Run a document-wide agent review">Review document</button>
+          <button id="resolveDirectivesBtn" class="reviewdocbtn" title="Resolve inline [[ ... ]] directives in the document">Resolve [[ ]]</button>
+        </div>
+        <div id="reviewForm" class="reviewform" hidden>
+          <div class="reviewrow">
+            <select id="reviewStance" title="Review stance">
+              <option value="critiquer">Critiquer</option>
+              <option value="none">Neutral</option>
+              <option value="supporter">Supporter</option>
+            </select>
+            <select id="reviewModel" title="Model"></select>
+          </div>
+          <textarea id="reviewRubric" rows="2" placeholder="Focus (optional), e.g. risks, gaps, unclear passages…"></textarea>
+          <div class="reviewacts">
+            <button id="reviewRun" class="reviewrun">Run review</button>
+            <button id="reviewCancel" class="reviewcancel">Cancel</button>
+          </div>
+          <div id="reviewStatus" class="reviewstatus" hidden></div>
+        </div>
+        <div id="comments" class="comments"></div>
+
+        <details class="diagnostics">
+          <summary>Diagnostics</summary>
+          <div id="engine" class="engine">engine: detecting…</div>
+          <button id="clearlog" class="clearlog">clear</button>
+          <pre id="log" class="log"></pre>
+        </details>
+      </aside>
+    </div>
+
+    <!-- Bottom status bar: hosts the STATUS cluster (doc zoom, docd connection
+         dot, harness/model badge) — moved out of the topbar so the topbar stays
+         pure navigation/actions chrome (wordmark, Search, Agents, pane
+         toggles). A `body`-level flex child (sibling of `.topbar`/`#tabs`/
+         `.layout`, NOT nested inside `.layout`) so it spans the full window
+         width below both sidebars, not just below `.doc`. -->
+    <footer class="statusbar">
+      <div class="statuscluster">
+        <span id="docZoomControl" class="doczoom" title="Document zoom — pinch on the document to zoom, or ⌘+ / ⌘- / ⌘0. Click the percentage to reset.">
+          <button id="docZoomOutBtn" class="doczoombtn" type="button" title="Zoom document out (⌘-)">−</button>
+          <button id="docZoomPctBtn" class="doczoompct" type="button" title="Reset document zoom to 100% (⌘0)">100%</button>
+          <button id="docZoomInBtn" class="doczoombtn" type="button" title="Zoom document in (⌘+)">+</button>
+        </span>
+        <button id="docPath" class="docpath" type="button" hidden disabled title="Click to reveal in Finder"></button>
+        <span id="harnessBadge" class="harnessbadge" title="Loading harness…"></span>
+        <span id="connStatus" class="connstatus reconnecting" title="docd connection status"><span class="dot"></span><span class="connlabel">reconnecting…</span></span>
+      </div>
+    </footer>
+
+    <div id="popover" class="popover" hidden></div>
+
+    <div id="searchPanel" class="searchpanel" hidden>
+      <label for="searchInput">Search</label>
+      <input id="searchInput" type="search" placeholder="Find in document…" autocomplete="off" />
+      <span id="searchCount" class="searchcount">Type to search</span>
+      <button id="searchPrev" class="searchnav" title="Previous result">↑</button>
+      <button id="searchNext" class="searchnav" title="Next result">↓</button>
+      <button id="searchClear" class="searchclear" title="Clear search">Clear</button>
+      <button id="searchClose" class="searchclose" title="Close search">Close</button>
+    </div>
+
+    <!-- Kept a direct child of body (NOT inside .topbar): an ancestor with backdrop-filter
+         would make position:fixed resolve against it instead of the viewport. -->
+    <div id="agentsPanel" class="agentspanel" hidden></div>
+
+    <div id="settingsModal" class="modal" hidden>
+      <div class="modal-card">
+        <h3>Settings</h3>
+        <div class="srow">
+          <label for="setHarness">Agent harness</label>
+          <select id="setHarness"></select>
+          <div id="harnessCaps" class="caprow"></div>
+          <span class="smuted">External harnesses own their tools, auth, and web search. Pi uses Docuzen-managed tools.</span>
+        </div>
+        <div class="srow">
+          <label for="setDefaultModel">Default model</label>
+          <select id="setDefaultModel"></select>
+          <span id="setDefaultModelHint" class="smuted"></span>
+        </div>
+        <div class="srow">
+          <label>Models <span class="smuted">(providers + reasoning effort)</span></label>
+          <div id="modelList" class="modellist"></div>
+          <button id="modelAddBtn" class="action" type="button">+ Add model</button>
+        </div>
+        <div id="modelForm" class="modelform" hidden>
+          <input id="mfName" placeholder="Display name (e.g. GPT-5.5)" />
+          <input id="mfProvider" placeholder="Provider (e.g. litellm)" />
+          <input id="mfModelId" placeholder="Model id (e.g. gpt-5.5)" />
+          <input id="mfBaseUrl" placeholder="API URL (e.g. https://host/v1)" />
+          <input id="mfApiKey" type="password" placeholder="API key (blank = keep existing)" />
+          <select id="mfReasoning">
+            <option value="none">reasoning: none</option>
+            <option value="low">reasoning: low</option>
+            <option value="medium">reasoning: medium</option>
+            <option value="high">reasoning: high</option>
+          </select>
+          <div class="mfacts"><button id="mfSave" class="action" type="button">Save model</button><button id="mfCancel" class="action" type="button">Cancel</button></div>
+        </div>
+        <div class="srow">
+          <label for="setScope">Agent tool scope <span class="smuted">(this document)</span></label>
+          <select id="setScope">
+            <option value="folder">Document folder + .had</option>
+            <option value="repo">Whole repo</option>
+          </select>
+        </div>
+        <div class="srow">
+          <label for="setAgentEdit">How the agent changes the doc</label>
+          <select id="setAgentEdit">
+            <option value="propose">Propose → you Apply (review a diff)</option>
+            <option value="direct">Edit directly (auto-versioned)</option>
+          </select>
+        </div>
+        <div class="srow">
+          <label for="setInstructions">Standing instructions <span class="smuted">(added to every agent prompt for this doc)</span></label>
+          <textarea id="setInstructions" rows="4" placeholder="e.g. No passive voice. Keep paragraphs under 3 sentences. Match my terse, concrete voice."></textarea>
+        </div>
+        <div class="srow">
+          <label for="setWebProvider">Agent web search
+            <label class="inlinecheck"><input type="checkbox" id="setWebSearch" checked /> enabled</label>
+          </label>
+          <select id="setWebProvider">
+            <option value="ddg">DuckDuckGo (no key)</option>
+            <option value="brave">Brave (BRAVE_API_KEY)</option>
+            <option value="tavily">Tavily (TAVILY_API_KEY)</option>
+          </select>
+          <span class="smuted">Brave/Tavily read their API key from the environment; keys are never stored in the document.</span>
+          <span id="setWebSearchHint" class="smuted"></span>
+        </div>
+        <div class="srow">
+          <label>Stances</label>
+          <span class="smuted">🗣 none · 🔍 critiquer · 🤝 supporter (built-in)</span>
+        </div>
+        <div class="modal-foot">
+          <button id="settingsClose" class="action">Done</button>
+        </div>
+      </div>
+    </div>
+
+    <div id="firstRunModal" class="modal" hidden>
+      <div class="modal-card">
+        <h3>Welcome to docuzen</h3>
+        <p>Pick the agent harness for live document discussion. You can change this any time in File → Settings.</p>
+        <div class="srow">
+          <label for="firstRunHarness">Agent harness</label>
+          <select id="firstRunHarness">
+            <option value="pi">Pi (uses a model from ~/.pi/agent/models.json)</option>
+            <option value="codex">Codex CLI</option>
+          </select>
+          <div id="firstRunHint" class="caprow"></div>
+        </div>
+        <div class="srow" id="firstRunPiRow">
+          <label for="firstRunModel">Pi model</label>
+          <select id="firstRunModel"></select>
+        </div>
+        <div class="srow">
+          <button id="firstRunSkip" type="button">Not now</button>
+          <button id="firstRunSave" type="button">Save</button>
+        </div>
+      </div>
+    </div>
+
+    <div id="versionModal" class="modal" hidden>
+      <div class="modal-card versionmodal-card">
+        <h3 id="versionModalTitle">📄 Document</h3>
+        <pre id="versionModalBody" class="versionbody"></pre>
+        <div class="modal-foot">
+          <button id="versionEditBtn" class="action">✎ Edit from here</button>
+          <button id="versionClose" class="action">Close</button>
+        </div>
+      </div>
+    </div>
+
+    <div id="versionPickerModal" class="modal" hidden>
+      <div class="modal-card versionpicker-card">
+        <h3 id="versionPickerTitle">Choose a version</h3>
+        <div id="versionPickerList" class="vpick-list"></div>
+        <div class="modal-foot">
+          <button id="versionPickerCancel" class="action">Cancel</button>
+          <button id="versionPickerConfirm" class="action">Save selected</button>
+        </div>
+      </div>
+    </div>
+
+    <div id="shortcutsModal" class="modal" hidden>
+      <div class="modal-card shortcuts-card">
+        <h3>Keyboard shortcuts</h3>
+        <div class="shortcut-list">
+          <div><kbd>⌘O</kbd><span>Open document</span></div>
+          <div><kbd>⌘S</kbd><span>Save / choose version</span></div>
+          <div><kbd>⌘F</kbd><span>Search in document</span></div>
+          <div><kbd>⌘+</kbd><span>Zoom document in</span></div>
+          <div><kbd>⌘-</kbd><span>Zoom document out</span></div>
+          <div><kbd>⌘0</kbd><span>Reset document zoom to 100%</span></div>
+          <div><kbd>⌘⇧D</kbd><span>Resolve inline <code>[[...]]</code> directives</span></div>
+          <div><kbd>⌘⇧L</kbd><span>Show/hide Agent discussion pane</span></div>
+          <div><kbd>⌘⇧R</kbd><span>Show/hide Review rail</span></div>
+          <div><kbd>⌘R</kbd><span>Reload app window</span></div>
+          <div><kbd>⌘⇧H</kbd><span>Show this help</span></div>
+          <div><kbd>⌘,</kbd><span>Settings</span></div>
+        </div>
+        <div class="modal-foot">
+          <button id="shortcutsClose" class="action">Done</button>
+        </div>
+      </div>
+    </div>
+
+    <div id="diffPanel" class="modal" hidden>
+      <div class="diffbox">
+        <div class="diffhead">
+          <span class="difftitle">Proposed rewrite</span>
+          <span class="diffwhy"></span>
+        </div>
+        <div class="diffbody">
+          <div class="diffpane before" aria-label="Current"></div>
+          <div class="diffpane after" aria-label="Proposed"></div>
+        </div>
+        <div class="difffoot">
+          <button class="diffapprove">✓ Approve</button>
+          <button class="diffreject">✗ Reject</button>
+          <button class="diffclose">Close</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- Mermaid diagram lightbox (mermaid-lightbox.ts) — opened from the
+         document editor's rendered diagrams via their hover "expand" button.
+         Not a `.modal` (needs a true full-viewport stage, not a centered
+         card), but reuses the same backdrop-click-to-close pattern
+         (ui.ts's wireModal) and Esc-to-close. -->
+    <div id="mermaidLightbox" class="mermaid-lightbox" hidden>
+      <div class="mermaid-lightbox-surface">
+        <div class="mermaid-lightbox-bar">
+          <button id="mermaidLbZoomOut" class="mlbtn" type="button" title="Zoom out">−</button>
+          <span id="mermaidLbZoomLabel" class="mlzoomlabel">100%</span>
+          <button id="mermaidLbZoomIn" class="mlbtn" type="button" title="Zoom in">+</button>
+          <button id="mermaidLbReset" class="mlbtn" type="button" title="Reset zoom">Reset</button>
+          <button id="mermaidLbClose" class="mlbtn mlclose" type="button" title="Close (Esc)">✕</button>
+        </div>
+        <div id="mermaidLbStage" class="mermaid-lightbox-stage"></div>
+      </div>
+    </div>
+  </body>
+</html>

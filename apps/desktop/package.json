@@ -1,0 +1,34 @@
+{
+  "name": "desktop",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "dev:all": "node scripts/dev.mjs",
+    "build": "tsc && vite build",
+    "test": "vitest run",
+    "preview": "vite preview",
+    "sidecar:assemble": "node ../../packages/docd/scripts/assemble-sidecar.mjs --out src-tauri/sidecar",
+    "tauri": "tauri"
+  },
+  "dependencies": {
+    "@ai-native-doc/docd": "*",
+    "@milkdown/kit": "^7.5.0",
+    "@milkdown/theme-nord": "^7.5.0",
+    "@tauri-apps/api": "^2",
+    "@tauri-apps/plugin-dialog": "^2",
+    "@tauri-apps/plugin-opener": "^2",
+    "diff": "^9.0.0",
+    "mermaid": "^11.15.0",
+    "turndown": "^7.2.4"
+  },
+  "devDependencies": {
+    "@tauri-apps/cli": "^2",
+    "@types/diff": "^7.0.2",
+    "@types/turndown": "^5.0.6",
+    "typescript": "~5.6.2",
+    "vite": "^6.0.3",
+    "vitest": "^2.1.0"
+  }
+}

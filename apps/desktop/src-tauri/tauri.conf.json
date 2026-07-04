@@ -1,0 +1,51 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "docuzen",
+  "version": "0.1.6",
+  "identifier": "com.docuzen.app",
+  "build": {
+    "beforeDevCommand": "npm run dev:all",
+    "devUrl": "http://localhost:1420",
+    "beforeBuildCommand": "npm run build && npm run sidecar:assemble",
+    "frontendDist": "../dist"
+  },
+  "app": {
+    "withGlobalTauri": true,
+    "windows": [],
+    "security": {
+      "csp": null
+    }
+  },
+  "bundle": {
+    "active": true,
+    "targets": ["app", "dmg"],
+    "resources": ["sidecar"],
+    "fileAssociations": [
+      {
+        "ext": ["hadz"],
+        "name": "docuzen bundle",
+        "description": "docuzen document bundle",
+        "role": "Editor"
+      },
+      {
+        "ext": ["md", "markdown"],
+        "name": "Markdown document",
+        "description": "Markdown document",
+        "role": "Viewer"
+      },
+      {
+        "ext": ["html", "htm"],
+        "name": "HTML document",
+        "description": "HTML document",
+        "role": "Viewer"
+      }
+    ],
+    "icon": [
+      "icons/32x32.png",
+      "icons/128x128.png",
+      "icons/128x128@2x.png",
+      "icons/icon.icns",
+      "icons/icon.ico"
+    ]
+  }
+}

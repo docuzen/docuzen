@@ -1,0 +1,6 @@
+{"type":"thread.started","thread_id":"019f2418-5846-75d3-8a84-b79b4d3f53be"}
+{"type":"turn.started"}
+{"type":"item.started","item":{"id":"item_0","type":"command_execution","command":"cat notes.md","aggregated_output":"","exit_code":null,"status":"in_progress"}}
+{"type":"item.completed","item":{"id":"item_0","type":"command_execution","command":"cat notes.md","aggregated_output":"notes.md — first line\nsecond line — end\n","exit_code":0,"status":"completed"}}
+{"type":"item.completed","item":{"id":"item_1","type":"agent_message","text":"hello world"}}
+{"type":"turn.completed","usage":{"input_tokens":33556,"cached_input_tokens":27392,"output_tokens":474,"reasoning_output_tokens":405}}

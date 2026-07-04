@@ -1,0 +1,142 @@
+name: release
+
+on:
+  push:
+    tags: ["v*"]
+  # Fallback for the tag-push event race (observed twice: freshly created
+  # repo, and a tag pushed right after a completed run): Actions → release →
+  # Run workflow, selecting the TAG as the ref. The verify job's tag/version
+  # check fails fast if dispatched from a non-tag ref.
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+env:
+  PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD: "1"
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 22
+          cache: npm
+      - name: Tag must match tauri.conf.json version
+        run: |
+          TAG="${GITHUB_REF_NAME#v}"
+          VERSION="$(node -p "require('./apps/desktop/src-tauri/tauri.conf.json').version")"
+          if [ "$TAG" != "$VERSION" ]; then
+            echo "::error::tag v$TAG != tauri.conf.json version $VERSION" >&2
+            exit 1
+          fi
+      - run: npm ci
+      - run: npm test
+
+  build:
+    needs: verify
+    strategy:
+      fail-fast: true
+      matrix:
+        include:
+          - arch: arm64
+            rust-target: aarch64-apple-darwin
+          - arch: x64
+            rust-target: x86_64-apple-darwin
+    # Both legs run on arm64 runners; x64 is a cross-compile (GitHub's free
+    # Intel macOS runners are retired/retiring). Rosetta smokes the x64
+    # artifact when available.
+    runs-on: macos-14
+    env:
+      SIDECAR_ARCH: ${{ matrix.arch }}
+      # secrets is not a valid context in step-level `if`; evaluate it here.
+      HAS_APPLE_CERT: ${{ secrets.APPLE_CERTIFICATE != '' }}
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 22
+          cache: npm
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.rust-target }}
+      - run: npm ci
+      - name: Enable Apple signing env (no-op until repo secrets exist)
+        if: env.HAS_APPLE_CERT == 'true'
+        env:
+          CERT: ${{ secrets.APPLE_CERTIFICATE }}
+          CERT_PW: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          AID: ${{ secrets.APPLE_ID }}
+          APW: ${{ secrets.APPLE_PASSWORD }}
+          TEAM: ${{ secrets.APPLE_TEAM_ID }}
+        run: |
+          # Exported via GITHUB_ENV only when signing credentials exist, so
+          # unsigned builds see the variables as ABSENT (not empty strings).
+          {
+            echo "APPLE_CERTIFICATE<<__SECRET__";           printf '%s\n' "$CERT";    echo "__SECRET__"
+            echo "APPLE_CERTIFICATE_PASSWORD<<__SECRET__";  printf '%s\n' "$CERT_PW"; echo "__SECRET__"
+            echo "APPLE_SIGNING_IDENTITY<<__SECRET__";      printf '%s\n' "$IDENTITY"; echo "__SECRET__"
+            echo "APPLE_ID<<__SECRET__";                    printf '%s\n' "$AID";     echo "__SECRET__"
+            echo "APPLE_PASSWORD<<__SECRET__";              printf '%s\n' "$APW";     echo "__SECRET__"
+            echo "APPLE_TEAM_ID<<__SECRET__";               printf '%s\n' "$TEAM";    echo "__SECRET__"
+          } >> "$GITHUB_ENV"
+      - name: Rust unit tests
+        if: matrix.arch == 'arm64'
+        run: cargo test --manifest-path apps/desktop/src-tauri/Cargo.toml
+      - name: Assemble sidecar (checksum-verified)
+        run: node packages/docd/scripts/assemble-sidecar.mjs --out apps/desktop/src-tauri/sidecar --arch ${{ matrix.arch }}
+      - name: Smoke-test sidecar artifact
+        run: |
+          if [ "${{ matrix.arch }}" = "arm64" ] || arch -x86_64 /usr/bin/true 2>/dev/null; then
+            node packages/docd/scripts/smoke-sidecar.mjs apps/desktop/src-tauri/sidecar
+          else
+            echo "::warning::Rosetta unavailable — x64 sidecar assembled + checksum-verified but not executed on this runner"
+          fi
+      - name: Build app
+        run: npm run tauri --workspace desktop -- build --target ${{ matrix.rust-target }}
+      - name: Package artifacts
+        run: |
+          VERSION="$(node -p "require('./apps/desktop/src-tauri/tauri.conf.json').version")"
+          BUNDLE="apps/desktop/src-tauri/target/${{ matrix.rust-target }}/release/bundle"
+          mkdir -p out
+          dmgs=( "$BUNDLE"/dmg/*.dmg )
+          if [ "${#dmgs[@]}" -ne 1 ] || [ ! -f "${dmgs[0]}" ]; then
+            echo "::error::expected exactly one dmg in $BUNDLE/dmg, found: ${dmgs[*]}"
+            exit 1
+          fi
+          cp "${dmgs[0]}" "out/docuzen-$VERSION-${{ matrix.arch }}.dmg"
+          tar -czf "out/docuzen-$VERSION-${{ matrix.arch }}.app.tar.gz" -C "$BUNDLE/macos" docuzen.app
+      - uses: actions/upload-artifact@v4
+        with:
+          name: docuzen-${{ matrix.arch }}
+          path: out/*
+          if-no-files-found: error
+
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+      - name: Generate checksums
+        run: cd dist && sha256sum * > SHA256SUMS.txt
+      - name: Create GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" dist/* \
+            --repo "$GITHUB_REPOSITORY" \
+            --title "docuzen $GITHUB_REF_NAME" \
+            --notes "macOS builds (unsigned until code signing lands).
+
+          - Apple Silicon: *-arm64.dmg
+          - Intel: *-x64.dmg
+
+          First launch on macOS 15+: Gatekeeper reports unsigned downloads as 'damaged'. Clear the quarantine flag after copying to /Applications — xattr -cr /Applications/docuzen.app — then open normally. (On macOS 14 and earlier, right-click + Open suffices.) The first launch may pause for a few seconds while macOS scans the bundled sidecar runtime.
+
+          Verify downloads against SHA256SUMS.txt."

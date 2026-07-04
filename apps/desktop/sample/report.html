@@ -1,0 +1,16 @@
+<!doctype html>
+<html>
+  <head><title>Latency Report</title></head>
+  <body>
+    <h1>Latency Report — Q2</h1>
+    <p>The p99 latency regressed by <strong>40%</strong> after the gateway change.
+    The main suspect is synchronous logging on the hot path.</p>
+    <h2>Findings</h2>
+    <ul>
+      <li>Logging blocks the request thread under load.</li>
+      <li>Connection pool saturates at 200 concurrent requests.</li>
+    </ul>
+    <h2>Recommendation</h2>
+    <p>Move logging off the hot path and raise the pool ceiling.</p>
+  </body>
+</html>
