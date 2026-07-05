@@ -9,7 +9,6 @@ import { readManifest } from "../../src/had/manifest.js";
 import { addAnnotation, readAnnotations } from "../../src/had/annotations.js";
 import { writeThread } from "../../src/had/thread.js";
 import { listVersions, readVersion } from "../../src/had/versions.js";
-import { readPointer } from "../../src/had/pointer.js";
 
 let dir: string;
 let docPath: string;
@@ -22,13 +21,13 @@ afterEach(async () => {
 });
 
 describe("openDoc", () => {
-  it("adds the had pointer and initializes the manifest on first open", async () => {
+  it("initializes the manifest on first open without touching the doc", async () => {
     await writeFile(docPath, "# Plan\n\nBody text.\n", "utf8");
     expect(await readManifest(docPath)).toBeNull();
 
     const res = await openDoc(docPath);
 
-    expect(await readPointer(docPath)).toBe(".plan.md.had/");
+    expect(await readFile(docPath, "utf8")).toBe("# Plan\n\nBody text.\n");
     const manifest = await readManifest(docPath);
     expect(manifest).not.toBeNull();
     expect(manifest!.doc).toBe("plan.md");
@@ -45,10 +44,10 @@ describe("openDoc", () => {
     expect(await readManifest(docPath)).toEqual(first);
   });
 
-  it("strips had frontmatter from the returned markdown body", async () => {
-    await writeFile(docPath, "# Plan\n\nBody text.\n", "utf8");
+  it("strips frontmatter from the returned markdown body", async () => {
+    await writeFile(docPath, "---\ntitle: My Plan\n---\n# Plan\n\nBody text.\n", "utf8");
     const res = await openDoc(docPath);
-    expect(res.text).not.toContain("had:");
+    expect(res.text).not.toContain("title:");
     expect(res.text).toContain("Body text.");
   });
 
@@ -60,7 +59,7 @@ describe("openDoc", () => {
     expect(res.format).toBe("html");
     expect(res.text).toBe(html);
     expect(await readFile(htmlPath, "utf8")).toBe(html);
-    // no had: pointer for html (no YAML in HTML), but the manifest is still initialized
+    // the manifest is still initialized for html docs
     expect(await readManifest(htmlPath)).not.toBeNull();
   });
 

@@ -6,7 +6,7 @@ import { Orchestrator } from "../../src/orchestrator/orchestrator.js";
 import { FakePiRunner } from "../../src/agent/fake-runner.js";
 import { TaskDB } from "../../src/state/task-db.js";
 import { hadPaths } from "../../src/had/paths.js";
-import { ensurePointer, initThread, appendTurn } from "../../src/index.js";
+import { initThread, appendTurn } from "../../src/index.js";
 
 let dir: string;
 let docPath: string;
@@ -15,7 +15,6 @@ beforeEach(async () => {
   dir = await mkdtemp(join(tmpdir(), "recon-"));
   docPath = join(dir, "plan.md");
   await writeFile(docPath, "# Plan\n", "utf8");
-  await ensurePointer(docPath);
   db = new TaskDB(hadPaths(docPath).stateDb);
 });
 afterEach(async () => {

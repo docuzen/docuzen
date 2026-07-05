@@ -12,7 +12,6 @@ import { TaskDB } from "../../src/state/task-db.js";
 import AdmZip from "adm-zip";
 import { readAppConfig } from "../../src/config/app-config.js";
 import {
-  ensurePointer,
   addAnnotation,
   createAnchor,
   listVersions,
@@ -29,7 +28,6 @@ beforeEach(async () => {
   dir = await mkdtemp(join(tmpdir(), "rpc-"));
   docPath = join(dir, "plan.md");
   await writeFile(docPath, DOC, "utf8");
-  await ensurePointer(docPath);
   const start = DOC.indexOf("Redis");
   const anchor = createAnchor(DOC, start, start + "Redis".length);
   await addAnnotation(docPath, {
@@ -589,7 +587,7 @@ describe("RpcHandler", () => {
     expect(anns.find((a) => a.id === id)?.body).toBe("Why not in-memory?");
   });
 
-  it("saveDoc writes the body back (keeping the had pointer) and snapshots a version", async () => {
+  it("saveDoc writes the body back without adding frontmatter and snapshots a version", async () => {
     const res = await handler.handle({
       id: "s1",
       method: "saveDoc",
@@ -597,8 +595,7 @@ describe("RpcHandler", () => {
     });
     expect(res.ok).toBe(true);
     const onDisk = await readFile(docPath, "utf8");
-    expect(onDisk).toContain("# Edited Plan");
-    expect(onDisk).toContain("had:"); // pointer preserved
+    expect(onDisk).toBe("# Edited Plan\n\nNew body.\n"); // no had: frontmatter injected
     const versions = await listVersions(docPath);
     expect(versions.some((v) => v.cause === "manual-save")).toBe(true);
   });

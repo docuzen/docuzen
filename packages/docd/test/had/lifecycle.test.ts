@@ -3,8 +3,6 @@ import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
-  ensurePointer,
-  readPointer,
   initManifest,
   writeManifest,
   readManifest,
@@ -34,9 +32,7 @@ afterEach(async () => {
 
 describe("HAD lifecycle", () => {
   it("creates a comment, discusses, applies an edit, cuts a version", async () => {
-    // 1. open: pointer + manifest
-    await ensurePointer(docPath);
-    expect(await readPointer(docPath)).toBe(".plan.md.had/");
+    // 1. open: manifest
     await writeManifest(docPath, await initManifest(docPath));
     expect((await readManifest(docPath))!.doc).toBe("plan.md");
 

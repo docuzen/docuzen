@@ -5,7 +5,7 @@ import { join } from "node:path";
 import { transition } from "../../src/orchestrator/turn-status.js";
 import { TaskDB } from "../../src/state/task-db.js";
 import { hadPaths } from "../../src/had/paths.js";
-import { ensurePointer, initThread, readThread } from "../../src/index.js";
+import { initThread, readThread } from "../../src/index.js";
 
 // Fixture setup mirrors the pattern at the top of orchestrator.test.ts: a temp .had
 // fixture + an in-memory-backed TaskDB rooted at the doc's own state.db.
@@ -17,7 +17,6 @@ beforeEach(async () => {
   dir = await mkdtemp(join(tmpdir(), "turn-status-"));
   docPath = join(dir, "plan.md");
   await writeFile(docPath, "We store limits in Redis with a TTL.\n", "utf8");
-  await ensurePointer(docPath);
   db = new TaskDB(hadPaths(docPath).stateDb);
   // Seed a thread the way discuss() does via initThread, so frontmatter starts at
   // "running" exactly like a freshly-started discussion.

@@ -7,7 +7,7 @@ import { listThreadTree } from "../../src/orchestrator/thread-tree.js";
 import { FakePiRunner } from "../../src/agent/fake-runner.js";
 import { TaskDB } from "../../src/state/task-db.js";
 import { hadPaths } from "../../src/had/paths.js";
-import { ensurePointer, addAnnotation, createAnchor } from "../../src/index.js";
+import { addAnnotation, createAnchor } from "../../src/index.js";
 
 let dir: string;
 let docPath: string;
@@ -18,7 +18,6 @@ beforeEach(async () => {
   dir = await mkdtemp(join(tmpdir(), "tree-"));
   docPath = join(dir, "plan.md");
   await writeFile(docPath, DOC, "utf8");
-  await ensurePointer(docPath);
   db = new TaskDB(hadPaths(docPath).stateDb);
 });
 afterEach(async () => {
