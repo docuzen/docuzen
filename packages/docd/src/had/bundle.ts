@@ -1,6 +1,8 @@
-import { basename, join } from "node:path";
+import { mkdirSync, renameSync, rmSync } from "node:fs";
+import { basename, dirname, join } from "node:path";
 import AdmZip from "adm-zip";
 import { hadPaths } from "./paths.js";
+import { resolveHadDir } from "./resolve.js";
 import { readVersion } from "./versions.js";
 
 export interface ExportHadzOptions {
@@ -36,11 +38,26 @@ export async function importHadz(
   const dest = destDir ?? `${hadzPath}.unpacked`;
   const zip = new AdmZip(hadzPath);
   zip.extractAllTo(dest, /* overwrite */ true);
+  const entryNames = zip.getEntries().map((e) => e.entryName);
   // The doc is the only root-level entry (the .had folder entries are nested).
-  const docName = zip
-    .getEntries()
-    .map((e) => e.entryName)
-    .find((n) => !n.includes("/") && !n.startsWith("."));
+  const docName = entryNames.find((n) => !n.includes("/") && !n.startsWith("."));
   if (!docName) throw new Error("no document found in .hadz bundle");
-  return { docPath: join(dest, docName) };
+  const docPath = join(dest, docName);
+  // Bundles carry the sidecar as a root-level `<doc>.had/` folder (older
+  // bundles: `.<doc>.had/`). Move it to wherever review state now resolves
+  // so hadPaths(docPath) finds it.
+  const hadFolder = entryNames
+    .filter((n) => n.includes("/"))
+    .map((n) => n.split("/")[0])
+    .find((seg) => seg.endsWith(".had"));
+  if (hadFolder) {
+    const from = join(dest, hadFolder);
+    const to = resolveHadDir(docPath);
+    if (from !== to) {
+      rmSync(to, { recursive: true, force: true });
+      mkdirSync(dirname(to), { recursive: true });
+      renameSync(from, to);
+    }
+  }
+  return { docPath };
 }

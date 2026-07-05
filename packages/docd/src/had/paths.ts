@@ -1,4 +1,5 @@
-import { dirname, basename, join } from "node:path";
+import { join } from "node:path";
+import { resolveHadDir } from "./resolve.js";
 
 export interface HadPaths {
   dir: string;
@@ -19,7 +20,7 @@ export interface HadPaths {
 
 /** Compute the `.had` sidecar paths for a document path. */
 export function hadPaths(docPath: string): HadPaths {
-  const dir = join(dirname(docPath), `.${basename(docPath)}.had`);
+  const dir = resolveHadDir(docPath);
   const threadsDir = join(dir, "threads");
   const sessionsDir = join(dir, "sessions");
   const versionsDir = join(dir, "versions");
