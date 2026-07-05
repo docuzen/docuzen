@@ -13,3 +13,7 @@ tools/parity/out/
 # run (tools/visual/baseline/ and tools/visual/fixtures/ ARE committed)
 tools/visual/current/
 tools/visual/diff/
+
+# demo recording scratch (only docs/media/demo.gif is committed)
+tools/demo/out/
+tools/demo/*.webm
