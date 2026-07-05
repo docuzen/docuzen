@@ -232,7 +232,8 @@ function mcpPrompt(ctx: AgentContext): string[] {
 /**
  * AgentRunner backed by the pi harness (pi.dev). pi runs an agentic loop with
  * read-only file tools scoped to the document's directory, so the agent reads
- * the doc, the project, and the `.had` sidecar on demand. Streams reply text,
+ * the doc, the project, and the review state under the document's `.docuzen/`
+ * store on demand. Streams reply text,
  * reasoning, and tool activity; prompts are serialized per session.
  */
 export class PiRunner implements AgentRunner {
@@ -650,8 +651,8 @@ export class PiRunner implements AgentRunner {
         " produce a doc-native ```mermaid diagram (preferred), a Markdown table, or" +
         " inline SVG directly in your reply or edit, rather than describing it in prose" +
         " or referencing an image file. Use your read-only tools (read, grep, ls, find)" +
-        " to consult the rest of the project and the `.had` sidecar for other comments" +
-        " when you need more context.",
+        " to consult the rest of the project and the review state under the document's" +
+        " `.docuzen/` store for other comments when you need more context.",
       ...webSearchPrompt(ctx),
       ...mcpPrompt(ctx),
       ...standingInstructionsSection(ctx.instructions, PI_STANDING_INSTRUCTIONS_HEADING, false),
@@ -708,7 +709,8 @@ export class PiRunner implements AgentRunner {
         " verbatim plus its `newText`) or `fullRewrite`. Do NOT edit the document yourself" +
         " and do NOT paste edits in prose — the reviewer approves edits. Prefer a focused" +
         " set of high-value findings over many trivial ones. Use your read-only tools to" +
-        " consult the project and the `.had` sidecar when you need more context." +
+        " consult the project and the review state under the document's `.docuzen/`" +
+        " store when you need more context." +
         (ctx.htmlMode
           ? " This is an HTML document: preserve raw HTML source, keep tags balanced and" +
             " properly nested, and use validate_html on candidate HTML before proposing a fix."
