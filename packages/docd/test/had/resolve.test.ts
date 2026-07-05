@@ -39,6 +39,10 @@ describe("resolveHadDir", () => {
     expect(resolveHadDir(doc)).toBe(join(dir, ".docuzen", "loose.md.had"));
   });
 
+  test("a relative path does not hang and falls back to its dir", () => {
+    expect(resolveHadDir("a/b.md")).toBe(join("a", ".docuzen", "b.md.had"));
+  });
+
   test("path with spaces", () => {
     const root = tmp();
     mkdirSync(join(root, ".git"));

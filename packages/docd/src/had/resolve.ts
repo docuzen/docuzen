@@ -2,16 +2,16 @@
 // `<repo-root>/.docuzen/<relpath>.had` (no per-file sidecars, no doc mutation);
 // outside a repo -> `<doc-dir>/.docuzen/<basename>.had`. Pure: no side effects.
 import { existsSync } from "node:fs";
-import { basename, dirname, join, relative, parse } from "node:path";
+import { basename, dirname, join, relative } from "node:path";
 
 /** Nearest ancestor containing a `.git` entry (dir or worktree file), or null. */
 export function findRepoRoot(startDir: string): string | null {
   let dir = startDir;
-  const { root } = parse(dir);
   for (;;) {
     if (existsSync(join(dir, ".git"))) return dir;
-    if (dir === root) return null;
-    dir = dirname(dir);
+    const parent = dirname(dir);
+    if (parent === dir) return null; // reached filesystem root ("/") or relative bottom (".")
+    dir = parent;
   }
 }
 
