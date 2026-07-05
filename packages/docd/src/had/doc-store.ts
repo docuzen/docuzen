@@ -3,6 +3,7 @@ import { basename } from "node:path";
 import matter from "gray-matter";
 import { hadPaths } from "./paths.js";
 import { isHtmlDoc } from "./doc-format.js";
+import { ensureDocuzenHidden } from "./hide.js";
 import { readManifest, writeManifest, initManifest, contentHash } from "./manifest.js";
 import { readAnnotations } from "./annotations.js";
 import { readThread } from "./thread.js";
@@ -23,6 +24,7 @@ export interface OpenDocResult {
  * the sidecar is located by the path resolver, not a frontmatter pointer.
  */
 export async function openDoc(docPath: string): Promise<OpenDocResult> {
+  ensureDocuzenHidden();
   const isHtml = isHtmlDoc(docPath);
   if ((await readManifest(docPath)) === null) {
     await writeManifest(docPath, await initManifest(docPath));
