@@ -57,8 +57,8 @@ docuzen doctor
 docuzen update
 ```
 
-`docuzen update` is currently a placeholder for linked checkouts; packaged release
-updates will use npm/GitHub Releases later.
+In a linked checkout, `docuzen update` only prints update instructions; the
+packaged-app `docuzen` CLI (see Packaged App below) performs real release updates.
 
 For full setup, model configuration, build commands, and troubleshooting, see
 [`docs/install.md`](docs/install.md).

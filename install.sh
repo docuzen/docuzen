@@ -14,9 +14,11 @@ else
   mkdir -p "$BINDIR"
 fi
 
-curl -fsSL "$RAW_BASE/installer/docuzen" -o "$BINDIR/docuzen" \
-  || { echo "docuzen: failed to download the CLI" >&2; exit 1; }
-chmod +x "$BINDIR/docuzen"
+tmp_cli="$(mktemp "$BINDIR/.docuzen.XXXXXX")" || { echo "docuzen: cannot create a temp file in $BINDIR" >&2; exit 1; }
+curl -fsSL "$RAW_BASE/installer/docuzen" -o "$tmp_cli" \
+  || { echo "docuzen: failed to download the CLI" >&2; rm -f "$tmp_cli"; exit 1; }
+chmod +x "$tmp_cli"
+mv -f "$tmp_cli" "$BINDIR/docuzen"
 
 case ":$PATH:" in
   *":$BINDIR:"*) ;;
