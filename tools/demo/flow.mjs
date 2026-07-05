@@ -34,6 +34,9 @@ export async function driveDemo(page, url) {
   await pause(page, 2400); // let the viewer read the proposed rewrite (old vs new)
 
   // 5) Apply and version — writes the edit and snapshots a restorable version.
+  //    The proposal (and its approve button) is removed once the apply lands, so
+  //    wait for that before dwelling on the rewritten document.
   await approve.click();
-  await pause(page, 2600);
+  await approve.waitFor({ state: "detached", timeout: 30_000 }).catch(() => {});
+  await pause(page, 2400);
 }

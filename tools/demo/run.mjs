@@ -19,6 +19,10 @@ import { gifFromVideo } from "./gif.mjs";
 // host to IPv4 so launchTree sees Vite come up.
 process.env.TAURI_DEV_HOST ??= "127.0.0.1";
 
+// The comment author defaults to the OS username; pin a neutral name so the
+// recorded review card doesn't bake a machine-local identity into the GIF.
+process.env.DOCUZEN_AUTHOR ??= "you";
+
 const here = dirname(fileURLToPath(import.meta.url));
 const repoRoot = resolve(here, "../..");
 const fixture = resolve(here, "fixtures/demo.md");
@@ -26,7 +30,9 @@ const VITE_PORT = 4620; // distinct from tools/visual (4610) and tools/parity (4
 
 function arg(name, def) {
   const i = process.argv.indexOf(`--${name}`);
-  return i >= 0 ? Number(process.argv[i + 1]) : def;
+  if (i < 0) return def;
+  const n = Number(process.argv[i + 1]);
+  return Number.isFinite(n) ? n : def;
 }
 
 async function main() {
@@ -52,8 +58,11 @@ async function main() {
     if (!webm) throw new Error("no video recorded");
     gifFromVideo(join(videoDir, webm), gifPath, {
       fps: 15, width: 820,
+      // cropBottom drops the app status bar (which renders the staged doc's
+      // machine-local temp path); start default skips the boot "reconnecting" flash.
+      cropBottom: 28,
       speed: arg("speed", 1),
-      start: arg("start", undefined),
+      start: arg("start", 1),
       end: arg("end", undefined),
     });
     console.log(`[demo] wrote ${gifPath}`);
