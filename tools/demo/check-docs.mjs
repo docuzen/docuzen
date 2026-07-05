@@ -2,7 +2,6 @@
 // storage model or the stale "repository is named ai-native-doc" framing.
 // `@ai-native-doc/docd` (the npm package name) is explicitly allowed.
 import { readFileSync } from "node:fs";
-import { execSync } from "node:child_process";
 
 const FILES = ["README.md", "docs/install.md", "docs/architecture.md"];
 // Patterns that indicate the OLD storage model or stale repo framing.
