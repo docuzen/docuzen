@@ -57,27 +57,32 @@ docuzen doctor
 docuzen update
 ```
 
-`docuzen update` is currently a placeholder for linked checkouts; packaged release
-updates will use npm/GitHub Releases later.
+In a linked checkout, `docuzen update` only prints update instructions; the
+packaged-app `docuzen` CLI (see Packaged App below) performs real release updates.
 
 For full setup, model configuration, build commands, and troubleshooting, see
 [`docs/install.md`](docs/install.md).
 
 ## Packaged App (macOS)
 
-Download the `.dmg` for your architecture from
-[GitHub Releases](https://github.com/docuzen/docuzen/releases), copy
-`docuzen.app` to `/Applications`, then clear the quarantine flag — builds are
-unsigned until code signing lands, and macOS 15+ Gatekeeper reports unsigned
-downloads as "damaged":
+Install (Apple Silicon or Intel — the script picks the right build, verifies
+its checksum, and installs to /Applications):
 
 ```bash
-xattr -cr /Applications/docuzen.app
+curl -fsSL https://raw.githubusercontent.com/docuzen/docuzen/main/install.sh | sh
 ```
 
-(On macOS 14 and earlier, right-click → Open also works.) On first launch the
-app asks you to pick an agent harness, then open documents with
-`File -> Open...` (`Cmd+O`).
+This also installs a `docuzen` command:
+
+- `docuzen` — launch the app (`docuzen open ./file.md` opens a document)
+- `docuzen update` — upgrade to the latest release
+- `docuzen uninstall` — remove the app (prompts before deleting `~/.docuzen`)
+- `docuzen doctor` — check the install and configured harness
+
+Builds are unsigned until code signing lands; the installer clears the
+macOS 15+ Gatekeeper quarantine for you. Prefer a manual download? Grab a
+`.dmg` from [Releases](https://github.com/docuzen/docuzen/releases) and run
+`xattr -cr /Applications/docuzen.app` after copying it in.
 
 ## What You Can Do
 
@@ -136,9 +141,8 @@ cd apps/desktop && npm run tauri build
 - The development launcher always opens the bundled sample document first. Use
   `File -> Open...` after launch for your own docs.
 - `tauri build` produces a self-contained app (the docd sidecar ships inside it
-  with a pinned Node runtime), but artifacts are not yet signed, notarized, or
-  published — treat packaged builds as local builds until the release pipeline
-  exists.
+  with a pinned Node runtime); release artifacts are published to GitHub
+  Releases but remain unsigned until code signing lands.
 - Live agent use depends on pi and `~/.pi/agent/models.json`; a missing default
   model causes the sidecar to fail fast when `LLM_API_KEY` is set.
 - Web search defaults to DuckDuckGo's Instant Answer API, which is keyless but

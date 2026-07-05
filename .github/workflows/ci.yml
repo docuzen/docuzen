@@ -19,3 +19,14 @@ jobs:
           cache: npm
       - run: npm ci
       - run: npm test
+
+  installer:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - name: shellcheck
+        run: shellcheck install.sh installer/docuzen installer/test/hermetic.sh installer/test/bootstrap.sh
+      - name: hermetic install/verify/uninstall test
+        run: bash installer/test/hermetic.sh
+      - name: install.sh OS-guard test
+        run: bash installer/test/bootstrap.sh
