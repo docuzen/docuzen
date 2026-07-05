@@ -1,7 +1,7 @@
 # docuzen Installation and Usage
 
 This guide covers the practical setup for running docuzen from the
-`ai-native-doc` repository.
+`docuzen` repository.
 
 ## Install (packaged app)
 
@@ -98,8 +98,8 @@ discussion is disabled.
 ## Clone and Install
 
 ```bash
-git clone <repo-url> ai-native-doc
-cd ai-native-doc
+git clone <repo-url> docuzen
+cd docuzen
 npm install
 npm run build
 npm link
@@ -266,19 +266,21 @@ right-click → Open With → docuzen — docuzen never takes over the default
 handler for `.md`/`.html`. Both work whether the app is already running or
 gets launched by the open.
 
-For Markdown, docuzen may add a small `had:` frontmatter pointer and stores
-review state in a sibling directory named like `.your-file.md.had/`.
+For Markdown, docuzen stores review state under
+`<repo-root>/.docuzen/<path-to-doc>.had/` (or, for a document not inside a git
+repo, `<doc-dir>/.docuzen/<basename>.had/`), located by `resolveHadDir` — state
+is never written into the document itself.
 
-For HTML, docuzen leaves the HTML document itself free of YAML/frontmatter and
-finds its state by naming convention, for example `.your-file.html.had/`.
+For HTML, docuzen likewise leaves the document untouched and locates its state
+via `resolveHadDir(docPath)` under the nearest `.docuzen/` root.
 
 Common actions:
 
 - `File -> Open...` (`Cmd/Ctrl+O`) opens Markdown, HTML, or `.hadz`.
 - `File -> Save` (`Cmd/Ctrl+S`) saves the current document or restores a chosen
   version.
-- `File -> Export .hadz...` (`Cmd/Ctrl+Shift+E`) exports the document and its
-  `.had` sidecar.
+- `File -> Export .hadz...` (`Cmd/Ctrl+Shift+E`) exports the document together
+  with its `.docuzen/` review state.
 - `File -> Resolve [[ ]]` (`Cmd/Ctrl+Shift+D`) asks the agent to resolve inline
   directive markers.
 - `File -> Settings...` (`Cmd/Ctrl+,`) configures the current document.
@@ -287,14 +289,14 @@ Common actions:
 
 ## Per-Document Settings
 
-Settings are stored in the document's `.had/settings.json` and travel with a
-`.hadz` export.
+Settings are stored in `settings.json` inside the document's `.docuzen/`
+review-state directory and travel with a `.hadz` export.
 
 Available settings:
 
 - **Default model.** Uses a `provider/modelId` key from `~/.pi/agent/models.json`.
 - **Agent tool scope.** `folder` limits file tools to the document folder and
-  `.had` sidecar; `repo` walks up to the nearest `.git` root.
+  its `.docuzen/` review state; `repo` walks up to the nearest `.git` root.
 - **Edit mode.** `propose` is the default and asks the agent to propose a diff
   that you approve/reject. `direct` allows the agent to edit the document file
   directly and snapshots before/after.
@@ -312,7 +314,7 @@ Agent web search is enabled per document by default:
 - `tavily` uses Tavily Search and requires `TAVILY_API_KEY`.
 
 Keys are read from the sidecar process environment and are not stored in the
-document's `.had` state.
+document's `.docuzen/` review state.
 
 If you change Brave/Tavily environment variables while the app is running,
 restart `tauri dev` so the sidecar sees the new environment.
@@ -549,12 +551,11 @@ For HTML documents, click `Edit`, make changes, click `Done`, then use
 `File -> Save`. The HTML body is serialized from the iframe only when saving or
 switching tabs.
 
-### `.had` state looks wrong
+### Review state looks wrong
 
-Each document has its own sibling `.had` sidecar directory. For example,
-`plan.md` stores review state in `.plan.md.had/`. Export a `.hadz` bundle when
-you want to move a document with its annotations, threads, settings, and
-versions.
+Each document's review state lives under the nearest `.docuzen/` root at
+`<relpath>.had/`. Export a `.hadz` bundle when you want to move a document
+between machines with its annotations, threads, settings, and versions.
 
 ## Current Limitations
 
