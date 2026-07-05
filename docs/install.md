@@ -3,6 +3,25 @@
 This guide covers the practical setup for running docuzen from the
 `ai-native-doc` repository.
 
+## Install (packaged app)
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/docuzen/docuzen/main/install.sh | sh
+```
+
+Detects your architecture, downloads the latest release's `.app.tar.gz`,
+verifies it against `SHA256SUMS.txt`, installs to `/Applications`, clears the
+Gatekeeper quarantine, and installs a `docuzen` CLI (`open` / `update` /
+`uninstall` / `doctor` / `version`). The CLI goes to `/usr/local/bin` if
+writable, else `~/.local/bin` (a PATH hint is printed if needed). No `sudo`.
+
+`docuzen update` re-runs the same fetch-verify-install. `docuzen uninstall`
+removes the app and CLI and asks before deleting `~/.docuzen` (config, logs,
+models); `docuzen uninstall --purge` removes that too.
+
+The rest of this guide covers the developer flow: running docuzen from a
+clone of this repository.
+
 ## Prerequisites
 
 docuzen needs Node.js, the Rust toolchain, and Tauri v2's native system
@@ -400,8 +419,12 @@ What still needs to happen before those flows are production-ready:
 3. Build signed/notarized macOS `.app`/`.dmg` artifacts via CI, with checksum
    verification of the fetched sidecar runtime.
 4. Make `docuzen update` check npm/GitHub Releases and update the CLI/app.
-5. Add an install script that detects platform, downloads the right artifact, and
-   runs `docuzen doctor`.
+5. ~~Add an install script that detects platform, downloads the right
+   artifact, and runs `docuzen doctor`.~~
+   Done: `install.sh` bootstraps the `docuzen` CLI, which downloads,
+   checksum-verifies, and installs the right artifact (see
+   [Install (packaged app)](#install-packaged-app) above); run
+   `docuzen doctor` after install to check the configured harness.
 
 Until then, use the local-link flow:
 
@@ -545,6 +568,7 @@ versions.
 - Markdown has the richest editing path. HTML is preserved and annotatable, with
   editing behind the `Edit` toggle, but HTML-specific edge cases are still newer
   than the Markdown flow.
-- Packaged builds are self-contained (bundled sidecar, first-run setup), but
-  artifacts are not yet signed, notarized, or published; the release pipeline
-  and one-line installer are still to come.
+- Packaged builds are self-contained (bundled sidecar, first-run setup) and
+  published via the tag-driven release pipeline, but artifacts are unsigned
+  until code signing lands; the installer clears the Gatekeeper quarantine
+  for you.
