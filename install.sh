@@ -20,7 +20,10 @@ chmod +x "$BINDIR/docuzen"
 
 case ":$PATH:" in
   *":$BINDIR:"*) ;;
-  *) printf 'Note: add %s to your PATH:\n  export PATH="%s:$PATH"\n' "$BINDIR" "$BINDIR" ;;
+  *)
+    # $PATH is intentionally literal so the user's shell expands it at paste time.
+    # shellcheck disable=SC2016
+    printf 'Note: add %s to your PATH:\n  export PATH="%s:$PATH"\n' "$BINDIR" "$BINDIR" ;;
 esac
 
 exec "$BINDIR/docuzen" update
