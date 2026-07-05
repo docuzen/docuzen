@@ -84,8 +84,47 @@ cmd_version() {
   [ -n "$lat" ] && printf 'latest:    %s\n' "$lat" || printf 'latest:    (unavailable)\n'
 }
 
+cmd_open() { open -a docuzen "$@"; }
+
+cmd_doctor() {
+  arch=$(detect_arch)
+  cur=$(installed_version)
+  printf 'arch: %s\n' "$arch"
+  [ -n "$cur" ] && printf 'app:  %s (%s)\n' "$APP" "$cur" || printf 'app:  not installed\n'
+  cfg="${DOCUZEN_CONFIG_DIR:-$HOME/.docuzen}/config.toml"
+  if [ -f "$cfg" ] && grep -q '^\s*default\s*=' "$cfg" 2>/dev/null; then
+    printf 'harness: configured (%s)\n' "$cfg"
+  else
+    printf 'harness: not configured — first launch will prompt\n'
+  fi
+}
+
+cmd_uninstall() {
+  purge=no
+  [ "${1:-}" = "--purge" ] && purge=yes
+  rm -rf "$APP"
+  data="${DOCUZEN_CONFIG_DIR:-$HOME/.docuzen}"
+  if [ "$purge" = yes ]; then
+    rm -rf "$data"
+    printf 'removed docuzen and %s\n' "$data"
+  else
+    if [ -d "$data" ]; then
+      printf 'Remove your docuzen data at %s too? [y/N] ' "$data"
+      read -r ans 2>/dev/null || ans=n
+      case "$ans" in [yY]*) rm -rf "$data"; printf 'removed %s\n' "$data" ;;
+                     *) printf 'kept %s\n' "$data" ;; esac
+    fi
+  fi
+  # remove the CLI itself last (it is $0)
+  rm -f "$0" 2>/dev/null || true
+  printf 'docuzen uninstalled\n'
+}
+
 case "${1:-open}" in
-  update) resolve_and_install ;;
-  version) cmd_version ;;
-  *) die "unknown command: ${1:-}" ;;   # open/doctor/uninstall added in Task 2
+  update)    resolve_and_install ;;
+  version)   cmd_version ;;
+  open)      shift 2>/dev/null || true; cmd_open "$@" ;;
+  doctor)    cmd_doctor ;;
+  uninstall) shift 2>/dev/null || true; cmd_uninstall "$@" ;;
+  *) die "unknown command: $1 (use: open|update|uninstall|doctor|version)" ;;
 esac

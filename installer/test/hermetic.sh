@@ -53,4 +53,23 @@ if run update >/dev/null 2>&1; then echo "FAIL: corrupt tarball installed"; exit
 [ -e "$appdir/docuzen.app" ] && { echo "FAIL: app installed despite bad checksum"; exit 1; }
 echo "ok: checksum mismatch blocks install"
 
+# --- 4. reinstall clean, then uninstall keeps ~/.docuzen without --purge ---
+# restore an untampered tarball + its checksum (case 3 corrupted it)
+tar -czf "$rel/$tarball" -C "$stage" docuzen.app
+( cd "$rel" && shasum -a 256 "$tarball" > SHA256SUMS.txt )
+fresh_cli                                  # uninstall will delete the CLI copy
+run update >/dev/null
+home="$work/home"; mkdir -p "$home/.docuzen"; echo x > "$home/.docuzen/config.toml"
+HOME="$home" run uninstall < /dev/null     # no tty -> default "no" on the ~/.docuzen prompt
+[ -e "$appdir/docuzen.app" ] && { echo "FAIL: uninstall left the app"; exit 1; }
+[ -f "$home/.docuzen/config.toml" ] || { echo "FAIL: uninstall removed ~/.docuzen without --purge"; exit 1; }
+echo "ok: uninstall removes app, keeps ~/.docuzen"
+
+# --- 5. --purge also removes ~/.docuzen ---
+fresh_cli                                  # re-copy: case 4's uninstall deleted it
+run update >/dev/null
+HOME="$home" run uninstall --purge
+[ -e "$home/.docuzen" ] && { echo "FAIL: --purge kept ~/.docuzen"; exit 1; }
+echo "ok: uninstall --purge removes ~/.docuzen"
+
 echo "ALL HERMETIC TESTS PASSED"
