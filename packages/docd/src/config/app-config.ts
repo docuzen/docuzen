@@ -1,5 +1,5 @@
 // App-level configuration at ~/.docuzen/config.toml (per-document settings
-// live in the doc's .had sidecar; this file holds machine-wide defaults).
+// live under the document's .docuzen/ store; this file holds machine-wide defaults).
 // Reading is total: a missing or malformed file is "unconfigured", so the
 // sidecar can never crash-loop on user-edited config.
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";

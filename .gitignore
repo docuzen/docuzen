@@ -1,8 +1,8 @@
 node_modules/
 packages/*/dist/
 
-# generated HAD sidecar state + export bundles for dev sample docs
-apps/desktop/sample/.*.had/
+# export bundles + unpack dirs generated for dev sample docs (review state
+# itself lives in <repo-root>/.docuzen/, hidden globally — never ignore it here)
 apps/desktop/sample/*.hadz
 apps/desktop/sample/*.unpacked/
 

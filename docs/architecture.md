@@ -1,9 +1,6 @@
----
-had: .architecture.md.had/
----
 # Docuzen Architecture
 
-Docuzen is a document-review desktop app: a **Tauri/WKWebView frontend** (also runs in a plain browser during development) talking over one WebSocket to a **Node sidecar (`docd`)** that owns all document state, agent orchestration, and LLM harnesses. Review state lives in a `.had/` directory beside each document; portable bundles use `.hadz`.
+Docuzen is a document-review desktop app: a **Tauri/WKWebView frontend** (also runs in a plain browser during development) talking over one WebSocket to a **Node sidecar (`docd`)** that owns all document state, agent orchestration, and LLM harnesses. Review state lives in a hidden `.docuzen/` directory at the repo root (`.docuzen/<relpath>.had/`; next to the document when it isn't in a git repo) — the document itself is never written except by explicit edit actions, and `.docuzen/` stays out of `git status` via the user's global git excludes file. Portable bundles use `.hadz`.
 
 ## System overview
 
@@ -27,7 +24,7 @@ flowchart TB
     handler["rpc/handler.ts<br/>pure dispatch: paramsFor + tokenSink,<br/>typed case-by-case from RpcSchema"]
     protocol["protocol/<br/>RpcSchema (32 methods) + domain-type re-exports<br/>— the ONE wire contract both sides compile against"]
     orch["orchestrator/<br/>Orchestrator: runTurn / runAgentStep engine,<br/>buildContext, transition() status writer,<br/>withEditSnapshot, proposal persist/approve (idempotent),<br/>reconcile-on-open, diffToHunks, thread-tree"]
-    had["had/<br/>on-disk .had store: doc-store, annotations,<br/>thread, versions, proposals, settings, manifest,<br/>pointer, bundle (.hadz), comment, doc-format"]
+    had["had/<br/>on-disk .docuzen review store: doc-store, annotations,<br/>thread, versions, proposals, settings, manifest,<br/>resolve, hide, bundle (.hadz), comment, doc-format"]
     taskdb["state/task-db.ts<br/>SQLite task rows<br/>(status + errorText)"]
     agent["agent/<br/>harness-registry, runner-base, prompt-sections,<br/>tool-policy, mcp + mcp-bridge,<br/>html-validation, web-search, model-registry"]
     pi["pi-runner<br/>in-process SDK sessions;<br/>tools: propose_edit, add_review_finding,<br/>validate_html, web_search, mcp proxy"]
@@ -38,7 +35,7 @@ flowchart TB
   subgraph external["external"]
     llm["LLM API<br/>(pi via litellm etc.)"]
     codexcli["codex CLI<br/>(subprocess)"]
-    disk["document + .had/ sidecar dir<br/>(annotations, threads, versions,<br/>proposals, settings, state.db)"]
+    disk["document + .docuzen/ review store<br/>(annotations, threads, versions,<br/>proposals, settings, state.db)"]
   end
 
   cli["packages/cli — docuzen launcher<br/>(spawns the server)"]

@@ -5,6 +5,7 @@ import { tmpdir } from "node:os";
 import { basename, join } from "node:path";
 import AdmZip from "adm-zip";
 import { exportHadz, importHadz } from "../../src/had/bundle.js";
+import { resolveHadDir } from "../../src/had/resolve.js";
 import { openDoc, saveDoc } from "../../src/had/doc-store.js";
 import { readManifest } from "../../src/had/manifest.js";
 import { addAnnotation, readAnnotations } from "../../src/had/annotations.js";
@@ -57,6 +58,15 @@ describe("exportHadz / importHadz round-trip", () => {
     try {
       const { docPath: importedDocPath } = await importHadz(hadzPath, destDir);
       expect(basename(importedDocPath)).toBe("plan.md");
+
+      // the imported state physically lands at the resolver's `.docuzen/` location
+      // (fresh dir, no .git -> <unpacked-dir>/.docuzen/<basename>.had), never as a
+      // legacy sibling sidecar
+      const importedHadDir = resolveHadDir(importedDocPath);
+      expect(importedHadDir).toBe(join(destDir, ".docuzen", "plan.md.had"));
+      expect(existsSync(importedHadDir)).toBe(true);
+      expect(existsSync(join(destDir, ".plan.md.had"))).toBe(false);
+      expect(existsSync(join(destDir, "plan.md.had"))).toBe(false);
 
       // the document itself survives verbatim, including its had: frontmatter pointer
       const originalDoc = await readFile(docPath, "utf8");

@@ -7,7 +7,6 @@ import { FakePiRunner } from "../../src/agent/fake-runner.js";
 import { TaskDB } from "../../src/state/task-db.js";
 import { hadPaths } from "../../src/had/paths.js";
 import {
-  ensurePointer,
   readAnnotations,
   readThread,
   listProposals,
@@ -23,7 +22,6 @@ beforeEach(async () => {
   dir = await mkdtemp(join(tmpdir(), "review-"));
   docPath = join(dir, "plan.md");
   await writeFile(docPath, DOC, "utf8");
-  await ensurePointer(docPath);
   db = new TaskDB(hadPaths(docPath).stateDb);
 });
 afterEach(async () => {

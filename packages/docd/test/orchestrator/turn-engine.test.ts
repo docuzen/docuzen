@@ -7,7 +7,6 @@ import { FakePiRunner } from "../../src/agent/fake-runner.js";
 import { TaskDB } from "../../src/state/task-db.js";
 import { hadPaths } from "../../src/had/paths.js";
 import {
-  ensurePointer,
   addAnnotation,
   createAnchor,
   readThread,
@@ -29,7 +28,6 @@ beforeEach(async () => {
   dir = await mkdtemp(join(tmpdir(), "turn-engine-"));
   docPath = join(dir, "plan.md");
   await writeFile(docPath, DOC, "utf8");
-  await ensurePointer(docPath);
   db = new TaskDB(hadPaths(docPath).stateDb);
   const start = DOC.indexOf("Redis");
   await addAnnotation(docPath, {

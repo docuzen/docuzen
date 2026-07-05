@@ -3,7 +3,7 @@ import { basename } from "node:path";
 import matter from "gray-matter";
 import { hadPaths } from "./paths.js";
 import { isHtmlDoc } from "./doc-format.js";
-import { ensurePointer } from "./pointer.js";
+import { ensureDocuzenHidden } from "./hide.js";
 import { readManifest, writeManifest, initManifest, contentHash } from "./manifest.js";
 import { readAnnotations } from "./annotations.js";
 import { readThread } from "./thread.js";
@@ -17,16 +17,15 @@ export interface OpenDocResult {
 }
 
 /**
- * Open a document: ensure its `.had` sidecar exists (pointer + manifest),
- * strip frontmatter for markdown display, and enrich each comment annotation
- * with its first turn's body and branch lineage (see openDoc case history —
- * the UI must not infer branches from matching anchor text).
+ * Open a document: ensure its sidecar manifest exists, strip frontmatter for
+ * markdown display, and enrich each comment annotation with its first turn's
+ * body and branch lineage (see openDoc case history — the UI must not infer
+ * branches from matching anchor text). Opening never mutates the document:
+ * the sidecar is located by the path resolver, not a frontmatter pointer.
  */
 export async function openDoc(docPath: string): Promise<OpenDocResult> {
+  ensureDocuzenHidden();
   const isHtml = isHtmlDoc(docPath);
-  // Markdown gets a `had:` frontmatter pointer; HTML must not be mutated
-  // (no YAML in HTML), so its .had sidecar is found by naming convention.
-  if (!isHtml) await ensurePointer(docPath);
   if ((await readManifest(docPath)) === null) {
     await writeManifest(docPath, await initManifest(docPath));
   }
@@ -65,8 +64,8 @@ export async function saveDoc(
   text: string,
   now: string,
 ): Promise<{ saved: boolean; version: string }> {
-  // HTML is written verbatim (no YAML frontmatter — its sidecar is found by
-  // naming convention); markdown preserves its frontmatter (incl. had pointer).
+  // HTML is written verbatim (no YAML frontmatter); markdown preserves any
+  // frontmatter the user put there themselves.
   let full: string;
   if (isHtmlDoc(docPath)) {
     full = text;

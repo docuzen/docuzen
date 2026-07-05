@@ -7,7 +7,6 @@ import { FakePiRunner } from "../../src/agent/fake-runner.js";
 import { TaskDB } from "../../src/state/task-db.js";
 import { hadPaths } from "../../src/had/paths.js";
 import {
-  ensurePointer,
   addAnnotation,
   addProposal,
   createAnchor,
@@ -32,7 +31,6 @@ beforeEach(async () => {
   dir = await mkdtemp(join(tmpdir(), "orch-"));
   docPath = join(dir, "plan.md");
   await writeFile(docPath, DOC, "utf8");
-  await ensurePointer(docPath);
   db = new TaskDB(hadPaths(docPath).stateDb);
 });
 afterEach(async () => {
@@ -917,7 +915,6 @@ describe("Orchestrator.resolveDirectives", () => {
 
   it("asks the agent to resolve [[ ]] directives and persists the proposal", async () => {
     await writeFile(docPath, "Keep this. [[ make it formal ]] End.\n", "utf8");
-    await ensurePointer(docPath);
     const runner = new FakePiRunner([
       {
         reply: "done",
@@ -946,7 +943,6 @@ describe("Orchestrator.resolveDirectives", () => {
 
   it("launches one task/thread per directive", async () => {
     await writeFile(docPath, "A [[ one ]] B [[ two ]] C\n", "utf8");
-    await ensurePointer(docPath);
     const runner = new FakePiRunner([
       { reply: "one done", proposal: { rationale: "one", hunks: [{ oldText: "[[ one ]]", newText: "" }] } },
       { reply: "two done", proposal: { rationale: "two", hunks: [{ oldText: "[[ two ]]", newText: "" }] } },
@@ -964,7 +960,6 @@ describe("Orchestrator.resolveDirectives", () => {
 
   it("swallows one directive's failure and continues the others; the no-text fallback never leaks into the returned summary", async () => {
     await writeFile(docPath, "A [[ boom ]] B [[ ok ]] C\n", "utf8");
-    await ensurePointer(docPath);
     const runner: AgentRunner = {
       async start(ctx) {
         if (ctx.anchorExact === "[[ boom ]]") throw new Error("agent exploded");
@@ -1069,7 +1064,6 @@ describe("Orchestrator context flags", () => {
     docPath = join(dir, "plan.html");
     const html = "<!doctype html><html><body><p>HTML body</p></body></html>";
     await writeFile(docPath, html, "utf8");
-    await ensurePointer(docPath);
     db = new TaskDB(hadPaths(docPath).stateDb);
     await addAnnotation(docPath, {
       id: "c0001",
@@ -1092,7 +1086,6 @@ describe("Orchestrator context flags", () => {
     db.close();
     docPath = join(dir, "notes.txt");
     await writeFile(docPath, "Plain notes with anchor text.\n", "utf8");
-    await ensurePointer(docPath);
     db = new TaskDB(hadPaths(docPath).stateDb);
     await addAnnotation(docPath, {
       id: "c0001",
@@ -1478,7 +1471,6 @@ describe("Orchestrator proposals", () => {
 
   it("approve maps duplicate-text hunks to successive occurrences (matches the editor's forward scan)", async () => {
     await writeFile(docPath, "a foo b foo c\n", "utf8");
-    await ensurePointer(docPath);
     await addAnnotation(docPath, {
       id: "c0001",
       type: "comment",

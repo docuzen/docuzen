@@ -6,7 +6,6 @@ export * from "./annotations.js";
 export * from "./proposals.js";
 export * from "./thread.js";
 export * from "./versions.js";
-export * from "./pointer.js";
 export * from "./settings.js";
 export * from "./doc-store.js";
 export * from "./bundle.js";
