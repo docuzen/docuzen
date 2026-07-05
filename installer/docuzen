@@ -1,0 +1,91 @@
+#!/bin/sh
+# docuzen — install / launch / update / uninstall the docuzen macOS app.
+# All installer logic lives here; install.sh is only a bootstrap.
+set -eu
+
+REPO="docuzen/docuzen"
+APP_DIR="${DOCUZEN_APP_DIR:-/Applications}"
+APP="$APP_DIR/docuzen.app"
+RELEASES_API="${DOCUZEN_RELEASES_API:-https://api.github.com/repos/$REPO/releases/latest}"
+
+die() { printf 'docuzen: %s\n' "$1" >&2; exit 1; }
+
+detect_arch() {
+  case "$(uname -m)" in
+    arm64) echo arm64 ;;
+    x86_64) echo x64 ;;
+    *) die "unsupported architecture $(uname -m); docuzen ships arm64 and x64" ;;
+  esac
+}
+
+# Installed app version, or empty. Uses `defaults` on macOS (handles binary
+# plists); falls back to an XML-plist grep so the hermetic test works on Linux.
+installed_version() {
+  [ -e "$APP/Contents/Info.plist" ] || { echo ""; return; }
+  if command -v defaults >/dev/null 2>&1 &&
+     v=$(defaults read "$APP/Contents/Info" CFBundleShortVersionString 2>/dev/null); then
+    echo "$v"; return
+  fi
+  grep -A1 CFBundleShortVersionString "$APP/Contents/Info.plist" 2>/dev/null \
+    | sed -n 's/.*<string>\(.*\)<\/string>.*/\1/p' | head -1
+}
+
+# Extract the last double-quoted value from a "key": "value" JSON line — no jq.
+_json_last_quoted() { sed -E 's/.*"([^"]*)"[^"]*$/\1/'; }
+
+resolve_and_install() {
+  arch=$(detect_arch)
+  api=$(curl -fsSL "$RELEASES_API") || die "cannot reach the releases API"
+  tag=$(printf '%s\n' "$api" | grep -o '"tag_name":[^,]*' | head -1 | _json_last_quoted)
+  [ -n "$tag" ] || die "no published release found"
+  version=${tag#v}
+  if [ "$(installed_version)" = "$version" ]; then
+    printf 'docuzen %s is already the latest.\n' "$version"
+    return 0
+  fi
+  tar_url=$(printf '%s\n' "$api" | grep -oE '"browser_download_url": *"[^"]*-'"$arch"'\.app\.tar\.gz"' | head -1 | _json_last_quoted)
+  sums_url=$(printf '%s\n' "$api" | grep -oE '"browser_download_url": *"[^"]*SHA256SUMS\.txt"' | head -1 | _json_last_quoted)
+  [ -n "$tar_url" ] || die "no .app.tar.gz asset for $arch in the latest release"
+  [ -n "$sums_url" ] || die "no SHA256SUMS.txt in the latest release"
+
+  tmp=$(mktemp -d)
+  trap 'rm -rf "$tmp"' EXIT INT TERM
+  curl -fsSL "$tar_url" -o "$tmp/app.tar.gz" || die "download failed: $tar_url"
+  curl -fsSL "$sums_url" -o "$tmp/SHA256SUMS.txt" || die "checksum list download failed"
+
+  base=$(basename "$tar_url")
+  want=$(grep " $base\$" "$tmp/SHA256SUMS.txt" | awk '{print $1}' | head -1)
+  [ -n "$want" ] || die "no checksum listed for $base"
+  got=$(shasum -a 256 "$tmp/app.tar.gz" | awk '{print $1}')
+  if [ "$want" != "$got" ]; then
+    die "checksum mismatch for $base
+  expected $want
+  actual   $got"
+  fi
+
+  mkdir -p "$APP_DIR"
+  [ -w "$APP_DIR" ] || die "$APP_DIR is not writable"
+  rm -rf "$APP"
+  tar -xzf "$tmp/app.tar.gz" -C "$APP_DIR" || die "extract failed"
+  xattr -cr "$APP" 2>/dev/null || true   # clear Gatekeeper quarantine (macOS)
+  printf 'docuzen %s installed to %s\n' "$version" "$APP"
+}
+
+latest_version() {   # best-effort; empty on any failure (offline etc.)
+  api=$(curl -fsSL "$RELEASES_API" 2>/dev/null) || { echo ""; return; }
+  tag=$(printf '%s\n' "$api" | grep -o '"tag_name":[^,]*' | head -1 | _json_last_quoted)
+  echo "${tag#v}"
+}
+
+cmd_version() {
+  cur=$(installed_version)
+  [ -n "$cur" ] && printf 'installed: %s\n' "$cur" || printf 'installed: (none)\n'
+  lat=$(latest_version)
+  [ -n "$lat" ] && printf 'latest:    %s\n' "$lat" || printf 'latest:    (unavailable)\n'
+}
+
+case "${1:-open}" in
+  update) resolve_and_install ;;
+  version) cmd_version ;;
+  *) die "unknown command: ${1:-}" ;;   # open/doctor/uninstall added in Task 2
+esac
