@@ -1,26 +1,10 @@
-# docuzen Installation and Usage
+# docuzen — Developer Setup
 
-This guide covers the practical setup for running docuzen from the
-`docuzen` repository.
-
-## Install (packaged app)
-
-```bash
-curl -fsSL https://raw.githubusercontent.com/docuzen/docuzen/main/install.sh | sh
-```
-
-Detects your architecture, downloads the latest release's `.app.tar.gz`,
-verifies it against `SHA256SUMS.txt`, installs to `/Applications`, clears the
-Gatekeeper quarantine, and installs a `docuzen` CLI (`open` / `update` /
-`uninstall` / `doctor` / `version`). The CLI goes to `/usr/local/bin` if
-writable, else `~/.local/bin` (a PATH hint is printed if needed). No `sudo`.
-
-`docuzen update` re-runs the same fetch-verify-install. `docuzen uninstall`
-removes the app and CLI and asks before deleting `~/.docuzen` (config, logs,
-models); `docuzen uninstall --purge` removes that too.
-
-The rest of this guide covers the developer flow: running docuzen from a
-clone of this repository.
+This guide covers running docuzen from source and configuring it. For what
+docuzen is, see the [README](../README.md); for the packaged macOS app and the
+`docuzen` CLI (`open` / `update` / `uninstall` / `doctor`), see the README's
+[Install (macOS)](../README.md#install-macos) section. The rest of this guide
+covers running docuzen from a clone of this repository.
 
 ## Prerequisites
 
@@ -124,11 +108,12 @@ Current CLI status:
 
 - `docuzen` / `docuzen open <file>` launches the Tauri desktop app from this checkout.
 - `docuzen doctor` checks the local checkout, Node, Cargo, and common agent env.
-- `docuzen update` prints the linked-checkout update steps today. Packaged releases
-  will later teach it to check npm/GitHub Releases and replace installed artifacts.
+- `docuzen update` prints the linked-checkout update steps (it does not
+  self-update a linked checkout).
 
-The CLI is currently a developer/local-link CLI. It is not yet a published npm
-package or production installer.
+This linked CLI is the developer flow and is not published to npm. The packaged
+app installs its own `docuzen` CLI — see the
+[README](../README.md#install-macos).
 
 ## Model and Agent Configuration
 
@@ -250,42 +235,8 @@ When launched through the CLI, `DOCUZEN_DOC_PATH=<file>` overrides the sample
 document path before `tauri dev` starts.
 
 The sample document opens automatically. Use `File -> Open...` (`Cmd/Ctrl+O`)
-to open your own document.
-
-## Opening and Working with Documents
-
-Supported input formats:
-
-- Markdown: `.md`, `.markdown`
-- HTML: `.html`, `.htm`
-- docuzen bundles: `.hadz`
-
-In the packaged macOS app, `.hadz` bundles open with a double-click
-(docuzen is their default handler), and Markdown/HTML files open via
-right-click → Open With → docuzen — docuzen never takes over the default
-handler for `.md`/`.html`. Both work whether the app is already running or
-gets launched by the open.
-
-For Markdown, docuzen stores review state under
-`<repo-root>/.docuzen/<path-to-doc>.had/` (or, for a document not inside a git
-repo, `<doc-dir>/.docuzen/<basename>.had/`), located by `resolveHadDir` — state
-is never written into the document itself.
-
-For HTML, docuzen likewise leaves the document untouched and locates its state
-via `resolveHadDir(docPath)` under the nearest `.docuzen/` root.
-
-Common actions:
-
-- `File -> Open...` (`Cmd/Ctrl+O`) opens Markdown, HTML, or `.hadz`.
-- `File -> Save` (`Cmd/Ctrl+S`) saves the current document or restores a chosen
-  version.
-- `File -> Export .hadz...` (`Cmd/Ctrl+Shift+E`) exports the document together
-  with its `.docuzen/` review state.
-- `File -> Resolve [[ ]]` (`Cmd/Ctrl+Shift+D`) asks the agent to resolve inline
-  directive markers.
-- `File -> Settings...` (`Cmd/Ctrl+,`) configures the current document.
-- `View -> Keyboard Shortcuts` (`Cmd/Ctrl+Shift+H`) shows shortcut help.
-- `View -> Reload Window` (`Cmd/Ctrl+R`) reloads the webview.
+to open your own document — Markdown (`.md`, `.markdown`), HTML (`.html`,
+`.htm`), or docuzen bundles (`.hadz`).
 
 ## Per-Document Settings
 
@@ -362,80 +313,6 @@ On first launch the packaged app asks you to pick an agent harness (Pi or
 Codex CLI) and stores the choice in `~/.docuzen/config.toml`; until then it
 runs offline. `LLM_API_KEY` remains a dev-mode override that forces the live
 Pi runner regardless of config.
-
-## Releasing
-
-Releases are tag-driven from `main` on `github.com/docuzen/docuzen`:
-
-1. Bump `version` in `apps/desktop/src-tauri/tauri.conf.json`.
-2. Commit, then tag and push:
-
-   ```bash
-   git tag vX.Y.Z        # must equal the tauri.conf.json version
-   git push && git push --tags
-   ```
-
-3. CI verifies the tag/version match, runs every suite, builds both macOS
-   architectures (arm64 natively, x64 cross-compiled) with the
-   checksum-verified sidecar runtime, smoke-tests each artifact, and
-   publishes a GitHub Release with `.dmg`, `.app.tar.gz`, and
-   `SHA256SUMS.txt`.
-
-If a tag push does not start a run (a rare GitHub event race), trigger it
-manually: Actions → release → Run workflow, selecting the tag as the ref.
-
-Artifacts are unsigned until Apple credentials exist. On macOS 15+,
-Gatekeeper reports unsigned downloads as "damaged" — clear the quarantine
-flag after installing (`xattr -cr /Applications/docuzen.app`); on macOS 14
-and earlier, right-click → Open suffices. To enable signing + notarization, add the
-`APPLE_CERTIFICATE`, `APPLE_CERTIFICATE_PASSWORD`, `APPLE_SIGNING_IDENTITY`,
-`APPLE_ID`, `APPLE_PASSWORD`, and `APPLE_TEAM_ID` secrets to the repo — the
-same workflow signs on the next tag, no changes required. Configure all six together — a partial set can leave notarization credentials as empty strings, which the pipeline treats as misconfiguration.
-
-Sidecar runtime pins (Node version, ABI, SHA-256 checksums) live in
-`packages/docd/sidecar.json`; bumping them requires updating the pinned
-checksums from official sources.
-
-## Installer and Update Roadmap
-
-The desired end-user flow is:
-
-```bash
-npm install -g docuzen
-docuzen open ./document.md
-```
-
-and eventually:
-
-```bash
-curl -fsSL https://docuzen.dev/install.sh | sh
-docuzen update
-```
-
-What still needs to happen before those flows are production-ready:
-
-1. Publish a public `docuzen` CLI package to npm.
-2. ~~Package `docd` as a production sidecar for Tauri instead of `tsx watch`.~~
-   Done: `tauri build` bundles a pinned Node runtime plus an esbuild-bundled
-   docd under `Resources/sidecar/` (see Build and Package above).
-3. Build signed/notarized macOS `.app`/`.dmg` artifacts via CI, with checksum
-   verification of the fetched sidecar runtime.
-4. Make `docuzen update` check npm/GitHub Releases and update the CLI/app.
-5. ~~Add an install script that detects platform, downloads the right
-   artifact, and runs `docuzen doctor`.~~
-   Done: `install.sh` bootstraps the `docuzen` CLI, which downloads,
-   checksum-verifies, and installs the right artifact (see
-   [Install (packaged app)](#install-packaged-app) above); run
-   `docuzen doctor` after install to check the configured harness.
-
-Until then, use the local-link flow:
-
-```bash
-npm install
-npm run build
-npm link
-docuzen
-```
 
 ## Lightweight Verification
 
@@ -556,20 +433,3 @@ switching tabs.
 Each document's review state lives under the nearest `.docuzen/` root at
 `<relpath>.had/`. Export a `.hadz` bundle when you want to move a document
 between machines with its annotations, threads, settings, and versions.
-
-## Current Limitations
-
-- The dev launcher opens the bundled sample document first; choose your real
-  document from `File -> Open...`.
-- The sidecar binds to localhost and is intended for local use.
-- Agent sessions are in memory. The sidecar can reconcile persisted thread state
-  after a restart, but live in-flight model sessions do not survive process exit.
-- Very large documents are budgeted before being placed into the agent prompt;
-  the agent can use file tools for more context when scoped appropriately.
-- Markdown has the richest editing path. HTML is preserved and annotatable, with
-  editing behind the `Edit` toggle, but HTML-specific edge cases are still newer
-  than the Markdown flow.
-- Packaged builds are self-contained (bundled sidecar, first-run setup) and
-  published via the tag-driven release pipeline, but artifacts are unsigned
-  until code signing lands; the installer clears the Gatekeeper quarantine
-  for you.
