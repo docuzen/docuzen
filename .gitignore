@@ -1,6 +1,9 @@
 node_modules/
 packages/*/dist/
 
+# macOS Finder metadata
+.DS_Store
+
 # export bundles + unpack dirs generated for dev sample docs (review state
 # itself lives in <repo-root>/.docuzen/, hidden globally — never ignore it here)
 apps/desktop/sample/*.hadz
