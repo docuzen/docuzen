@@ -1,6 +1,7 @@
 {
   "name": "ai-native-doc",
   "private": true,
+  "license": "Apache-2.0",
   "type": "module",
   "bin": {
     "docuzen": "./packages/cli/dist/cli.js"
