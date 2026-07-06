@@ -65,3 +65,7 @@ docuzen is a Tauri desktop app (`apps/desktop`) backed by a Node sidecar, `docd`
 - Release builds are self-contained (the `docd` sidecar ships inside the app) but remain unsigned until code signing lands.
 - Live agent use needs a configured harness (Pi or Codex CLI); without one, discussion is disabled but everything else works.
 - Web search defaults to DuckDuckGo's keyless Instant Answer API; Brave and Tavily need API keys.
+
+## License
+
+Copyright 2026 docuzen. Licensed under the [Apache License, Version 2.0](LICENSE).

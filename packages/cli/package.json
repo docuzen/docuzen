@@ -3,6 +3,7 @@
   "version": "0.1.0",
   "type": "module",
   "private": false,
+  "license": "Apache-2.0",
   "bin": {
     "docuzen": "./dist/cli.js"
   },
