@@ -1,10 +1,10 @@
 # docuzen — Developer Setup
 
 This guide covers running docuzen from source and configuring it. For what
-docuzen is, see the [README](../README.md); for the packaged macOS app and the
-`docuzen` CLI (`open` / `update` / `uninstall` / `doctor`), see the README's
-[Install (macOS)](../README.md#install-macos) section. The rest of this guide
-covers running docuzen from a clone of this repository.
+docuzen is, see the [README](../README.md); for the packaged macOS app and its
+`docuzen` CLI, see the README's [Install (macOS)](../README.md#install-macos)
+section. The rest of this guide covers running docuzen from a clone of this
+repository.
 
 ## Prerequisites
 
