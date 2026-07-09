@@ -2,7 +2,7 @@ import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import { mkdtemp, rm, readFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { listModels, saveModels } from "../../src/agent/model-registry.js";
+import { listModels, readModelWithKey, saveModels } from "../../src/agent/model-registry.js";
 
 let dir: string;
 let p: string;
@@ -23,7 +23,7 @@ describe("model-registry", () => {
         provider: "litellm",
         modelId: "gpt-5.5",
         baseUrl: "https://h/v1",
-        reasoningEffort: "medium",
+        reasoningEffort: "xhigh",
         apiKey: "sk-secret",
       },
     ]);
@@ -35,7 +35,7 @@ describe("model-registry", () => {
       provider: "litellm",
       modelId: "gpt-5.5",
       baseUrl: "https://h/v1",
-      reasoningEffort: "medium",
+      reasoningEffort: "xhigh",
       hasKey: true,
     });
     expect((list[0] as unknown as Record<string, unknown>).apiKey).toBeUndefined();
@@ -44,6 +44,29 @@ describe("model-registry", () => {
     expect(raw.providers.litellm.apiKey).toBe("sk-secret");
     expect(raw.providers.litellm.api).toBe("openai-completions");
     expect(raw.providers.litellm.models[0].id).toBe("gpt-5.5");
+  });
+
+  it("can read one model with its key for server-side runner launch only", async () => {
+    await saveModels(p, [
+      {
+        key: "docuzen/gpt-5.5",
+        name: "GPT-5.5",
+        provider: "docuzen",
+        modelId: "gpt-5.5",
+        baseUrl: "https://h/v1",
+        reasoningEffort: "xhigh",
+        apiKey: "sk-secret",
+      },
+    ]);
+    await expect(readModelWithKey(p, "docuzen/gpt-5.5")).resolves.toMatchObject({
+      key: "docuzen/gpt-5.5",
+      modelId: "gpt-5.5",
+      baseUrl: "https://h/v1",
+      reasoningEffort: "xhigh",
+      apiKey: "sk-secret",
+      hasKey: true,
+    });
+    await expect(readModelWithKey(p, "missing/gpt-5.5")).resolves.toBeUndefined();
   });
 
   it("supports multiple providers + models", async () => {

@@ -17,7 +17,8 @@ async function main(): Promise<void> {
   const port = portArg !== -1 ? Number(process.argv[portArg + 1]) : 0;
 
   const config = readAppConfig();
-  const models = await listModels(join(homedir(), ".pi", "agent", "models.json")).catch(() => []);
+  const modelsPath = join(homedir(), ".pi", "agent", "models.json");
+  const models = await listModels(modelsPath).catch(() => []);
   const sel = selectRunner({ env: process.env, config, models });
 
   let runner: AgentRunner;
@@ -36,15 +37,16 @@ async function main(): Promise<void> {
     runner = new FakePiRunner([]);
     registry.register({
       id: "pi",
-      label: "Pi (offline fake)",
+      label: "Pi",
       runner,
       capabilities: PI_CAPABILITIES,
       available: false,
+      unavailableReason: sel.reason,
     });
     console.log(`docd: Discuss disabled (FakePiRunner) — ${sel.reason} [config: ${appConfigPath()}]`);
   }
 
-  const codexHarness = createCodexHarness(config.codex ? { config: config.codex } : undefined);
+  const codexHarness = createCodexHarness({ config: { ...config.codex, modelsPath } });
   registry.register(codexHarness);
   console.log(
     codexHarness.available

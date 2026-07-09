@@ -31,11 +31,25 @@ describe("selectRunner", () => {
       models: [keyless],
     });
     expect(s.live).toBe(false);
+    expect(s.reason).toBe("pi model litellm/gpt-5.5 has no usable entry in models.json");
+  });
+
+  test("pi harness without a configured model explains the missing pi model", () => {
+    const s = selectRunner({
+      env: {},
+      config: { harness: { default: "pi" } },
+      models: [gpt],
+    });
+    expect(s).toMatchObject({
+      live: false,
+      defaultHarness: "pi",
+      reason: "pi harness selected, but no pi model is configured",
+    });
   });
 
   test("codex harness: pi side stays offline but default harness is codex", () => {
     const s = selectRunner({ env: {}, config: { harness: { default: "codex" } }, models: [] });
-    expect(s).toMatchObject({ live: false, defaultHarness: "codex" });
+    expect(s).toMatchObject({ live: false, defaultHarness: "codex", reason: "codex harness selected; pi offline" });
   });
 
   test("unconfigured: offline with pi defaults", () => {

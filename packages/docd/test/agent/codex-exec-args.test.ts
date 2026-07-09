@@ -29,6 +29,37 @@ describe("codexExecArgs", () => {
     expect(args).not.toContain("--search");
   });
 
+  it("passes Docuzen-managed provider config as codex -c overrides", () => {
+    const args = codexExecArgs({
+      workDir: "/w",
+      outputPath: "/tmp/out.txt",
+      configOverrides: {
+        model: "gpt-5.5",
+        model_provider: "docuzen",
+        "model_providers.docuzen.name": "Docuzen model",
+        "model_providers.docuzen.base_url": "https://llm.example/v1",
+        "model_providers.docuzen.env_key": "LLM_API_KEY",
+        model_reasoning_effort: "xhigh",
+      },
+    });
+    expect(args.slice(0, 13)).toEqual([
+      "exec",
+      "-c",
+      'model="gpt-5.5"',
+      "-c",
+      'model_provider="docuzen"',
+      "-c",
+      'model_providers.docuzen.name="Docuzen model"',
+      "-c",
+      'model_providers.docuzen.base_url="https://llm.example/v1"',
+      "-c",
+      'model_providers.docuzen.env_key="LLM_API_KEY"',
+      "-c",
+      'model_reasoning_effort="xhigh"',
+    ]);
+    expect(args).not.toContain("--model");
+  });
+
   it("skips codex's git-repo trust check for documents outside git repos", () => {
     const args = codexExecArgs({ workDir: "/tmp/docs", outputPath: "/tmp/out.txt" });
     expect(args).toContain("--skip-git-repo-check");

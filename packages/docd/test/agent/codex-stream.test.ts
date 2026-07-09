@@ -5,6 +5,7 @@ import { fileURLToPath } from "node:url";
 import { afterEach, describe, expect, it } from "vitest";
 import { CodexEventParser, CodexRunner, extractCodexText } from "../../src/agent/codex-runner.js";
 import type { AgentContext, AgentEvent } from "../../src/agent/types.js";
+import { saveModels } from "../../src/agent/model-registry.js";
 
 // Representative codex-cli 0.142.5 --json NDJSON: one command_execution item
 // (started + completed) followed by one agent_message. Used to test that the
@@ -289,6 +290,71 @@ describe("CodexRunner streaming (fake codex binary)", () => {
     const { turn } = await runner.start({ ...baseCtx, scopeDir: dir }, (e) => events.push(e));
     expect(turn.reply).toBe("final answer");
     expect(events).toEqual([{ type: "token", text: "final answer" }]);
+  });
+
+  it("launches selected Docuzen model rows as a Codex provider override with LLM_API_KEY", async () => {
+    dir = mkdtempSync(join(tmpdir(), "docuzen-codex-test-"));
+    const modelsPath = join(dir, "models.json");
+    await saveModels(modelsPath, [
+      {
+        key: "docuzen/gpt-5.5",
+        name: "GPT-5.5",
+        provider: "docuzen",
+        modelId: "gpt-5.5",
+        baseUrl: "https://llm.example/v1",
+        reasoningEffort: "xhigh",
+        apiKey: "sk-docuzen",
+      },
+    ]);
+    const script = join(dir, "fake-codex-env");
+    const argsPath = join(dir, "args.txt");
+    const envPath = join(dir, "env.txt");
+    writeFileSync(
+      script,
+      `#!/bin/sh
+out=""
+prev=""
+for a in "$@"; do
+  printf '%s\\n' "$a" >> ${JSON.stringify(argsPath)}
+  [ "$prev" = "--output-last-message" ] && out="$a"
+  prev="$a"
+done
+printf '%s' "$LLM_API_KEY" > ${JSON.stringify(envPath)}
+cat > /dev/null
+printf '{"type":"turn.completed","usage":{}}\\n'
+printf 'final answer' > "$out"
+`,
+    );
+    chmodSync(script, 0o755);
+
+    const runner = new CodexRunner({ command: script, modelsPath });
+    const { turn } = await runner.start({ ...baseCtx, scopeDir: dir, modelId: "docuzen/gpt-5.5" });
+    expect(turn.reply).toBe("final answer");
+    expect(readFileSync(envPath, "utf8")).toBe("sk-docuzen");
+    expect(readFileSync(argsPath, "utf8").split("\n").filter(Boolean)).toEqual([
+      "exec",
+      "-c",
+      'model="gpt-5.5"',
+      "-c",
+      'model_provider="docuzen"',
+      "-c",
+      'model_providers.docuzen.name="Docuzen model"',
+      "-c",
+      'model_providers.docuzen.base_url="https://llm.example/v1"',
+      "-c",
+      'model_providers.docuzen.env_key="LLM_API_KEY"',
+      "-c",
+      'model_reasoning_effort="xhigh"',
+      "--json",
+      "--sandbox",
+      "read-only",
+      "--skip-git-repo-check",
+      "--cd",
+      dir,
+      "--output-last-message",
+      expect.any(String),
+      "-",
+    ]);
   });
 
   it("cancel() stops emissions even though the child keeps writing to stdout afterward", async () => {

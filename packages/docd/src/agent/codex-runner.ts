@@ -7,6 +7,7 @@ import type { AgentContext, AgentRunner, AgentTurn, EditHunk, ProposedEdit, Toke
 import type { AgentHarness, HarnessCapabilities } from "./harness-registry.js";
 import { SessionCounter } from "./runner-base.js";
 import { historySection, standingInstructionsSection } from "./prompt-sections.js";
+import { readModelWithKey } from "./model-registry.js";
 
 /** codex's history/standing-instructions phrasing (see prompt-sections.ts for the pi divergence). */
 const CODEX_HISTORY_LABELS = { agent: "Agent", reviewer: "Reviewer" };
@@ -34,12 +35,19 @@ export interface CodexDetection {
 export interface CodexRunnerConfig {
   command?: string;
   model?: string;
+  modelsPath?: string;
   timeoutMs?: number;
 }
 
 interface LiveProcess {
   child: ChildProcessWithoutNullStreams;
   reject: (err: Error) => void;
+}
+
+interface CodexLaunchConfig {
+  env?: NodeJS.ProcessEnv;
+  configOverrides?: Record<string, string | undefined>;
+  model?: string;
 }
 
 export function detectCodexCli(command = process.env.CODEX_BIN ?? "codex"): CodexDetection {
@@ -146,10 +154,12 @@ export class CodexRunner implements AgentRunner {
     const workDir = ctx.scopeDir ?? process.cwd();
     const tempDir = await mkdtemp(join(tmpdir(), "docuzen-codex-"));
     const outputPath = join(tempDir, "last-message.txt");
+    const launch = await this.codexLaunchConfig(ctx);
     const args = codexExecArgs({
       workDir,
       outputPath,
-      model: this.cfg.model ?? process.env.CODEX_MODEL,
+      model: launch.model,
+      configOverrides: launch.configOverrides,
     });
 
     try {
@@ -159,6 +169,7 @@ export class CodexRunner implements AgentRunner {
         buildCodexPrompt(ctx),
         ctx.cancelKey,
         onToken,
+        launch.env,
       );
       let reply = "";
       try {
@@ -196,9 +207,13 @@ export class CodexRunner implements AgentRunner {
     prompt: string,
     cancelKey?: string,
     onToken?: TokenSink,
+    env?: NodeJS.ProcessEnv,
   ): Promise<{ stdout: string; streamedToken: boolean }> {
     return new Promise((resolve, reject) => {
-      const child = spawn(command, args, { stdio: ["pipe", "pipe", "pipe"] });
+      const child = spawn(command, args, {
+        stdio: ["pipe", "pipe", "pipe"],
+        ...(env ? { env } : {}),
+      });
       const chunks: Buffer[] = [];
       const errors: Buffer[] = [];
       const parser = new CodexEventParser(onToken);
@@ -251,6 +266,39 @@ export class CodexRunner implements AgentRunner {
 
       child.stdin.end(prompt);
     });
+  }
+
+  private async codexLaunchConfig(ctx: AgentContext): Promise<CodexLaunchConfig> {
+    if (ctx.modelId) {
+      if (!this.cfg.modelsPath) {
+        throw new Error("Codex model selected, but Docuzen has no model registry path configured");
+      }
+      const model = await readModelWithKey(this.cfg.modelsPath, ctx.modelId);
+      if (!model) {
+        throw new Error(`Codex model ${ctx.modelId} not found in Settings > Models`);
+      }
+      if (!model.baseUrl) {
+        throw new Error(`Codex model ${ctx.modelId} is missing a base URL`);
+      }
+      if (!model.apiKey) {
+        throw new Error(`Codex model ${ctx.modelId} is missing an API key`);
+      }
+      const configOverrides: Record<string, string | undefined> = {
+        model: model.modelId,
+        model_provider: "docuzen",
+        "model_providers.docuzen.name": "Docuzen model",
+        "model_providers.docuzen.base_url": model.baseUrl,
+        "model_providers.docuzen.env_key": "LLM_API_KEY",
+      };
+      if (model.reasoningEffort && model.reasoningEffort !== "none") {
+        configOverrides.model_reasoning_effort = model.reasoningEffort;
+      }
+      return {
+        configOverrides,
+        env: { ...process.env, LLM_API_KEY: model.apiKey },
+      };
+    }
+    return { model: this.cfg.model ?? process.env.CODEX_MODEL };
   }
 }
 
@@ -406,6 +454,7 @@ export function codexExecArgs(opts: {
   workDir: string;
   outputPath: string;
   model?: string;
+  configOverrides?: Record<string, string | undefined>;
 }): string[] {
   const args = [
     "exec",
@@ -420,7 +469,19 @@ export function codexExecArgs(opts: {
     "-",
   ];
   if (opts.model) args.splice(1, 0, "--model", opts.model);
+  if (opts.configOverrides) {
+    const entries = Object.entries(opts.configOverrides).filter((entry): entry is [string, string] =>
+      entry[1] !== undefined,
+    );
+    for (const [key, value] of entries.reverse()) {
+      args.splice(1, 0, "-c", `${key}=${tomlString(value)}`);
+    }
+  }
   return args;
+}
+
+function tomlString(value: string): string {
+  return JSON.stringify(value);
 }
 
 /**

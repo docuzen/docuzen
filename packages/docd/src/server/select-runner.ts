@@ -34,8 +34,17 @@ export function selectRunner(opts: {
     };
   }
 
-  if (config.harness?.default === "pi" && config.pi?.model) {
-    const wanted = config.pi.model;
+  if (config.harness?.default === "pi") {
+    const wanted = config.pi?.model;
+    if (!wanted) {
+      return {
+        live: false,
+        provider: FALLBACK_PROVIDER,
+        modelId: FALLBACK_MODEL,
+        defaultHarness,
+        reason: "pi harness selected, but no pi model is configured",
+      };
+    }
     const found = models.find((m) => m.key === wanted && m.hasKey);
     if (found) {
       return {
@@ -61,6 +70,6 @@ export function selectRunner(opts: {
     provider: FALLBACK_PROVIDER,
     modelId: FALLBACK_MODEL,
     defaultHarness,
-    reason: config.harness ? "codex harness selected; pi offline" : "no harness configured",
+    reason: config.harness?.default === "codex" ? "codex harness selected; pi offline" : "no harness configured",
   };
 }

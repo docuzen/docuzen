@@ -231,6 +231,34 @@ describe("reading area widens when a pane is hidden (bugfix: freed space stayed 
   });
 });
 
+describe("HTML iframe surface scroll ownership", () => {
+  it("uses the iframe as the only vertical scroll owner when an HTML document is active", () => {
+    const docRule = sourceBetween(
+      stylesSource,
+      ".doc:has(> .htmlhost:not([hidden])) {",
+      "\n}",
+    );
+    expect(docRule).toContain("display: flex;");
+    expect(docRule).toContain("overflow: hidden;");
+
+    const hostRule = sourceBetween(
+      stylesSource,
+      ".doc:has(> .htmlhost:not([hidden])) .htmlhost {",
+      "\n}",
+    );
+    expect(hostRule).toContain("flex: 1 1 auto;");
+    expect(hostRule).toContain("min-height: 0;");
+
+    const frameRule = sourceBetween(
+      stylesSource,
+      ".doc:has(> .htmlhost:not([hidden])) .htmlframe {",
+      "\n}",
+    );
+    expect(frameRule).toContain("height: 100%;");
+    expect(frameRule).toContain("min-height: 0;");
+  });
+});
+
 describe("topbar clarity", () => {
   it("demotes the dev-facing engine badge out of the topbar into Diagnostics", () => {
     const topbarSource = sourceBetween(htmlSource, '<header class="topbar">', "</header>");

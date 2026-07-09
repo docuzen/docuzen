@@ -278,8 +278,12 @@ export class RpcHandler {
         // is a doc-only value that has no HarnessChoice equivalent in config.toml.
         if (p.settings.harness === "pi" || p.settings.harness === "codex") {
           const cfg = readAppConfig();
-          if (cfg.harness?.default !== p.settings.harness) {
-            writeAppConfig({ ...cfg, harness: { default: p.settings.harness } });
+          const next = { ...cfg, harness: { default: p.settings.harness } };
+          if (p.settings.harness === "pi" && p.settings.model) {
+            next.pi = { model: p.settings.model };
+          }
+          if (cfg.harness?.default !== next.harness.default || cfg.pi?.model !== next.pi?.model) {
+            writeAppConfig(next);
           }
         }
         return { ok: true };

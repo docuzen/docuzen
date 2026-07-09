@@ -40,4 +40,25 @@ describe("app config over RPC", () => {
     // configured, but the temp models.json is empty -> pi not usable yet
     expect(get.result).toMatchObject({ config, piUsable: false });
   });
+
+  test("setSettings writes through pi harness and model to app config", async () => {
+    const docPath = join(process.env.DOCUZEN_CONFIG_DIR!, "doc.md");
+    const set = await handler.handle({
+      id: "4",
+      method: "setSettings",
+      params: {
+        docPath,
+        settings: {
+          scope: "folder",
+          harness: "pi",
+          model: "litellm/gpt-5.5",
+        },
+      },
+    });
+    expect(set.ok).toBe(true);
+    expect(readAppConfig()).toMatchObject({
+      harness: { default: "pi" },
+      pi: { model: "litellm/gpt-5.5" },
+    });
+  });
 });

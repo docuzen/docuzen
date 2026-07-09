@@ -11,7 +11,7 @@ export interface ModelConfig {
   provider: string;
   modelId: string;
   baseUrl?: string;
-  reasoningEffort?: "none" | "low" | "medium" | "high";
+  reasoningEffort?: "none" | "low" | "medium" | "high" | "xhigh";
   hasKey?: boolean; // listModels only: true when an apiKey is set. Raw key NEVER returned.
   apiKey?: string; // INPUT to saveModels only; never returned by listModels
 }
@@ -65,6 +65,33 @@ export async function listModels(path: string): Promise<ModelConfig[]> {
     }
   }
   return rows;
+}
+
+/**
+ * Server-side lookup for runners that must pass the provider credential to an
+ * external process. Unlike listModels(), this intentionally returns apiKey and
+ * must never be exposed through RPC.
+ */
+export async function readModelWithKey(path: string, key: string): Promise<ModelConfig | undefined> {
+  const file = await readFileOrEmpty(path);
+  const providers = file.providers ?? {};
+  const slash = key.indexOf("/");
+  if (slash < 0) return undefined;
+  const providerId = key.slice(0, slash);
+  const modelId = key.slice(slash + 1);
+  const provider = providers[providerId];
+  const model = provider?.models?.find((m) => m.id === modelId);
+  if (!provider || !model) return undefined;
+  return {
+    key,
+    name: model.name ?? model.id,
+    provider: providerId,
+    modelId: model.id,
+    ...(provider.baseUrl !== undefined ? { baseUrl: provider.baseUrl } : {}),
+    ...(model.reasoningEffort !== undefined ? { reasoningEffort: model.reasoningEffort } : {}),
+    hasKey: Boolean(provider.apiKey),
+    ...(provider.apiKey !== undefined ? { apiKey: provider.apiKey } : {}),
+  };
 }
 
 /**

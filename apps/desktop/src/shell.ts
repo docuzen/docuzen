@@ -475,7 +475,7 @@ export function initShell(deps: ShellDeps): ShellApi {
           ? "Web: harness"
           : "",
       h.capabilities.documentTools === "docuzen-managed" ? "Doc tools: managed" : "",
-      h.id !== "pi" ? "Model: harness-managed" : "",
+      h.id === "codex" ? "Model: Docuzen provider" : h.id !== "pi" ? "Model: harness-managed" : "",
       h.capabilities.thinking ? "Thinking" : "",
       h.capabilities.cancel ? "Cancel" : "",
       h.capabilities.multiModelPanel ? "Panel" : "",
@@ -515,7 +515,7 @@ export function initShell(deps: ShellDeps): ShellApi {
 
   function syncHarnessManagedControls(): void {
     const h = selectedHarnessInfo();
-    const harnessManagedModels = !!h && h.id !== "pi";
+    const harnessManagedModels = !!h && h.id !== "pi" && h.id !== "codex";
     setDefaultModelEl.disabled = harnessManagedModels;
     modelAddBtn.disabled = harnessManagedModels;
     modelListEl.classList.toggle("disabled", harnessManagedModels);
@@ -528,6 +528,8 @@ export function initShell(deps: ShellDeps): ShellApi {
     }
     setDefaultModelHintEl.textContent = harnessManagedModels
       ? `${h?.label ?? "This harness"} uses its own model configuration.`
+      : h?.id === "codex"
+        ? "Select a model row to launch Codex with a Docuzen provider instead of ~/.codex defaults."
       : "";
 
     const harnessManagedWebSearch = h?.capabilities.webSearch === "harness-managed";
@@ -594,7 +596,7 @@ export function initShell(deps: ShellDeps): ShellApi {
   /** Show the add/edit form. `existing` → Edit mode (key left blank = keep); omitted → empty Add. */
   function showModelForm(existing?: ModelConfig): void {
     mfNameEl.value = existing?.name ?? "";
-    mfProviderEl.value = existing?.provider ?? "";
+    mfProviderEl.value = existing?.provider ?? (setHarnessEl.value === "codex" ? "docuzen" : "");
     mfModelIdEl.value = existing?.modelId ?? "";
     mfBaseUrlEl.value = existing?.baseUrl ?? "";
     mfApiKeyEl.value = ""; // never returned — blank means "keep existing key"
@@ -679,7 +681,7 @@ export function initShell(deps: ShellDeps): ShellApi {
   async function saveSettings(): Promise<void> {
     if (activeIdx < 0) return;
     const harness = selectedHarnessInfo();
-    const harnessManagedModels = !!harness && harness.id !== "pi";
+    const harnessManagedModels = !!harness && harness.id !== "pi" && harness.id !== "codex";
     const model = harnessManagedModels ? undefined : setDefaultModelEl.value || undefined;
     deps.setDefaultModelKey(model ?? ""); // thread pickers default to the new per-doc model
     const instructions = setInstructionsEl.value.trim() || undefined;
@@ -742,12 +744,14 @@ export function initShell(deps: ShellDeps): ShellApi {
       harnessBadgeEl.classList.remove("unavailable");
       return;
     }
-    const harnessManagedModel = harness.id !== "pi"; // mirrors syncHarnessManagedControls' own check
+    const harnessManagedModel = harness.id !== "pi" && harness.id !== "codex"; // mirrors syncHarnessManagedControls' own check
     const modelKey = settings?.model;
     const modelPart = harnessManagedModel
       ? "harness-managed" // same vocabulary as this file's own "Model: harness-managed" capchip
       : modelKey
         ? deps.modelName(modelKey)
+        : harness.id === "codex"
+          ? "Codex config default"
         : "sidecar default"; // same vocabulary as refreshModels' "— sidecar default —" option
     harnessBadgeEl.textContent = `${harness.label} · ${modelPart}`;
     harnessBadgeEl.classList.toggle("unavailable", !harness.available);

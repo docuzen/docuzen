@@ -143,7 +143,7 @@
           <label for="setHarness">Agent harness</label>
           <select id="setHarness"></select>
           <div id="harnessCaps" class="caprow"></div>
-          <span class="smuted">External harnesses own their tools, auth, and web search. Pi uses Docuzen-managed tools.</span>
+          <span class="smuted">Harness capabilities differ. Pi uses Docuzen-managed tools; Codex can launch through a selected Docuzen model provider.</span>
         </div>
         <div class="srow">
           <label for="setDefaultModel">Default model</label>
@@ -151,13 +151,13 @@
           <span id="setDefaultModelHint" class="smuted"></span>
         </div>
         <div class="srow">
-          <label>Models <span class="smuted">(providers + reasoning effort)</span></label>
+          <label>Model providers <span class="smuted">(base URL, API key, reasoning)</span></label>
           <div id="modelList" class="modellist"></div>
-          <button id="modelAddBtn" class="action" type="button">+ Add model</button>
+          <button id="modelAddBtn" class="action" type="button">+ Add model/provider</button>
         </div>
         <div id="modelForm" class="modelform" hidden>
           <input id="mfName" placeholder="Display name (e.g. GPT-5.5)" />
-          <input id="mfProvider" placeholder="Provider (e.g. litellm)" />
+          <input id="mfProvider" placeholder="Provider key (e.g. docuzen)" />
           <input id="mfModelId" placeholder="Model id (e.g. gpt-5.5)" />
           <input id="mfBaseUrl" placeholder="API URL (e.g. https://host/v1)" />
           <input id="mfApiKey" type="password" placeholder="API key (blank = keep existing)" />
@@ -166,6 +166,7 @@
             <option value="low">reasoning: low</option>
             <option value="medium">reasoning: medium</option>
             <option value="high">reasoning: high</option>
+            <option value="xhigh">reasoning: xhigh</option>
           </select>
           <div class="mfacts"><button id="mfSave" class="action" type="button">Save model</button><button id="mfCancel" class="action" type="button">Cancel</button></div>
         </div>
