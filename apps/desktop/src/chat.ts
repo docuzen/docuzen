@@ -28,6 +28,7 @@
 // Tests: chat-behaviour.test.ts drives this region through the real DOM with a scripted
 // sidecar. Several older tests assert on source text via module-source.test-support.ts.
 
+import { excerpt } from "./excerpt.js";
 import type { RpcEvent } from "./rpc.js";
 import type { DocdApi } from "./session.js";
 import type { HtmlSurface } from "./html-surface.js";
@@ -561,7 +562,7 @@ export function initChat(deps: ChatDeps): ChatApi {
     tree.select(id);
     tree.renderThreadTree(); // re-scope the tree to the newly-focused thread's family
     chatQuoteEl.hidden = false;
-    chatQuoteEl.textContent = `“${quoted}”`;
+    chatQuoteEl.textContent = `“${excerpt(quoted)}”`;
     chatTurnsEl.innerHTML = "";
     // Populate the footer model picker (default for now; promoteToChat refines it
     // to the thread's persisted model once the thread is fetched).

@@ -102,6 +102,9 @@ fn spawn_once(sidecar_dir: &Path, port: u16) -> Result<(Child, u16), String> {
         .arg(port.to_string())
         .env("DOCD_NATIVE_BINDING", sidecar_dir.join("better_sqlite3.node"))
         .env("PATH", &path)
+        // Finder/Dock launches don't carry the shell profile's exports (API keys a harness
+        // CLI needs); the sidecar reads them from the login shell once at startup.
+        .env("DOCD_LOAD_SHELL_ENV", "1")
         .stdout(Stdio::piped())
         .stderr(Stdio::from(stderr_log))
         .spawn()
