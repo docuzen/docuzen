@@ -130,18 +130,36 @@ describe("Visualize", () => {
     expect(deps.endExclusiveTurn).toHaveBeenCalledWith("c0001", true);
   });
 
-  it("never offers Insert on an HTML document (a markdown fence would be saved into the HTML)", async () => {
-    const { actions, api, turns, visualizeCall } = setup("html");
-    const done = actions.runVisualize("c0001", "q", anchor);
+  it("HTML document: Insert puts the rendered diagram in a figure after the selected block and saves the HTML", async () => {
+    const { actions, api, deps, turns, visualizeCall } = setup("html");
+    const frameDoc = document.implementation.createHTMLDocument("t");
+    frameDoc.body.innerHTML = "<h1>Title</h1><table><tr><td>First passage here.</td></tr></table>\n<p>Second paragraph.</p>";
+    (deps as Record<string, unknown>).getHtmlSurface = () => ({
+      doc: frameDoc,
+      getHtml: () => `<!doctype html>\n${frameDoc.documentElement.outerHTML}`,
+    });
+    // A triple-click selection: it runs past the cell's text into the whitespace after it.
+    const done = actions.runVisualize("c0001", "q", { ...anchor, exact: anchor.exact + "\n" });
     await settle();
     visualizeCall().resolve({ diagram: DIAGRAM });
     await done;
     const insert = turns.querySelector<HTMLButtonElement>(".papply")!;
-    expect(insert.disabled).toBe(true);
-    expect(insert.title).toContain("Markdown documents only");
+    expect(insert.disabled).toBe(false);
     insert.click();
     await settle();
-    expect(api.saveDoc).not.toHaveBeenCalled();
+    await settle();
+
+    const fig = frameDoc.querySelector("figure.docuzen-diagram")!;
+    expect(fig).not.toBeNull();
+    // After the whole table, not inside the cell the selection was in.
+    expect(fig.previousElementSibling?.tagName).toBe("TABLE");
+    expect(fig.nextElementSibling?.tagName).toBe("P");
+    expect(fig.getAttribute("data-mermaid-source")).toContain("flowchart");
+    const saved = (api.saveDoc.mock.calls as unknown as [{ text: string }][])[0][0].text;
+    expect(saved).toContain("docuzen-diagram");
+    expect(saved).not.toContain("```mermaid");
+    expect(deps.reloadActiveDoc).toHaveBeenCalled();
+    expect(turns.querySelector(".proposal")).toBeNull();
   });
 
   it("an empty answer is explained instead of offering an empty diagram", async () => {

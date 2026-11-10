@@ -7,6 +7,7 @@ import { resolveAnchor } from "@ai-native-doc/docd/anchor";
 import type { TextQuoteAnchor } from "@ai-native-doc/docd/anchor";
 import type { RpcEvent } from "@ai-native-doc/docd/protocol";
 import type { HtmlSurfaceDeps } from "./surface.js";
+import { insertDiagramIntoHtmlDoc } from "./html-diagram-insert.js";
 import { lastAgentReply, reportError } from "./ui.js";
 
 /**
@@ -36,7 +37,7 @@ export function insertBlockAfterQuote(
   return `${before}\n\n${block}\n${after}`;
 }
 
-export type SelectionAgentActionsDeps = Pick<HtmlSurfaceDeps, "activateChatPane" | "api" | "appendCustomTurn" | "beginExclusiveTurn" | "chatTurn" | "endExclusiveTurn" | "getCurrentMarkdown" | "getDocPath" | "getFormat" | "getModelId" | "getStance" | "log" | "markDiscussed" | "modelName" | "nextMermaidSeq" | "reloadActiveDoc" | "routeProposal" | "scrollTurnsToBottom" | "setChatBusy" | "setChip" | "streamingAgentTurn">;
+export type SelectionAgentActionsDeps = Pick<HtmlSurfaceDeps, "activateChatPane" | "api" | "appendCustomTurn" | "beginExclusiveTurn" | "chatTurn" | "endExclusiveTurn" | "getCurrentMarkdown" | "getDocPath" | "getFormat" | "getHtmlSurface" | "getModelId" | "getStance" | "log" | "markDiscussed" | "modelName" | "nextMermaidSeq" | "reloadActiveDoc" | "routeProposal" | "scrollTurnsToBottom" | "setChatBusy" | "setChip" | "streamingAgentTurn">;
 
 export interface SelectionAgentActionsApi {
   runBrainstorm: (id: string, quoted: string) => Promise<void>;
@@ -162,23 +163,41 @@ export function initSelectionAgentActions(deps: SelectionAgentActionsDeps): Sele
     }
     pre.textContent = block; // show the clean fenced source under the rendered preview
     void renderMermaidInto(preview, mermaidSource(block)); // show the actual diagram
-    // insertBlockAfterQuote splices a markdown fence into the working copy; on an HTML
-    // tab that copy is raw HTML, so the fence would land after </html> and be saved verbatim.
-    const htmlDoc = deps.getFormat() === "html";
-    insertBtn.disabled = htmlDoc;
-    if (htmlDoc) insertBtn.title = "Insert is available for Markdown documents only";
+    insertBtn.disabled = false;
     insertBtn.addEventListener("click", async () => {
       const docPath = deps.getDocPath();
       if (!docPath) return;
       insertBtn.disabled = true;
       try {
-        const newMarkdown = insertBlockAfterQuote(deps.getCurrentMarkdown(), anchor, block);
-        await deps.api.saveDoc({ text: newMarkdown });
+        let newText: string;
+        if (deps.getFormat() === "html") {
+          // An HTML file has no mermaid renderer, so it gets the rendered SVG in a <figure>
+          // after the selected block (a markdown fence would be saved as literal text).
+          const surface = deps.getHtmlSurface();
+          const doc = surface?.doc;
+          if (!surface || !doc) throw new Error("the HTML document is not loaded");
+          // A document-unique id: mermaid scopes the SVG's styles to it.
+          const svgId = `docuzen-diagram-${Date.now().toString(36)}-${deps.nextMermaidSeq()}`;
+          const { svg } = await mermaid.render(svgId, mermaidSource(block));
+          insertDiagramIntoHtmlDoc(doc, anchor, svg, mermaidSource(block));
+          newText = surface.getHtml();
+        } else {
+          newText = insertBlockAfterQuote(deps.getCurrentMarkdown(), anchor, block);
+        }
+        await deps.api.saveDoc({ text: newText });
         deps.log(`inserted diagram for ${id}`);
         box.remove();
         await deps.reloadActiveDoc();
       } catch (e) {
         reportError("diagram insert", e, deps.log);
+        // Say so in the box: the log is not somewhere a reviewer looks.
+        let err = box.querySelector<HTMLDivElement>(".perror");
+        if (!err) {
+          err = document.createElement("div");
+          err.className = "perror";
+          box.appendChild(err);
+        }
+        err.textContent = `⚠ Could not insert the diagram: ${String(e)}`;
         insertBtn.disabled = false;
       }
     });
