@@ -220,6 +220,24 @@ describe("review rail cards", () => {
   });
 });
 
+describe("long selections", () => {
+  it("a whole-document quote is shown as start … end on the card and the chat header, but sent in full", async () => {
+    const { chat, calls } = setup();
+    const whole = Array.from({ length: 2000 }, (_, i) => `word${i}`).join(" ");
+    const c = addCard(chat, "c0001", whole);
+    const shown = c.card.querySelector(".quoted")!.textContent!;
+    expect(shown.length).toBeLessThan(240);
+    expect(shown).toMatch(/^“word0 .* … .* word1999”$/);
+
+    c.input.value = "Summarise";
+    c.ask.click();
+    await settle();
+    expect($("#chatQuote").textContent).toBe(shown);
+    // Only the display is shortened; the entry (and so the agent) keeps the full text.
+    expect(JSON.stringify(calls.discuss[0].params)).not.toContain(" … ");
+  });
+});
+
 describe("card → Ask agent", () => {
   it("sends discuss, streams tokens and tool activity, then shows the persisted reply", async () => {
     const { chat, api, calls, threads } = setup();

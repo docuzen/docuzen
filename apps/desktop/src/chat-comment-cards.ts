@@ -5,6 +5,7 @@
 // It does NOT run agent turns: clicking "Ask agent" hands the request to the chat pane
 // through `deps` (`onAskAgent` for a first message, `onResend` for a thread that already
 // has a conversation). Split out of chat.ts; reaches the pane only through `deps`.
+import { excerpt } from "./excerpt.js";
 import type { ThreadNode } from "@ai-native-doc/docd/protocol";
 import type { DocdApi } from "./session.js";
 import { el } from "./ui.js";
@@ -140,7 +141,7 @@ export function initCommentCards(deps: CommentCardsDeps): CommentCardsApi {
         <button class="delete" title="Delete comment">Delete</button>
       </div>`;
     card.querySelector<HTMLSpanElement>(".cnum")!.textContent = String(num);
-    card.querySelector<HTMLSpanElement>(".quoted")!.textContent = `“${quoted}”`;
+    card.querySelector<HTMLSpanElement>(".quoted")!.textContent = `“${excerpt(quoted)}”`;
     // Agent-authored review findings are visually distinct: an "Agent review" author
     // and a severity/kind chip so the reviewer can triage at a glance.
     const isAgent = reviewMeta?.origin === "agent";

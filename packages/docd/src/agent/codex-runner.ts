@@ -50,6 +50,32 @@ interface CodexLaunchConfig {
   model?: string;
 }
 
+/**
+ * The human-readable reason a failed `codex exec --json` run gave. Its stdout is a JSONL
+ * event stream; the reason is in the `error` / `turn.failed` events, so report those
+ * messages rather than dumping the raw stream at the user. Falls back to stderr, then to
+ * the raw stdout when nothing parses.
+ */
+export function codexFailureDetail(stdout: string, stderr: string): string {
+  const messages: string[] = [];
+  for (const line of stdout.split("\n")) {
+    if (!line.trim().startsWith("{")) continue;
+    try {
+      const ev = JSON.parse(line) as { type?: string; message?: unknown; error?: { message?: unknown } };
+      const msg = ev.type === "error" ? ev.message : ev.type === "turn.failed" ? ev.error?.message : undefined;
+      if (typeof msg === "string" && msg && !messages.includes(msg)) messages.push(msg);
+    } catch {
+      /* not an event line */
+    }
+  }
+  let detail = messages.join("; ") || stderr.trim() || stdout.trim();
+  const missing = /Missing environment variable: `?([A-Za-z_][A-Za-z0-9_]*)/.exec(detail);
+  if (missing) {
+    detail += ` Your Codex config reads its API key from ${missing[1]}, which is not set for docuzen. Export it in your shell profile (e.g. ~/.zshrc) and restart docuzen.`;
+  }
+  return detail;
+}
+
 export function detectCodexCli(command = process.env.CODEX_BIN ?? "codex"): CodexDetection {
   const result = spawnSync(command, ["--version"], {
     encoding: "utf8",
@@ -260,7 +286,7 @@ export class CodexRunner implements AgentRunner {
         const stderr = Buffer.concat(errors).toString("utf8");
         settle(() => {
           if (code === 0) resolve({ stdout, streamedToken: parser.streamedToken });
-          else reject(new Error(`Codex failed${signal ? ` (${signal})` : ""}: ${stderr || stdout || code}`));
+          else reject(new Error(`Codex failed${signal ? ` (${signal})` : ""}: ${codexFailureDetail(stdout, stderr) || code}`));
         });
       });
 

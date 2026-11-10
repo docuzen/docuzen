@@ -1999,3 +1999,8 @@ textarea {
   .panel { order: 3; }
   .editor { min-height: 50vh; }
 }
+
+/* Quoted selections and previews never widen their panel: long unbroken runs (minified
+   JSON, URLs) wrap anywhere instead of pushing the card past the viewport. */
+.comment-card .quoted, .chatquote, .proposal .pold, .proposal .pnew { overflow-wrap: anywhere; min-width: 0; }
+.proposal .pold { max-height: 9rem; overflow-y: auto; }

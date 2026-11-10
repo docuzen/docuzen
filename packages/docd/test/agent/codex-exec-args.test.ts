@@ -71,3 +71,25 @@ describe("codexExecArgs", () => {
     );
   });
 });
+
+describe("codexFailureDetail", () => {
+  it("reports the error events' messages, not the raw event stream", async () => {
+    const { codexFailureDetail } = await import("../../src/agent/codex-runner.js");
+    const stdout = [
+      '{"type":"thread.started","thread_id":"t1"}',
+      '{"type":"turn.started"}',
+      '{"type":"error","message":"Missing environment variable: `LLM_X`."}',
+      '{"type":"turn.failed","error":{"message":"Missing environment variable: `LLM_X`."}}',
+    ].join("\n");
+    const detail = codexFailureDetail(stdout, "");
+    expect(detail).not.toContain("thread.started");
+    expect(detail.startsWith("Missing environment variable: `LLM_X`.")).toBe(true);
+    expect(detail).toContain("Export it in your shell profile");
+  });
+
+  it("falls back to stderr, then raw stdout", async () => {
+    const { codexFailureDetail } = await import("../../src/agent/codex-runner.js");
+    expect(codexFailureDetail("", "boom\n")).toBe("boom");
+    expect(codexFailureDetail("plain text", "")).toBe("plain text");
+  });
+});

@@ -9,6 +9,7 @@ import { PiRunner } from "../agent/pi-runner.js";
 import type { AgentRunner } from "../agent/types.js";
 import { appConfigPath, readAppConfig } from "../config/app-config.js";
 import { defaultModelsPath } from "../rpc/handler.js";
+import { loadShellEnvIfRequested } from "./shell-env.js";
 
 // Wrapped in main() rather than top-level await so esbuild can bundle this
 // entrypoint as CJS for the packaged sidecar (see scripts/bundle-sidecar.mjs).
@@ -16,6 +17,8 @@ async function main(): Promise<void> {
   const portArg = process.argv.indexOf("--port");
   const port = portArg !== -1 ? Number(process.argv[portArg + 1]) : 0;
 
+  // Before anything reads the environment (harness detection, key references).
+  await loadShellEnvIfRequested();
   const config = readAppConfig();
   const modelsPath = defaultModelsPath();
   const models = await listModels(modelsPath).catch(() => []);
