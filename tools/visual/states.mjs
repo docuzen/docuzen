@@ -11,6 +11,7 @@ export const STATE_NAMES = [
   "05-left-collapsed",
   "06-both-collapsed",
   "07-diagram-lightbox",
+  "08-long-comment",
 ];
 
 /**
@@ -115,4 +116,34 @@ export async function captureStates(page, url, outDir, shoot) {
   await diagramBox.locator(".mermaid-expand").click();
   await page.locator("#mermaidLightbox").waitFor({ state: "visible", timeout: 5_000 });
   await shoot(page, outDir, STATE_NAMES[6]);
+
+  // ---- 08: a comment over the whole document — marked by a bar in the margin
+  // beside each block (long-range.ts), not a tint + outline on every block. ----
+  await page.locator("#mermaidLbClose").click();
+  await page.locator("#toggleLeftBtn").click();
+  await page.locator("#toggleRightBtn").click();
+  await page.locator(".panel").waitFor({ state: "visible" });
+  const lastPara = page.locator("#editor p").last();
+  await lastPara.scrollIntoViewIfNeeded();
+  await page.evaluate(() => {
+    const pm = document.querySelector("#editor .ProseMirror");
+    const sel = window.getSelection();
+    const range = document.createRange();
+    range.selectNodeContents(pm);
+    sel.removeAllRanges();
+    sel.addRange(range);
+    pm.dispatchEvent(new MouseEvent("mouseup", { bubbles: true }));
+  });
+  await page.locator("#popover").waitFor({ state: "visible", timeout: 5_000 });
+  const beforeLong = await page.locator("#comments > *").count();
+  await page.locator("#popover button.popcomment").click();
+  await page.waitForFunction(
+    (n) => document.querySelectorAll("#comments > *").length > n,
+    beforeLong,
+    { timeout: 10_000 },
+  );
+  await page.waitForFunction(() => document.querySelectorAll("#editor [data-had-range]").length >= 3);
+  await page.evaluate(() => window.getSelection()?.removeAllRanges());
+  await page.locator("#editor").evaluate((el) => (el.closest(".doc") ?? el).scrollTo(0, 0));
+  await shoot(page, outDir, STATE_NAMES[7]);
 }

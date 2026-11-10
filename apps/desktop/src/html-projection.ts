@@ -3,6 +3,7 @@
 // this builds that projection from the rendered DOM and maps projection offsets back
 // to DOM Ranges (for decorating) and DOM selections forward to offsets (for creating
 // anchors). Build and resolve use the SAME walk, so anchors stay self-consistent.
+import { clearRangeBlocks } from "./long-range.js";
 
 /** Tags whose text is structural/non-content and must not appear in the projection. */
 const SKIP_TAGS = new Set(["SCRIPT", "STYLE", "NOSCRIPT", "TEMPLATE"]);
@@ -191,6 +192,7 @@ export function wrapRange(
 
 /** Remove highlight spans for `id`, restoring their text in place. */
 export function unwrapAnno(doc: Document, id: string): void {
+  clearRangeBlocks(doc, id); // a long comment's margin bar goes with it
   doc.querySelectorAll(`[data-had-mark][data-anno="${CSS.escape(id)}"]`).forEach((span) => {
     const parent = span.parentNode;
     if (!parent) return;

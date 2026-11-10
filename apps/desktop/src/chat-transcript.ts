@@ -4,6 +4,7 @@
 // from the pane arrives through `deps`.
 import type { RpcEvent, ThreadTurn } from "@ai-native-doc/docd/protocol";
 import type { HtmlSnippetPreviewContext } from "./html-snippet-preview.js";
+import { renderMarkdownReply } from "./markdown-reply.js";
 import { WAIT_PHASE, phaseForEvent, startWaitStatus } from "./wait-status.js";
 
 export interface TranscriptDeps {
@@ -48,8 +49,12 @@ export function initTranscript(deps: TranscriptDeps): TranscriptApi {
   const chatEmptyEl = document.querySelector<HTMLDivElement>("#chatEmpty")!;
 
   function renderTurnText(into: HTMLElement, role: ThreadTurn["role"], text: string): void {
-    if (role === "agent") deps.renderPreviewText(into, text);
-    else {
+    into.classList.remove("md");
+    if (role === "agent") {
+      deps.renderPreviewText(into, text);
+      // Not an HTML snippet (those get a rendered preview frame): the reply is markdown.
+      if (!into.classList.contains("html-snippet-host")) renderMarkdownReply(into, text);
+    } else {
       delete into.dataset.rawText;
       into.classList.remove("html-snippet-host");
       into.textContent = text;

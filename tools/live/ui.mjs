@@ -73,6 +73,25 @@ try {
   const agentBodies = await page.locator("#chatTurns .turn-agent .tbody").allInnerTexts();
   check("the card's Ask-agent turn rendered a real reply", agentBodies[0]?.trim().length > 10 && !agentBodies[0].includes("⚠"), agentBodies[0]?.slice(0, 80));
   check("a message typed mid-turn was queued, then delivered as a reply", queuedShown === 1 && agentBodies[1]?.trim().length > 10 && !agentBodies[1].includes("⚠"), agentBodies[1]?.slice(0, 80));
+  // Ask for markdown and check it is rendered, not shown as asterisks and dashes.
+  await page.locator("#chatInput").fill("Reply with exactly a two-item bulleted markdown list, and make one word bold with **double asterisks**.");
+  await page.locator("#chatSend").click();
+  await page.waitForFunction(
+    () => document.querySelectorAll("#chatTurns .turn-agent:not(.working)").length >= 3,
+    undefined,
+    { timeout: 180_000 },
+  );
+  const mdBody = page.locator("#chatTurns .turn-agent .tbody").nth(2);
+  check(
+    "an agent reply renders markdown (list + bold), not raw syntax",
+    (await mdBody.locator("li").count()) >= 2 && (await mdBody.locator("strong").count()) >= 1 && !(await mdBody.innerText()).includes("**"),
+    (await mdBody.innerText()).slice(0, 80).replace(/\n/g, " / "),
+  );
+  check("the footer's options row is closed by default", !(await page.locator("#chatMore").isVisible()));
+  await page.locator("#chatMoreBtn").click();
+  check("the options row holds stance, model, panel and Resolve", (await page.locator("#chatMore #chatResolve").isVisible()) && (await page.locator("#chatMore #chatModel").isVisible()));
+  if (process.env.LIVE_UI_SHOT) await page.screenshot({ path: process.env.LIVE_UI_SHOT });
+  await page.locator("#chatMoreBtn").click();
   check("the queued chip is gone once delivered", (await page.locator(".turn.turn-you", { hasText: "queued" }).count()) === 0);
   check("card shows the thread as responded", (await card.locator(".chip").innerText()) === "responded");
   check("conversation left the document untouched", (await readFile(docPath, "utf8")) === original);

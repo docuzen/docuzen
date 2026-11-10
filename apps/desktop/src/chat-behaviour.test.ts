@@ -393,6 +393,41 @@ describe("opening threads", () => {
     expect($("#chatFoot").hidden).toBe(false);
   });
 
+  it("an agent reply renders its markdown; your own message stays as typed", async () => {
+    const { chat, threads } = setup();
+    addCard(chat, "c0001");
+    threads.c0001 = { frontmatter: {}, turns: [{ role: "you", body: "**why**?" }, { role: "agent", body: "**Improve** it:\n\n- one\n- two" }] };
+    await chat.promoteToChat("c0001");
+    const [you, agent] = $$("#chatTurns .tbody");
+    expect(you.textContent).toBe("**why**?");
+    expect(agent.querySelector("strong")!.textContent).toBe("Improve");
+    expect(agent.querySelectorAll("li")).toHaveLength(2);
+    expect(agent.textContent).not.toContain("**");
+  });
+
+  it("the footer keeps the text box and Send in view; stance, model, panel and Resolve sit behind one toggle that names what is in use", async () => {
+    const { chat, threads } = setup();
+    addCard(chat, "c0001");
+    threads.c0001 = { frontmatter: { stance: "critiquer" }, turns: [{ role: "you", body: "q" }, { role: "agent", body: "a" }] };
+    await chat.promoteToChat("c0001");
+    const more = $("#chatMore");
+    const toggle = $<HTMLButtonElement>("#chatMoreBtn");
+    expect(more.hidden).toBe(true);
+    for (const id of ["#chatStance", "#chatModel", "#chatPanel", "#chatResolve"]) expect(more.contains($(id))).toBe(true);
+    for (const id of ["#chatInput", "#chatSend", "#chatStop", "#chatImprove"]) expect(more.contains($(id))).toBe(false);
+    expect(toggle.textContent).toContain("critiquer"); // visible while the row is closed
+
+    toggle.click();
+    expect(more.hidden).toBe(false);
+    expect(toggle.getAttribute("aria-expanded")).toBe("true");
+    const stance = $<HTMLSelectElement>("#chatStance");
+    stance.value = "supporter";
+    stance.dispatchEvent(new Event("change"));
+    expect(toggle.textContent).toContain("supporter");
+    toggle.click();
+    expect(more.hidden).toBe(true);
+  });
+
   it("a slow fetch for thread A never renders into thread B's pane", async () => {
     const { chat, api, threads } = setup();
     addCard(chat, "c0001", "quote A");
