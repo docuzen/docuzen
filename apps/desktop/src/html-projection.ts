@@ -194,6 +194,9 @@ export function unwrapAnno(doc: Document, id: string): void {
   doc.querySelectorAll(`[data-had-mark][data-anno="${CSS.escape(id)}"]`).forEach((span) => {
     const parent = span.parentNode;
     if (!parent) return;
+    // The span's own overlays (its number badge) go with it; only document content is
+    // restored. Overlays of OTHER annotations nested inside are not direct children.
+    for (const child of [...span.children]) if (child.hasAttribute("data-had-overlay")) child.remove();
     while (span.firstChild) parent.insertBefore(span.firstChild, span);
     parent.removeChild(span);
     parent.normalize();

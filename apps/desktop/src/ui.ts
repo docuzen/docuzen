@@ -262,3 +262,13 @@ export async function lastAgentReply(
     return undefined;
   }
 }
+
+/**
+ * Ask a yes/no question and wait for the answer. In a browser `window.confirm` returns a
+ * boolean; in the desktop app the dialog plugin replaces it with an ASYNC function, so a
+ * bare `if (!window.confirm(…)) return` sees a (truthy) Promise and proceeds before the
+ * user has answered — and regardless of the answer. Always await it.
+ */
+export async function confirmAction(message: string): Promise<boolean> {
+  return (await Promise.resolve(window.confirm(message) as boolean | Promise<boolean>)) === true;
+}

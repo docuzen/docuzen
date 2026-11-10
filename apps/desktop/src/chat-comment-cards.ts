@@ -8,7 +8,7 @@
 import { excerpt } from "./excerpt.js";
 import type { ThreadNode } from "@ai-native-doc/docd/protocol";
 import type { DocdApi } from "./session.js";
-import { el } from "./ui.js";
+import { confirmAction, el } from "./ui.js";
 
 export type CardStatus = "idle" | "running" | "responded" | "error";
 
@@ -178,6 +178,17 @@ export function initCommentCards(deps: CommentCardsDeps): CommentCardsApi {
       discussed: false,
       resolved,
     };
+    // Mirror `discussed` onto the card as a class, wherever it is set: once a thread has a
+    // conversation AND is open in the chat pane, the card drops its duplicate controls (CSS).
+    let discussed = false;
+    Object.defineProperty(entry, "discussed", {
+      enumerable: true,
+      get: () => discussed,
+      set: (v: boolean) => {
+        discussed = v;
+        card.classList.toggle("discussed", v);
+      },
+    });
     comments.set(id, entry);
     // Also what restores this card's persisted state: the listing this triggers is fed
     // back through applyThreadNodes (one fetch for the whole rail, coalesced).
@@ -211,7 +222,7 @@ export function initCommentCards(deps: CommentCardsDeps): CommentCardsApi {
     delBtn.addEventListener("click", async (ev) => {
       ev.stopPropagation();
       if (!deps.getDocPath()) return;
-      if (!window.confirm("Delete this comment and its discussion?")) return;
+      if (!(await confirmAction("Delete this comment and its discussion?"))) return;
       await deps.removeAnnotationById(id);
       deps.log(`deleted ${id}`);
     });
