@@ -86,6 +86,10 @@ function perturb(rnd: () => number, s: string, rate: number): string {
   return out.join("");
 }
 
+// These tests run the deliberately slow dense reference scan; a shared CI runner needs
+// well over vitest's 5 s default (correctness is asserted, not speed).
+const SLOW_REFERENCE_MS = 60_000;
+
 describe("fuzzy scan — exact equivalence with the pre-rewrite dense scan", () => {
   it("returns identical ranges (or null) across seeded random corpora", () => {
     const rnd = makeRng(42);
@@ -105,7 +109,7 @@ describe("fuzzy scan — exact equivalence with the pre-rewrite dense scan", () 
       expect(got, `case ${t} (rate ${rate}, len ${len})`).toEqual(want);
     }
     expect(fuzzyCases).toBeGreaterThan(15); // the sweep actually exercised the fuzzy path
-  });
+  }, SLOW_REFERENCE_MS);
 
   it("returns identical ranges on a tie-prone repetitive corpus", () => {
     // Every sentence is a near-duplicate — the worst case for tie-breaking:
@@ -122,7 +126,7 @@ describe("fuzzy scan — exact equivalence with the pre-rewrite dense scan", () 
       const want = fuzzyFindRef(text, exact, 0.7);
       expect(got, `tie case ${t}`).toEqual(want);
     }
-  });
+  }, SLOW_REFERENCE_MS);
 
   it("honors a custom threshold identically", () => {
     const rnd = makeRng(99);
@@ -135,7 +139,7 @@ describe("fuzzy scan — exact equivalence with the pre-rewrite dense scan", () 
         : fuzzyFindRef(text, exact, threshold);
       expect(got, `threshold ${threshold}`).toEqual(want);
     }
-  });
+  }, SLOW_REFERENCE_MS);
 });
 
 describe("fuzzy scan — complexity guard (operation counts, not wall clock)", () => {
