@@ -40,13 +40,16 @@ export async function removeAnnotation(docPath: string, id: string): Promise<voi
   await updateJsonFile(hadPaths(docPath).annotations, empty, (f) => {
     const next = f.annotations.filter((a) => a.id !== id);
     if (next.length === f.annotations.length) return { result: undefined };
-    return { next: { ...f, annotations: next }, result: undefined };
+    // Remember the high-water mark before the id disappears from the list (files written
+    // before lastSeq existed don't carry one), so the deleted id is never handed out again.
+    const lastSeq = Number(/^c(\d+)$/.exec(nextAnnotationId(f.annotations, f.lastSeq))![1]) - 1;
+    return { next: { ...f, annotations: next, lastSeq }, result: undefined };
   });
 }
 
 /** Next sequential annotation id ("c0001", "c0002", …) given the existing ones. */
-export function nextAnnotationId(existing: Annotation[]): string {
-  let max = 0;
+export function nextAnnotationId(existing: Annotation[], lastSeq = 0): string {
+  let max = lastSeq;
   for (const a of existing) {
     const m = /^c(\d+)$/.exec(a.id);
     if (m) max = Math.max(max, Number(m[1]));
@@ -64,8 +67,10 @@ export async function appendAnnotation(
   build: (id: string) => Annotation,
 ): Promise<Annotation> {
   return updateJsonFile(hadPaths(docPath).annotations, empty, (f) => {
-    const annotation = build(nextAnnotationId(f.annotations));
+    const annotation = build(nextAnnotationId(f.annotations, f.lastSeq));
     f.annotations.push(annotation);
+    const seq = /^c(\d+)$/.exec(annotation.id);
+    if (seq) f.lastSeq = Number(seq[1]);
     return { next: f, result: annotation };
   });
 }

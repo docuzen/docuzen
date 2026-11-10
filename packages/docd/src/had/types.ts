@@ -34,6 +34,12 @@ export interface Annotation {
 export interface AnnotationsFile {
   version: number;
   annotations: Annotation[];
+  /**
+   * Highest sequence number ever allocated for a "cNNNN" id. Ids are never reused after a
+   * delete: task rows, proposals and UI state are keyed by id, so a new comment that took a
+   * deleted one's id would inherit its leftovers.
+   */
+  lastSeq?: number;
 }
 
 export type VersionCause =

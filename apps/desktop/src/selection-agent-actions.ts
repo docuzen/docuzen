@@ -7,6 +7,7 @@ import { resolveAnchor } from "@ai-native-doc/docd/anchor";
 import type { TextQuoteAnchor } from "@ai-native-doc/docd/anchor";
 import type { RpcEvent } from "@ai-native-doc/docd/protocol";
 import type { HtmlSurfaceDeps } from "./surface.js";
+import { startWaitStatus } from "./wait-status.js";
 import { insertDiagramIntoHtmlDoc } from "./html-diagram-insert.js";
 import { lastAgentReply, reportError } from "./ui.js";
 
@@ -137,9 +138,18 @@ export function initSelectionAgentActions(deps: SelectionAgentActionsDeps): Sele
 
     deps.setChatBusy(id); // show Stop; cancelKey for visualize is docPath#<id>
     let result: { diagram: string };
+    // Until the diagram source starts streaming, say what is happening and for how long.
+    const status = startWaitStatus(pre, "Waiting for the model…");
+    let streaming = false;
     try {
       result = await deps.api.visualize({ threadId: id }, (e) => {
+        if (e.event === "thinking") status.set("The agent is thinking…");
         if (e.event === "token") {
+          if (!streaming) {
+            streaming = true;
+            status.stop();
+            pre.textContent = "";
+          }
           pre.textContent += String(e.data);
           deps.scrollTurnsToBottom();
         }
@@ -148,6 +158,7 @@ export function initSelectionAgentActions(deps: SelectionAgentActionsDeps): Sele
       pre.textContent = `⚠ ${String(e)}`;
       return;
     } finally {
+      status.stop();
       deps.setChatBusy(null);
       deps.endExclusiveTurn(id, true); // adds no conversation turn; queued messages may proceed
     }

@@ -71,3 +71,34 @@ describe("annotations index", () => {
     expect((await readAnnotations(docPath)).annotations).toHaveLength(1);
   });
 });
+
+describe("annotation ids are never reused", () => {
+  it("a comment created after a delete gets a fresh id, even in a file written before lastSeq existed", async () => {
+    const { mkdtemp, writeFile, mkdir } = await import("node:fs/promises");
+    const { tmpdir } = await import("node:os");
+    const { join } = await import("node:path");
+    const { createAnnotation, deleteAnnotation, readAnnotations } = await import("../../src/had/annotations.js");
+    const { hadPaths } = await import("../../src/had/paths.js");
+    const dir = await mkdtemp(join(tmpdir(), "anno-ids-"));
+    const doc = join(dir, "d.md");
+    await writeFile(doc, "hello world\n");
+    const anchor = { exact: "hello", prefix: "", suffix: " world" };
+    const a = await createAnnotation(doc, { kind: "comment", anchor }, { now: "t" });
+    const b = await createAnnotation(doc, { kind: "comment", anchor }, { now: "t" });
+    expect([a.id, b.id]).toEqual(["c0001", "c0002"]);
+
+    // Simulate a legacy file: strip the high-water mark.
+    const p = hadPaths(doc).annotations;
+    const legacy = await readAnnotations(doc);
+    delete legacy.lastSeq;
+    await mkdir(join(p, ".."), { recursive: true });
+    await writeFile(p, JSON.stringify(legacy));
+
+    await deleteAnnotation(doc, "c0002");
+    const c = await createAnnotation(doc, { kind: "comment", anchor }, { now: "t" });
+    expect(c.id).toBe("c0003");
+    await deleteAnnotation(doc, "c0001");
+    await deleteAnnotation(doc, "c0003");
+    expect((await createAnnotation(doc, { kind: "comment", anchor }, { now: "t" })).id).toBe("c0004");
+  });
+});

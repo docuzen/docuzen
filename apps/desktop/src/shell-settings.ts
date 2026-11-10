@@ -4,7 +4,7 @@
 // Split out of shell.ts; it knows nothing about tabs beyond "is a document open".
 import type { AgentHarness, HadSettings, ModelConfig } from "@ai-native-doc/docd/protocol";
 import type { ShellDeps } from "./shell.js";
-import { el, wireModal, reportError } from "./ui.js";
+import { confirmAction, el, wireModal, reportError } from "./ui.js";
 
 export interface SettingsDeps extends Pick<ShellDeps, "api" | "log" | "modelName" | "refreshThreadModels" | "setDefaultModelKey"> {
   /** Settings are per document: the modal and saves are no-ops without one. */
@@ -246,7 +246,7 @@ export function initSettings(deps: SettingsDeps): SettingsApi {
   }
 
   async function removeModel(key: string): Promise<void> {
-    if (!window.confirm(`Remove model ${key}?`)) return;
+    if (!(await confirmAction(`Remove model ${key}?`))) return;
     // Send the remainder without apiKey on any row → all surviving keys preserved.
     const models = configuredModels.filter((m) => m.key !== key).map(withoutKey);
     try {

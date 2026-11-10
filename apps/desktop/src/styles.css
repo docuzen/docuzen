@@ -2005,3 +2005,12 @@ textarea {
 .comment-card .quoted, .chatquote, .proposal .pold, .proposal .pnew { overflow-wrap: anywhere; min-width: 0; }
 .proposal .pold { max-height: 9rem; overflow-y: auto; }
 .proposal .perror { color: var(--fail); font-size: 0.72rem; margin-top: 0.3rem; overflow-wrap: anywhere; }
+
+/* A thread that is open in the chat pane and already has a conversation is worked on THERE
+   (message box, stance, model, Send). Its rail card stops repeating those controls and
+   reads as an index entry: number, quote, author, status, Delete. Retry stays reachable
+   when the last turn failed. */
+.comment-card.active.discussed .cinput,
+.comment-card.active.discussed .stance,
+.comment-card.active.discussed .cmodel,
+.comment-card.active.discussed:not(:has(.chip.error)) .discuss { display: none; }
