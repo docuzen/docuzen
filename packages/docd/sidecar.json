@@ -1,9 +1,9 @@
 {
-  "nodeVersion": "22.17.0",
+  "nodeVersion": "22.23.4",
   "abi": "127",
   "checksums": {
-    "node-darwin-arm64": "615dda58b5fb41fad2be43940b6398ca56554cbe05800953afadc724729cb09e",
-    "node-darwin-x64": "c39c8ec3cdadedfcc75de0cb3305df95ae2aecebc5db8d68a9b67bd74616d2ad",
+    "node-darwin-arm64": "c9e1dbc748b33ed2d14f42445191ecaf14c56259c7a9a26d0042c49ec2b66428",
+    "node-darwin-x64": "efcc2b0db6f94bf53eddb038fe2b370277a042bd29e4f19b8f8e23598795b819",
     "better-sqlite3-darwin-arm64": "35533f9ada82cb3f33760c1dc2f128f77c2b34ec2b2ede722824cb64cd50a46a",
     "better-sqlite3-darwin-x64": "8d2ef0eb7f880f88882f0a7a7362a15e2d210a077681f0672d0dfc8b919bd91b"
   }

@@ -17,30 +17,30 @@ const pkgDir = resolve(dirname(fileURLToPath(import.meta.url)), "..", "..");
 describe("sidecar-meta", () => {
   test("loadSidecarMeta merges sidecar.json with the addon version", () => {
     const meta = loadSidecarMeta(pkgDir);
-    expect(meta.nodeVersion).toBe("22.17.0");
+    expect(meta.nodeVersion).toBe("22.23.4");
     expect(meta.abi).toBe("127");
     expect(meta.addonVersion).toMatch(/^\d+\.\d+\.\d+$/);
     expect(Object.keys(meta.checksums)).toContain("node-darwin-arm64");
   });
 
   test("cacheDirFor keys the cache by node AND addon version", () => {
-    const meta = { nodeVersion: "22.17.0", abi: "127", addonVersion: "12.10.0", checksums: {} };
+    const meta = { nodeVersion: "22.23.4", abi: "127", addonVersion: "12.10.0", checksums: {} };
     const dir = cacheDirFor("/repo/packages/docd", meta, "arm64");
-    expect(dir).toBe("/repo/packages/docd/.sidecar-cache/darwin-arm64/22.17.0-12.10.0");
+    expect(dir).toBe("/repo/packages/docd/.sidecar-cache/darwin-arm64/22.23.4-12.10.0");
   });
 
   test("downloadsFor builds pinned URLs, members, and hashes", () => {
     const meta = loadSidecarMeta(pkgDir);
     const dl = downloadsFor(meta, "x64");
-    expect(dl.node.url).toBe("https://nodejs.org/dist/v22.17.0/node-v22.17.0-darwin-x64.tar.gz");
-    expect(dl.node.tarMember).toBe("node-v22.17.0-darwin-x64/bin/node");
+    expect(dl.node.url).toBe("https://nodejs.org/dist/v22.23.4/node-v22.23.4-darwin-x64.tar.gz");
+    expect(dl.node.tarMember).toBe("node-v22.23.4-darwin-x64/bin/node");
     expect(dl.node.sha256).toBe(meta.checksums["node-darwin-x64"]);
     expect(dl.addon.url).toContain(`v${meta.addonVersion}-node-v127-darwin-x64.tar.gz`);
     expect(dl.addon.tarMember).toBe("build/Release/better_sqlite3.node");
   });
 
   test("downloadsFor throws on a missing checksum", () => {
-    const meta = { nodeVersion: "22.17.0", abi: "127", addonVersion: "12.10.0", checksums: {} };
+    const meta = { nodeVersion: "22.23.4", abi: "127", addonVersion: "12.10.0", checksums: {} };
     expect(() => downloadsFor(meta, "arm64")).toThrow(/missing checksum/);
   });
 

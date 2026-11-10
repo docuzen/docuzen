@@ -3,8 +3,7 @@ import {
   createAgentSession,
   defineTool,
   SessionManager,
-  AuthStorage,
-  ModelRegistry,
+  ModelRuntime,
 } from "@earendil-works/pi-coding-agent";
 // pi's schema lib is the unscoped `typebox` (v1.x), NOT `@sinclair/typebox` (v0.x);
 // custom-tool parameters must use the same package so defineTool's generic unifies.
@@ -31,7 +30,8 @@ const PI_HISTORY_HEADING = "## Conversation so far (continue it)";
 const PI_STANDING_INSTRUCTIONS_HEADING = "## Standing instructions (always apply)";
 
 // Minimal structural views of the pi SDK surface we use. Traced against
-// @earendil-works/pi-coding-agent 0.79.3's real event types (agent-session.d.ts's
+// @earendil-works/pi-coding-agent's real event types (0.79.3, re-verified on 1.5.1 by
+// test/agent/pi-runner-e2e.test.ts, which drives a real session against a mock model server) (agent-session.d.ts's
 // AgentSessionEvent, pi-agent-core's AgentEvent, pi-ai's AssistantMessageEvent) rather
 // than assumed: the SDK never emits a top-level `type: "error"` event at all — a failed
 // model/gateway call (wrong/forbidden model id, an unreachable gateway, a timeout, rate-
@@ -44,8 +44,6 @@ const PI_STANDING_INSTRUCTIONS_HEADING = "## Standing instructions (always apply
 interface PiAssistantEvent {
   type: string;
   delta?: string;
-  toolName?: string;
-  name?: string;
   /** Set when `type` is "error": "error" (a genuine failure) or "aborted" (session.abort()
    * was called — the user's Stop button; NOT a failure — see captureSessionEvent). */
   reason?: string;
@@ -63,6 +61,8 @@ interface PiEvent {
   assistantMessageEvent?: PiAssistantEvent;
   /** Present on a "message_end" event: the message that just finished (possibly errored). */
   message?: PiAssistantMessage;
+  /** Present on a top-level "tool_execution_start" event: the tool about to run. */
+  toolName?: string;
   // auto_retry_start/auto_retry_end/compaction_end error surfaces — top-level, not nested.
   errorMessage?: string;
   finalError?: string;
@@ -76,8 +76,9 @@ interface PiSession {
 
 type PiSessionOptions = Record<string, unknown> & {
   /**
-   * Future-compatible MCP server map. Pi 0.79.3 does not read this option yet,
-   * but keeping it in one builder makes native Pi MCP support a narrow follow-up.
+   * MCP server map. createAgentSession does not read this option (docuzen reaches MCP
+   * servers through its own proxy tool, see mcp-bridge.ts); keeping it in one builder
+   * makes a move to native pi MCP support a narrow follow-up.
    */
   mcpServers?: Record<string, PiMcpServerConfig>;
 };
@@ -153,6 +154,13 @@ export function captureSessionEvent(entry: SessionEntry, event: PiEvent): void {
     entry.error = event.errorMessage;
     return;
   }
+  // Tool activity is a TOP-LEVEL agent event, not an assistantMessageEvent. (This used to
+  // be looked for nested inside message_update, where it never occurs — so the UI's
+  // "Tool · …" activity lines silently never appeared. Caught by the live check.)
+  if (event.type === "tool_execution_start") {
+    entry.sink?.({ type: "tool", text: event.toolName ?? "tool" });
+    return;
+  }
   if (event.type !== "message_update" || !event.assistantMessageEvent) return;
   const ev = event.assistantMessageEvent;
   if (ev.type === "text_delta" && ev.delta) {
@@ -161,8 +169,6 @@ export function captureSessionEvent(entry: SessionEntry, event: PiEvent): void {
   } else if (ev.type === "thinking_delta" && ev.delta) {
     entry.think += ev.delta;
     entry.sink?.({ type: "thinking", text: ev.delta });
-  } else if (ev.type === "tool_call" || ev.type === "tool_execution_start") {
-    entry.sink?.({ type: "tool", text: ev.toolName ?? ev.name ?? "reading…" });
   }
 }
 
@@ -213,15 +219,19 @@ function webSearchPrompt(ctx: AgentContext): string[] {
   ];
 }
 
+/** Directory a session's file tools (pi's own and the MCP document tools) are scoped to. */
+function sessionCwd(ctx: AgentContext): string {
+  return ctx.scopeDir ?? (ctx.docPath ? dirname(ctx.docPath) : process.cwd());
+}
+
 function mcpPrompt(ctx: AgentContext): string[] {
-  const mcp = resolveMcpToolchain(ctx.docToolchain, { allowWrite: !!ctx.allowEdit });
+  const mcp = resolveMcpToolchain(ctx.docToolchain, { scopeDir: sessionCwd(ctx) });
   if (!Object.keys(mcp.servers).length) return [];
-  // Phase 10: conversation turns have neither propose_edit/add_review_finding nor an
-  // allowEdit path, so the general "call propose_edit unless direct-edit" guidance would
-  // be false for them — give the narrower, accurate rule instead.
+  // Conversation turns have no propose_edit/add_review_finding, so the general "call
+  // propose_edit" guidance would be false for them — give the narrower, accurate rule.
   const changeGuidance = ctx.conversationOnly
     ? "This is a conversation turn: only read-only or patch-draft MCP tools are allowlisted, and you have no propose_edit/add_review_finding tool either — do not use MCP tools to write the canonical document."
-    : "In propose/review modes, only read-only or patch-draft MCP tools are allowlisted; do not use MCP tools to write the canonical document. To change the document, call propose_edit/add_review_finding unless direct-edit mode is explicitly enabled.";
+    : "Only read-only or patch-draft MCP tools are allowlisted (a draft returns a diff and writes nothing); do not use MCP tools to write the canonical document. To change the document, call propose_edit/add_review_finding.";
   return [
     "",
     "## MCP tool safety",
@@ -240,35 +250,51 @@ export class PiRunner implements AgentRunner {
   private sessions = new SessionStore<SessionEntry>("pi");
   /** Live sessions indexed by ctx.cancelKey (docPath#threadId), so cancel() can abort one. */
   private byKey = new Map<string, SessionEntry>();
-  private authStorage = AuthStorage.create();
-  private modelRegistry = ModelRegistry.create(this.authStorage);
+  /**
+   * pi's model + credential runtime (models.json, auth.json). Replaced wholesale when a
+   * requested model isn't found, so models added via Settings after startup resolve
+   * without a sidecar restart; sessions already created keep the runtime they started with.
+   */
+  private runtime: ModelRuntime;
   private model: unknown;
 
-  constructor(private cfg: PiConfig) {
-    (this.modelRegistry as unknown as { loadModels(): void }).loadModels();
-    this.model = this.modelRegistry.find(cfg.provider, cfg.modelId);
-    if (!this.model) {
+  private constructor(
+    private cfg: PiConfig,
+    runtime: ModelRuntime,
+    model: unknown,
+  ) {
+    this.runtime = runtime;
+    this.model = model;
+  }
+
+  /**
+   * Build a runner whose default model is `cfg.provider/cfg.modelId`. Async because the
+   * SDK's ModelRuntime loads models.json/auth.json asynchronously. Rejects when the model
+   * isn't in pi's registry — the caller decides whether that is fatal.
+   */
+  static async create(cfg: PiConfig): Promise<PiRunner> {
+    const runtime = await ModelRuntime.create();
+    const model = runtime.getModel(cfg.provider, cfg.modelId);
+    if (!model) {
       throw new Error(
         `pi model ${cfg.provider}/${cfg.modelId} not found — check ~/.pi/agent/models.json`,
       );
     }
+    return new PiRunner(cfg, runtime, model);
   }
 
   async start(
     ctx: AgentContext,
     onToken?: TokenSink,
   ): Promise<{ sessionId: string; turn: AgentTurn }> {
-    const cwd = ctx.scopeDir ?? (ctx.docPath ? dirname(ctx.docPath) : process.cwd());
+    const cwd = sessionCwd(ctx);
     // pi's `tools` is an allowlist that also gates custom tools (AgentSession filters
     // customTools through isAllowedTool). toolPolicy() decides the per-mode tool set and
     // whether propose_edit is offered, so propose_edit exists only in proposal-style
-    // turns (including HTML Improve), not direct-edit or markdown replacement-only turns.
-    const mcp = resolveMcpToolchain(ctx.docToolchain, {
-      allowWrite: !!ctx.allowEdit,
-    });
+    // turns (including HTML Improve), not conversation or markdown replacement-only turns.
+    const mcp = resolveMcpToolchain(ctx.docToolchain, { scopeDir: cwd });
     const policy = toolPolicy(ctx, this.cfg.tools, {
       readToolNames: mcp.readToolNames,
-      writeToolNames: mcp.writeToolNames,
       ...(Object.keys(mcp.servers).length ? { proxyToolName: "mcp" } : {}),
     });
     const tools = policy.tools;
@@ -277,12 +303,12 @@ export class PiRunner implements AgentRunner {
       const slash = ctx.modelId.indexOf("/");
       const provider = slash >= 0 ? ctx.modelId.slice(0, slash) : this.cfg.provider;
       const modelId = slash >= 0 ? ctx.modelId.slice(slash + 1) : ctx.modelId;
-      let resolved = this.modelRegistry.find(provider, modelId);
+      let resolved = this.runtime.getModel(provider, modelId);
       if (!resolved) {
-        // Models added via Settings after startup aren't in the in-memory registry —
-        // reload models.json from disk and retry before falling back.
-        (this.modelRegistry as unknown as { loadModels(): void }).loadModels();
-        resolved = this.modelRegistry.find(provider, modelId);
+        // Models added via Settings after startup aren't in the loaded runtime — load a
+        // fresh one from disk and retry before falling back.
+        this.runtime = await ModelRuntime.create();
+        resolved = this.runtime.getModel(provider, modelId);
       }
       if (resolved) sessionModel = resolved;
       else console.warn(`pi: model ${ctx.modelId} not found in models.json — using default`);
@@ -544,8 +570,7 @@ export class PiRunner implements AgentRunner {
       cwd,
       model: sessionModel,
       sessionManager: SessionManager.inMemory(cwd),
-      authStorage: this.authStorage,
-      modelRegistry: this.modelRegistry,
+      modelRuntime: this.runtime,
       tools,
       customTools,
       ...(Object.keys(mcp.servers).length ? { mcpServers: mcp.servers } : {}),
@@ -620,9 +645,6 @@ export class PiRunner implements AgentRunner {
           " must not describe a specific change as if you were about to apply it — discuss" +
           " only. If a change is warranted, tell the reviewer to use Improve, Resolve, or" +
           " Review to make it."
-      : ctx.allowEdit
-        ? "When the reviewer asks you to make a change, edit the document file directly" +
-          " using your edit/write tools, then briefly say what you changed."
         : "When you want to change the document, call the `propose_edit` tool: pass `edits`" +
           " (each oldText copied VERBATIM from the document with enough context to be unique," +
           " plus its newText) for a few localized changes, or `fullRewrite` (the complete new" +

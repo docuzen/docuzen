@@ -247,9 +247,6 @@ body { display: flex; flex-direction: column; height: 100vh; background: var(--b
 .vpick-current { background: var(--accent-soft); border: 1px solid var(--accent-line); }
 .vpick-graph-row { position: relative; align-items: stretch; padding-top: 0.3rem; padding-bottom: 0.3rem; }
 .vpick-graph-row:has(input:checked) { background: var(--accent-soft); box-shadow: inset 0 0 0 1px var(--accent-line); }
-.vpick-context { cursor: default; color: var(--text); }
-.vpick-context:hover { background: transparent; }
-.vpick-radio-spacer { width: 13px; flex-shrink: 0; }
 .vpick-graph {
   --vpick-lane-size: 16px;
   display: grid;
@@ -300,13 +297,8 @@ body { display: flex; flex-direction: column; height: 100vh; background: var(--b
 .vpick-lane.incoming .vpick-dot { border-style: double; }
 .vpick-copy { display: flex; flex-direction: column; gap: 0.12rem; min-width: 0; flex: 1; }
 .vpick-titleline { display: flex; align-items: center; gap: 0.35rem; min-width: 0; }
-.vpick-threadtitle, .vpick-versionid { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: 600; }
+.vpick-versionid { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: 600; }
 .vpick-cause, .vpick-meta { color: var(--muted); font-size: 0.7rem; }
-.vpick-chip {
-  flex-shrink: 0; color: var(--accent); background: var(--accent-soft); border: 1px solid var(--accent-line);
-  border-radius: 999px; font-size: 0.64rem; padding: 0.02rem 0.42rem; font-weight: 700;
-}
-.vpick-chip.missing { color: var(--muted); background: var(--bg-soft); border-color: var(--border); }
 
 .tabbar {
   display: flex; align-items: stretch; gap: 2px; flex-shrink: 0;
@@ -545,21 +537,6 @@ body { display: flex; flex-direction: column; height: 100vh; background: var(--b
 .panel h2 { font-size: 0.7rem; text-transform: uppercase; letter-spacing: 0.05em; color: var(--muted); margin: 1rem 0 0.4rem; }
 .panel h2:first-child { margin-top: 0; }
 .hint { font-size: 0.72rem; color: var(--muted); margin: 0 0 0.6rem; }
-
-#checklist { margin: 0; padding-left: 1.1rem; display: flex; flex-direction: column; gap: 0.4rem; }
-.check {
-  font-size: 0.74rem; display: flex; align-items: flex-start; gap: 0.4rem;
-  background: var(--bg); border: 1px solid var(--border); border-radius: 8px;
-  padding: 0.4rem 0.5rem;
-}
-.check .ctext { flex: 1; }
-.check .cbtns { display: flex; gap: 0.25rem; flex-shrink: 0; }
-.check .cbtns button {
-  border: 1px solid var(--border); background: var(--bg); border-radius: 6px;
-  width: 1.5rem; height: 1.5rem; cursor: pointer; font-size: 0.8rem; line-height: 1;
-}
-.check[data-state="pass"] { border-color: var(--pass); background: #f0faf2; }
-.check[data-state="fail"] { border-color: var(--fail); background: #fdf1f0; }
 
 .clearlog {
   float: right; font-size: 0.65rem; border: 1px solid var(--border);
@@ -1608,14 +1585,6 @@ textarea {
   background: #fff7f5;
   border-color: #f1c9c2;
   color: #9a3429;
-}
-.proposal .pnote {
-  color: var(--ink-soft);
-  font: 0.74rem/1.45 ui-sans-serif, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
-  margin: 0.25rem 0 0.45rem;
-}
-.proposal-unplaced {
-  border-style: dashed;
 }
 .proposal-anchor-fallback {
   border-style: dashed;

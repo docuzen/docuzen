@@ -19,6 +19,16 @@ export function shouldShowFirstRun(config: AppConfig): boolean {
   return config.harness === null;
 }
 
+/** Which harness the setup modal should preselect, given what is usable on this machine. */
+export function pickUsableHarness(
+  models: { key: string; hasKey?: boolean }[],
+  codexUsable: boolean,
+): { harness: "pi" | "codex"; model?: string } {
+  const keyed = models.find((m) => m.hasKey);
+  if (keyed) return { harness: "pi", model: keyed.key };
+  return { harness: codexUsable ? "codex" : "pi" };
+}
+
 async function restartSidecar(): Promise<void> {
   const tauri = (window as { __TAURI__?: { core?: { invoke?: (cmd: string) => Promise<unknown> } } }).__TAURI__;
   await tauri?.core?.invoke?.("restart_sidecar");
@@ -61,6 +71,13 @@ export async function maybeShowFirstRun(client: FirstRunClient, log: (line: stri
     opt.textContent = "no models in ~/.pi/agent/models.json — add one in File → Settings";
     modelSel.append(opt);
   }
+
+  // Preselect whatever can work right now, so "Save" on a fresh install is one click:
+  // pi when a model already has a stored key (and that model), else codex when its CLI
+  // was detected, else pi (the modal then explains what is missing).
+  const usable = pickUsableHarness(models, state.codexUsable);
+  harnessSel.value = usable.harness;
+  if (usable.model) modelSel.value = usable.model;
 
   const syncRows = () => {
     const codex = harnessSel.value === "codex";

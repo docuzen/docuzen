@@ -13,8 +13,8 @@ import type { AgentContext } from "./types.js";
  *
  * The mode/edit-policy narration (pi's editPolicy/taskIntro vs codex's `mode` array) is
  * NOT extracted here: both are driven by different context flags (pi: replacementOnly +
- * improveMode + allowEdit, coupled with a taskIntro sentence; codex: replacementOnly +
- * reviewMode + allowEdit, as independent filtered bullets) and share no reusable
+ * improveMode, coupled with a taskIntro sentence; codex: replacementOnly + reviewMode,
+ * as independent filtered bullets) and share no reusable
  * sentence beyond incidental word overlap. Forcing a shared builder would either change
  * wording or produce a builder with no real body — see the Task 1 report.
  */

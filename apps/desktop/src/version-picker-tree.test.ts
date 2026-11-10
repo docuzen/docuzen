@@ -45,7 +45,6 @@ describe("version picker graph model", () => {
 
     expect(model.graphRows.map((row) => row.id)).toEqual(["v0004", "v0003", "v0002", "v0001"]);
     expect(model.graphRows.map((row) => row.id).sort()).toEqual(["v0001", "v0002", "v0003", "v0004"]);
-    expect(model.unthreadedVersions).toEqual([]);
   });
 
   it("keeps thread and branch divergence metadata on graph rows", () => {

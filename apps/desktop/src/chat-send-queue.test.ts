@@ -1,5 +1,4 @@
 import { describe, expect, it } from "vitest";
-import { readFileSync } from "node:fs";
 
 // Instant input clear on commit + per-thread send queue. The pure FIFO/drain/halt
 // mechanics live in
@@ -10,7 +9,7 @@ import { readFileSync } from "node:fs";
 // in this package's vitest setup (no jsdom — see ui.test.ts's header, and
 // agents-panel.test.ts/agent-retry-ux.test.ts/chat-jump.test.ts for the same
 // convention applied to other chat.ts behavior).
-const chatSource = readFileSync(new URL("./chat.ts", import.meta.url), "utf8");
+import { chatSource } from "./module-source.test-support.js";
 
 function sourceBetween(source: string, start: string, end: string): string {
   const startIndex = source.indexOf(start);

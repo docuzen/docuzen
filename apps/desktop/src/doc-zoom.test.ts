@@ -113,7 +113,7 @@ describe("applyZoomToIframeDoc", () => {
 // --- wiring pins (no DOM harness in this package — see file header) ---
 const docZoomSource = readFileSync(new URL("./doc-zoom.ts", import.meta.url), "utf8");
 const mainSource = readFileSync(new URL("./main.ts", import.meta.url), "utf8");
-const surfaceSource = readFileSync(new URL("./surface.ts", import.meta.url), "utf8");
+import { surfaceSource } from "./module-source.test-support.js";
 const htmlSurfaceSource = readFileSync(new URL("./html-surface.ts", import.meta.url), "utf8");
 const snippetPreviewSource = readFileSync(new URL("./html-snippet-preview.ts", import.meta.url), "utf8");
 const indexSource = readFileSync(new URL("../index.html", import.meta.url), "utf8");

@@ -2,6 +2,7 @@ import { readFile, writeFile } from "node:fs/promises";
 import { basename } from "node:path";
 import matter from "gray-matter";
 import { hadPaths } from "./paths.js";
+import { withFileLock, writeFileAtomic } from "./io.js";
 import { isHtmlDoc } from "./doc-format.js";
 import { ensureDocuzenHidden } from "./hide.js";
 import { readManifest, writeManifest, initManifest, contentHash } from "./manifest.js";
@@ -105,7 +106,8 @@ export async function restoreVersion(
   // leave the live annotations.json untouched.
   const versionAnnotations = await readVersionAnnotations(docPath, versionId);
   if (versionAnnotations !== "") {
-    await writeFile(hadPaths(docPath).annotations, versionAnnotations, "utf8");
+    const annotationsPath = hadPaths(docPath).annotations;
+    await withFileLock(annotationsPath, () => writeFileAtomic(annotationsPath, versionAnnotations));
   }
   return { restored: true, version: versionId };
 }

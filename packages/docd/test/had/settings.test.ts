@@ -24,10 +24,9 @@ afterEach(async () => {
 });
 
 describe("settings", () => {
-  it("defaults scope to the document folder + propose mode + keyless web search when none saved", async () => {
+  it("defaults scope to the document folder + Suggesting mode + keyless web search when none saved", async () => {
     expect(await readSettings(docPath)).toEqual({
       scope: "folder",
-      harness: "pi",
       agentEdit: "propose",
       webSearch: { enabled: true, provider: "ddg" },
     });
@@ -37,7 +36,6 @@ describe("settings", () => {
     await writeSettings(docPath, { scope: "repo", model: "gpt-5.5", agentEdit: "direct" });
     expect(await readSettings(docPath)).toEqual({
       scope: "repo",
-      harness: "pi",
       model: "gpt-5.5",
       agentEdit: "direct",
       webSearch: { enabled: true, provider: "ddg" },
@@ -62,10 +60,10 @@ describe("settings", () => {
 });
 
 describe("settings — harness default from app config", () => {
-  it("fresh doc harness defaults to 'pi' when no config.toml exists", async () => {
+  it("fresh doc names no harness when no config.toml exists (the sidecar's registry default applies)", async () => {
     // configDir is empty (no config.toml), set by the outer beforeEach
     const s = await readSettings(docPath);
-    expect(s.harness).toBe("pi");
+    expect(s.harness).toBeUndefined();
   });
 
   it("fresh doc harness reads 'codex' when app config sets [harness] default = codex", async () => {

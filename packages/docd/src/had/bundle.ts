@@ -2,6 +2,7 @@ import { mkdirSync, renameSync, rmSync } from "node:fs";
 import { basename, dirname, join } from "node:path";
 import AdmZip from "adm-zip";
 import { hadPaths } from "./paths.js";
+import { TMP_SUFFIX } from "./io.js";
 import { resolveHadDir } from "./resolve.js";
 import { readVersion } from "./versions.js";
 
@@ -24,7 +25,7 @@ export async function exportHadz(
   } else {
     zip.addLocalFile(docPath); // the doc at the zip root
   }
-  zip.addLocalFolder(paths.dir, basename(paths.dir), (name) => !/\.db-(wal|shm)$/.test(name));
+  zip.addLocalFolder(paths.dir, basename(paths.dir), (name) => !/\.db-(wal|shm)$/.test(name) && !name.endsWith(TMP_SUFFIX));
   const outPath = opts.outPath ?? `${docPath}.hadz`;
   zip.writeZip(outPath);
   return { path: outPath };

@@ -66,6 +66,31 @@ describe("listThreadTree", () => {
     expect(br.title).toContain("revised question");
   });
 
+  it("carries what the review rail needs to restore a card without fetching each thread", async () => {
+    await seedComment();
+    const failing = {
+      async start(): Promise<never> {
+        throw new Error("gateway down");
+      },
+      async send(): Promise<never> {
+        throw new Error("unused");
+      },
+    };
+    const orch = new Orchestrator({ runner: failing, db, now: () => "t" });
+    await expect(
+      orch.discuss(docPath, { threadId: "c0001", annotationId: "c0001", stance: "none", comment: "the ask that failed" }),
+    ).rejects.toThrow("gateway down");
+
+    const [failed] = await listThreadTree(docPath);
+    // A failed first turn: no agent reply yet, and the message to offer for a retry.
+    expect(failed).toMatchObject({ status: "error", hasAgentTurn: false, lastYouBody: "the ask that failed" });
+
+    const ok = new Orchestrator({ runner: new FakePiRunner([{ reply: "answer" }]), db, now: () => "t" });
+    await ok.discuss(docPath, { threadId: "c0001", annotationId: "c0001", stance: "none", comment: "second try" });
+    const [answered] = await listThreadTree(docPath);
+    expect(answered).toMatchObject({ status: "responded", hasAgentTurn: true, lastYouBody: "second try" });
+  });
+
   it("returns [] for a doc with no threads", async () => {
     expect(await listThreadTree(docPath)).toEqual([]);
   });

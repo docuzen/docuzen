@@ -26,13 +26,11 @@ import {
   resolveComment,
 } from "../had/index.js";
 import type { RpcRequest, RpcResponse, RpcEmit } from "./types.js";
-import type { RpcMethod, RpcParams } from "../protocol/rpc.js";
+import type { RpcMethod, RpcParams, RpcResult } from "../protocol/rpc.js";
 
-/** Single cast point: the wire gives us unknown params; the schema says
- * what each method expects. Compile-time contract, no runtime validation
- * (local-only sidecar — see spec §1). */
-function paramsFor<M extends RpcMethod>(_method: M, params: Record<string, unknown>): RpcParams<M> {
-  return params as RpcParams<M>;
+/** pi's default model registry location. */
+export function defaultModelsPath(): string {
+  return join(homedir(), ".pi", "agent", "models.json");
 }
 
 /** Adapts an agent's streamed token events to the wire's RpcEvent shape.
@@ -54,31 +52,44 @@ export interface RpcHandlerDeps {
   modelsPath?: string;
 }
 
-/** pi's default model registry location. */
-function defaultModelsPath(): string {
-  return join(homedir(), ".pi", "agent", "models.json");
-}
-
 interface DocResources {
   db: TaskDB;
   orch: Orchestrator;
 }
 
 /**
- * Transport-agnostic dispatch over the backend. The UI (and the future
- * WebSocket server / Tauri IPC) call `handle()`; this owns per-doc resources.
+ * One implementation per wire method, typed straight from RpcSchema: the compiler
+ * rejects a missing method, a params shape the schema doesn't declare, and a result
+ * that doesn't match what the desktop is told it will receive. (The previous `switch`
+ * returned `unknown`, so a drifted result shape compiled fine and broke at runtime.)
+ */
+type RpcHandlers = {
+  [M in RpcMethod]: (params: RpcParams<M>, emit?: RpcEmit) => Promise<RpcResult<M>> | RpcResult<M>;
+};
+
+/**
+ * Transport-agnostic dispatch over the backend. The WebSocket server calls `handle()`;
+ * this owns per-doc resources (TaskDB + Orchestrator).
  */
 export class RpcHandler {
   private docs = new Map<string, DocResources>();
+  private readonly registry: HarnessRegistry;
+  private readonly modelsPath: string;
+  private readonly handlers: RpcHandlers;
 
-  constructor(private deps: RpcHandlerDeps) {}
+  constructor(private deps: RpcHandlerDeps) {
+    if (!deps.registry && !deps.runner) throw new Error("RpcHandler requires a runner or a registry");
+    this.registry = deps.registry ?? HarnessRegistry.single(deps.runner!);
+    this.modelsPath = deps.modelsPath ?? defaultModelsPath();
+    this.handlers = this.buildHandlers();
+  }
 
   private resourcesFor(docPath: string): DocResources {
     let r = this.docs.get(docPath);
     if (!r) {
       const db = new TaskDB(hadPaths(docPath).stateDb);
       const orch = new Orchestrator({
-        ...(this.deps.registry ? { registry: this.deps.registry } : { runner: this.deps.runner! }),
+        registry: this.registry,
         db,
         now: this.deps.now,
         author: this.deps.author,
@@ -89,25 +100,69 @@ export class RpcHandler {
     return r;
   }
 
+  private orch(docPath: string): Orchestrator {
+    return this.resourcesFor(docPath).orch;
+  }
+
   async handle(req: RpcRequest, emit?: RpcEmit): Promise<RpcResponse> {
     try {
-      const result = await this.dispatch(req.method, req.params, emit);
+      // The single cast point: the wire gives us an unknown method name and params; the
+      // schema says what each method expects. Compile-time contract, no runtime
+      // validation (local-only sidecar — see spec §1).
+      // (hasOwn, not `in`: a method named "constructor" or "toString" must be unknown.)
+      if (!Object.hasOwn(this.handlers, req.method)) throw new Error(`unknown method: ${req.method}`);
+      const handler = (this.handlers as Record<string, (p: unknown, e?: RpcEmit) => unknown>)[req.method];
+      const result = await handler(req.params, emit);
       return { id: req.id, ok: true, result };
     } catch (err) {
-      return { id: req.id, ok: false, error: (err as Error).message };
+      return { id: req.id, ok: false, error: err instanceof Error ? err.message : String(err) };
     }
   }
 
-  private async dispatch(
-    method: string,
-    params: Record<string, unknown>,
-    emit?: RpcEmit,
-  ): Promise<unknown> {
-    switch (method) {
-      case "discuss": {
-        const p = paramsFor("discuss", params);
-        const { orch } = this.resourcesFor(p.docPath);
-        await orch.discuss(
+  private buildHandlers(): RpcHandlers {
+    const now = () => this.deps.now();
+    return {
+      // ---- document lifecycle ----
+      openDoc: async (p) => {
+        // Crash recovery: a killed sidecar can leave TaskDB rows stuck "running" forever
+        // (the process died mid-turn, so nothing ever transitioned them). Reconcile on
+        // every open so a reopened doc's Agents panel doesn't show a phantom live task —
+        // layering: the handler orchestrates the call, doc-store itself stays
+        // orchestrator-free (see Orchestrator.reconcile's doc comment).
+        await this.orch(p.docPath).reconcile(p.docPath);
+        return openDoc(p.docPath);
+      },
+      saveDoc: (p) => saveDoc(p.docPath, p.text, now()),
+      restoreVersion: (p) => restoreVersion(p.docPath, p.versionId, now()),
+      listVersions: (p) => listVersions(p.docPath),
+      readVersion: async (p) => ({ content: await readVersion(p.docPath, p.versionId) }),
+      exportHadz: (p) => exportHadz(p.docPath, { versionId: p.versionId, outPath: p.outPath }),
+      importHadz: (p) => importHadz(p.hadzPath, p.destDir),
+
+      // ---- annotations + comments ----
+      createAnnotation: (p) => createAnnotation(p.docPath, p, { now: now(), defaultAuthor: this.deps.author }),
+      deleteAnnotation: async (p) => {
+        await deleteAnnotation(p.docPath, p.id);
+        return { ok: true };
+      },
+      listAnnotations: async (p) => (await readAnnotations(p.docPath)).annotations,
+      saveComment: async (p) => {
+        await saveComment(p.docPath, p, now());
+        return { ok: true };
+      },
+      resolveComment: async (p) => {
+        await resolveComment(p.docPath, p.id, p.resolved !== false, now());
+        return { ok: true };
+      },
+
+      // ---- threads ----
+      listThreads: (p) => listThreadTree(p.docPath),
+      getThread: (p) => readThread(p.docPath, p.threadId),
+      listTasks: (p) => this.resourcesFor(p.docPath).db.list(),
+
+      // ---- agent turns (streaming) ----
+      discuss: async (p, emit) => {
+        await this.orch(p.docPath).discuss(
           p.docPath,
           {
             threadId: p.threadId,
@@ -119,162 +174,71 @@ export class RpcHandler {
           tokenSink(emit),
         );
         return { ok: true };
-      }
-      case "panel": {
-        const p = paramsFor("panel", params);
-        const { orch } = this.resourcesFor(p.docPath);
-        await orch.panel(
+      },
+      reply: async (p, emit) => {
+        await this.orch(p.docPath).reply(p.docPath, p.threadId, p.message, tokenSink(emit), p.stance, p.modelId);
+        return { ok: true };
+      },
+      panel: async (p, emit) => {
+        await this.orch(p.docPath).panel(
           p.docPath,
-          {
-            threadId: p.threadId,
-            annotationId: p.annotationId,
-            stance: p.stance,
-            comment: p.comment,
-          },
+          { threadId: p.threadId, annotationId: p.annotationId, stance: p.stance, comment: p.comment },
           p.models,
           tokenSink(emit),
         );
         return { ok: true };
-      }
-      case "listHarnesses":
-        return (this.deps.registry ?? HarnessRegistry.single(this.deps.runner!)).list();
-      case "reviewDocument": {
-        const p = paramsFor("reviewDocument", params);
-        const { orch } = this.resourcesFor(p.docPath);
-        return orch.review(
-          p.docPath,
-          {
-            stance: p.stance ?? "none",
-            rubric: p.rubric,
-            modelId: p.modelId,
-          },
-          tokenSink(emit),
-        );
-      }
-      case "resolveDirectives": {
-        const p = paramsFor("resolveDirectives", params);
-        const { orch } = this.resourcesFor(p.docPath);
-        return orch.resolveDirectives(p.docPath, tokenSink(emit));
-      }
-      case "reply": {
-        const p = paramsFor("reply", params);
-        const { orch } = this.resourcesFor(p.docPath);
-        await orch.reply(
-          p.docPath,
-          p.threadId,
-          p.message,
-          tokenSink(emit),
-          p.stance,
-          p.modelId,
-        );
-        return { ok: true };
-      }
-      case "cancelTurn": {
-        const p = paramsFor("cancelTurn", params);
-        const { orch } = this.resourcesFor(p.docPath);
-        await orch.cancel(p.docPath, p.threadId);
-        return { ok: true };
-      }
-      case "improve": {
-        const p = paramsFor("improve", params);
-        const { orch } = this.resourcesFor(p.docPath);
-        return orch.improve(p.docPath, p.threadId, tokenSink(emit));
-      }
-      case "visualize": {
-        const p = paramsFor("visualize", params);
-        const { orch } = this.resourcesFor(p.docPath);
-        return orch.visualize(p.docPath, p.threadId, tokenSink(emit));
-      }
-      case "branchThread": {
-        const p = paramsFor("branchThread", params);
-        const { orch } = this.resourcesFor(p.docPath);
-        return orch.branch(
+      },
+      branchThread: (p, emit) =>
+        this.orch(p.docPath).branch(
           p.docPath,
           p.threadId,
           p.atTurnIndex,
           p.message,
           { doc: p.doc ?? "latest", modelId: p.modelId },
           tokenSink(emit),
-        );
-      }
-      case "listProposals": {
-        const p = paramsFor("listProposals", params);
-        return listProposals(p.docPath, p.threadId);
-      }
-      case "approveProposal": {
-        const p = paramsFor("approveProposal", params);
-        const { orch } = this.resourcesFor(p.docPath);
-        await orch.approveProposal(p.docPath, p.threadId, p.proposalId);
+        ),
+      improve: (p, emit) => this.orch(p.docPath).improve(p.docPath, p.threadId, tokenSink(emit)),
+      visualize: (p, emit) => this.orch(p.docPath).visualize(p.docPath, p.threadId, tokenSink(emit)),
+      reviewDocument: (p, emit) =>
+        this.orch(p.docPath).review(
+          p.docPath,
+          { stance: p.stance ?? "none", rubric: p.rubric, modelId: p.modelId },
+          tokenSink(emit),
+        ),
+      resolveDirectives: (p, emit) => this.orch(p.docPath).resolveDirectives(p.docPath, tokenSink(emit)),
+      cancelTurn: async (p) => {
+        await this.orch(p.docPath).cancel(p.docPath, p.threadId);
         return { ok: true };
-      }
-      case "rejectProposal": {
-        const p = paramsFor("rejectProposal", params);
-        const { orch } = this.resourcesFor(p.docPath);
-        await orch.rejectProposal(p.docPath, p.threadId, p.proposalId);
+      },
+
+      // ---- proposals ----
+      listProposals: (p) => listProposals(p.docPath, p.threadId),
+      approveProposal: async (p) => {
+        await this.orch(p.docPath).approveProposal(p.docPath, p.threadId, p.proposalId);
         return { ok: true };
-      }
-      case "openDoc": {
-        const p = paramsFor("openDoc", params);
-        // Crash recovery: a killed sidecar can leave TaskDB rows stuck "running" forever
-        // (the process died mid-turn, so nothing ever transitioned them). Reconcile on
-        // every open so a reopened doc's Agents panel doesn't show a phantom live task —
-        // layering: the handler orchestrates the call, doc-store itself stays
-        // orchestrator-free (see Orchestrator.reconcile's doc comment).
-        const { orch } = this.resourcesFor(p.docPath);
-        await orch.reconcile(p.docPath);
-        return openDoc(p.docPath);
-      }
-      case "importHadz": {
-        const p = paramsFor("importHadz", params);
-        return importHadz(p.hadzPath, p.destDir);
-      }
-      case "saveComment": {
-        const p = paramsFor("saveComment", params);
-        await saveComment(p.docPath, p, this.deps.now());
+      },
+      rejectProposal: async (p) => {
+        await this.orch(p.docPath).rejectProposal(p.docPath, p.threadId, p.proposalId);
         return { ok: true };
-      }
-      case "saveDoc": {
-        const p = paramsFor("saveDoc", params);
-        return saveDoc(p.docPath, p.text, this.deps.now());
-      }
-      case "restoreVersion": {
-        const p = paramsFor("restoreVersion", params);
-        return restoreVersion(p.docPath, p.versionId, this.deps.now());
-      }
-      case "exportHadz": {
-        const p = paramsFor("exportHadz", params);
-        return exportHadz(p.docPath, { versionId: p.versionId, outPath: p.outPath });
-      }
-      case "createAnnotation": {
-        const p = paramsFor("createAnnotation", params);
-        return createAnnotation(p.docPath, p, { now: this.deps.now(), defaultAuthor: this.deps.author });
-      }
-      case "resolveComment": {
-        const p = paramsFor("resolveComment", params);
-        await resolveComment(p.docPath, p.id, p.resolved !== false, this.deps.now());
+      },
+
+      // ---- models, harnesses, settings ----
+      listModels: () => listModels(this.modelsPath),
+      saveModels: async (p) => {
+        await saveModels(this.modelsPath, p.models);
         return { ok: true };
-      }
-      case "deleteAnnotation": {
-        const p = paramsFor("deleteAnnotation", params);
-        await deleteAnnotation(p.docPath, p.id);
-        return { ok: true };
-      }
-      case "listModels":
-        return listModels(this.deps.modelsPath ?? defaultModelsPath());
-      case "saveModels": {
-        const p = paramsFor("saveModels", params);
-        await saveModels(this.deps.modelsPath ?? defaultModelsPath(), p.models);
-        return { ok: true };
-      }
-      case "getSettings": {
-        const p = paramsFor("getSettings", params);
-        return readSettings(p.docPath);
-      }
-      case "setSettings": {
-        const p = paramsFor("setSettings", params);
+      },
+      listHarnesses: () => this.registry.list(),
+      getSettings: async (p) => {
+        const settings = await readSettings(p.docPath);
+        // A doc that names no harness (and no app default) runs on the registry default —
+        // report that, so the UI shows the harness turns will actually use.
+        return { ...settings, harness: settings.harness ?? this.registry.defaultId() };
+      },
+      setSettings: async (p) => {
         await writeSettings(p.docPath, p.settings);
         // Write-through: if the user chose a config-level harness (pi | codex), persist it
-        // as the app default so future documents open with the same harness.  "claude-code"
+        // as the app default so future documents open with the same harness. "claude-code"
         // is a doc-only value that has no HarnessChoice equivalent in config.toml.
         if (p.settings.harness === "pi" || p.settings.harness === "codex") {
           const cfg = readAppConfig();
@@ -287,50 +251,24 @@ export class RpcHandler {
           }
         }
         return { ok: true };
-      }
-      case "getAppConfig": {
+      },
+      getAppConfig: async () => {
         const config = readAppConfig();
-        const models = await listModels(this.deps.modelsPath ?? defaultModelsPath()).catch(() => []);
-        const piUsable = Boolean(
-          config.pi?.model && models.some((m) => m.key === config.pi?.model && m.hasKey),
-        );
-        const registry = this.deps.registry;
-        const codexUsable = Boolean(registry?.list().find((h) => h.id === "codex")?.available);
+        const models = await listModels(this.modelsPath).catch(() => []);
+        // Same rule as server/select-runner.ts (minus the LLM_API_KEY dev override): the
+        // configured model must have a stored key, or — with none configured — any model does.
+        const wanted = config.pi?.model;
+        const piUsable = wanted
+          ? models.some((m) => m.key === wanted && m.hasKey)
+          : models.some((m) => m.hasKey);
+        const codexUsable = Boolean(this.registry.list().find((h) => h.id === "codex")?.available);
         return { config, piUsable, codexUsable };
-      }
-      case "setAppConfig": {
-        const p = paramsFor("setAppConfig", params);
+      },
+      setAppConfig: (p) => {
         writeAppConfig(p.config);
         return { ok: true };
-      }
-      case "listAnnotations": {
-        const p = paramsFor("listAnnotations", params);
-        return (await readAnnotations(p.docPath)).annotations;
-      }
-      case "getThread": {
-        const p = paramsFor("getThread", params);
-        return readThread(p.docPath, p.threadId);
-      }
-      case "listThreads": {
-        const p = paramsFor("listThreads", params);
-        return listThreadTree(p.docPath);
-      }
-      case "listVersions": {
-        const p = paramsFor("listVersions", params);
-        return listVersions(p.docPath);
-      }
-      case "readVersion": {
-        const p = paramsFor("readVersion", params);
-        return { content: await readVersion(p.docPath, p.versionId) };
-      }
-      case "listTasks": {
-        const p = paramsFor("listTasks", params);
-        const { db } = this.resourcesFor(p.docPath);
-        return db.list();
-      }
-      default:
-        throw new Error(`unknown method: ${method}`);
-    }
+      },
+    };
   }
 
   closeAll(): void {

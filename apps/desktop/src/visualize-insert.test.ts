@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { createAnchor } from "@ai-native-doc/docd/anchor";
-import { insertBlockAfterQuote } from "./surface.js";
+import { insertBlockAfterQuote } from "./selection-agent-actions.js";
 
 const BLOCK = "```mermaid\nflowchart TD\n  A-->B\n```";
 

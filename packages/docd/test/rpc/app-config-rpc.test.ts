@@ -13,6 +13,7 @@ beforeEach(() => {
   process.env.DOCUZEN_CONFIG_DIR = mkdtempSync(join(tmpdir(), "docuzen-rpc-config-"));
   handler = new RpcHandler({
     registry: HarnessRegistry.single(new FakePiRunner([])),
+    now: () => "t",
     modelsPath: join(process.env.DOCUZEN_CONFIG_DIR, "models.json"),
   });
 });

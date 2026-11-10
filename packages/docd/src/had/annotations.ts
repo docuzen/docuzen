@@ -1,34 +1,25 @@
-import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
+import { rm } from "node:fs/promises";
 import type { Annotation, AnnotationsFile, AnnotationType } from "./types.js";
 import { hadPaths } from "./paths.js";
+import { readJsonFile, updateJsonFile, withFileLock, writeJsonFile } from "./io.js";
 
-const EMPTY: AnnotationsFile = { version: 1, annotations: [] };
+const empty = (): AnnotationsFile => ({ version: 1, annotations: [] });
 
 export async function readAnnotations(docPath: string): Promise<AnnotationsFile> {
-  const p = hadPaths(docPath);
-  try {
-    const raw = await readFile(p.annotations, "utf8");
-    return JSON.parse(raw) as AnnotationsFile;
-  } catch (err: unknown) {
-    if ((err as NodeJS.ErrnoException).code === "ENOENT")
-      return { version: EMPTY.version, annotations: [] };
-    throw err;
-  }
+  return readJsonFile(hadPaths(docPath).annotations, empty);
 }
 
-export async function writeAnnotations(
-  docPath: string,
-  f: AnnotationsFile,
-): Promise<void> {
-  const p = hadPaths(docPath);
-  await mkdir(p.dir, { recursive: true });
-  await writeFile(p.annotations, JSON.stringify(f, null, 2) + "\n", "utf8");
+/** Replace the whole annotations file (atomic, serialized with every other writer). */
+export async function writeAnnotations(docPath: string, f: AnnotationsFile): Promise<void> {
+  const path = hadPaths(docPath).annotations;
+  await withFileLock(path, () => writeJsonFile(path, f));
 }
 
 export async function addAnnotation(docPath: string, a: Annotation): Promise<void> {
-  const f = await readAnnotations(docPath);
-  f.annotations.push(a);
-  await writeAnnotations(docPath, f);
+  await updateJsonFile(hadPaths(docPath).annotations, empty, (f) => {
+    f.annotations.push(a);
+    return { next: f, result: undefined };
+  });
 }
 
 export async function updateAnnotation(
@@ -36,19 +27,21 @@ export async function updateAnnotation(
   id: string,
   patch: Partial<Omit<Annotation, "id">>,
 ): Promise<void> {
-  const f = await readAnnotations(docPath);
-  const idx = f.annotations.findIndex((a) => a.id === id);
-  if (idx === -1) throw new Error(`annotation not found: ${id}`);
-  f.annotations[idx] = { ...f.annotations[idx], ...patch };
-  await writeAnnotations(docPath, f);
+  await updateJsonFile(hadPaths(docPath).annotations, empty, (f) => {
+    const idx = f.annotations.findIndex((a) => a.id === id);
+    if (idx === -1) throw new Error(`annotation not found: ${id}`);
+    f.annotations[idx] = { ...f.annotations[idx], ...patch };
+    return { next: f, result: undefined };
+  });
 }
 
 /** Remove an annotation by id. No-op if it doesn't exist. */
 export async function removeAnnotation(docPath: string, id: string): Promise<void> {
-  const f = await readAnnotations(docPath);
-  const next = f.annotations.filter((a) => a.id !== id);
-  if (next.length === f.annotations.length) return;
-  await writeAnnotations(docPath, { ...f, annotations: next });
+  await updateJsonFile(hadPaths(docPath).annotations, empty, (f) => {
+    const next = f.annotations.filter((a) => a.id !== id);
+    if (next.length === f.annotations.length) return { result: undefined };
+    return { next: { ...f, annotations: next }, result: undefined };
+  });
 }
 
 /** Next sequential annotation id ("c0001", "c0002", …) given the existing ones. */
@@ -59,6 +52,22 @@ export function nextAnnotationId(existing: Annotation[]): string {
     if (m) max = Math.max(max, Number(m[1]));
   }
   return `c${String(max + 1).padStart(4, "0")}`;
+}
+
+/**
+ * Allocate the next sequential id and append the annotation `build` makes for it, as ONE
+ * locked step. Allocating outside the lock (read ids, then add) lets two concurrent
+ * creations pick the same id — the second then overwrites the first one's thread file.
+ */
+export async function appendAnnotation(
+  docPath: string,
+  build: (id: string) => Annotation,
+): Promise<Annotation> {
+  return updateJsonFile(hadPaths(docPath).annotations, empty, (f) => {
+    const annotation = build(nextAnnotationId(f.annotations));
+    f.annotations.push(annotation);
+    return { next: f, result: annotation };
+  });
 }
 
 export interface CreateAnnotationInput {
@@ -81,9 +90,7 @@ export async function createAnnotation(
   input: CreateAnnotationInput,
   deps: CreateAnnotationDeps,
 ): Promise<Annotation> {
-  const existing = (await readAnnotations(docPath)).annotations;
-  const id = nextAnnotationId(existing);
-  const annotation: Annotation = {
+  return appendAnnotation(docPath, (id) => ({
     id,
     type: input.kind,
     anchor: input.anchor,
@@ -93,9 +100,7 @@ export async function createAnnotation(
     createdAt: deps.now,
     ...(input.color ? { color: input.color } : {}),
     author: input.author ?? deps.defaultAuthor ?? "you",
-  };
-  await addAnnotation(docPath, annotation);
-  return annotation;
+  }));
 }
 
 /** Remove an annotation and its thread/session files. No-op on missing files. */

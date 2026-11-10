@@ -6,7 +6,7 @@ const indexSource = readFileSync(new URL("../index.html", import.meta.url), "utf
 // panel/refresh logic moved wholesale to surface.ts, in the frontend split.
 // Assertion semantics are unchanged; only the source files moved.
 const editorSource = readFileSync(new URL("./editor.ts", import.meta.url), "utf8");
-const searchSurfaceSource = readFileSync(new URL("./surface.ts", import.meta.url), "utf8");
+import { surfaceSource as searchSurfaceSource } from "./module-source.test-support.js";
 const stylesSource = readFileSync(new URL("./styles.css", import.meta.url), "utf8");
 // html-surface.ts (the HTML iframe surface class) — unrelated to, and unmoved by,
 // the search extraction above; kept under its pre-existing name.

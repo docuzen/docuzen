@@ -16,7 +16,8 @@ docuzen is a desktop app for AI-native document review. You open a Markdown or H
 - **Document-wide review** — ask the agent to review the whole document and surface findings.
 - **`[[ ... ]]` directives** — leave inline instructions and have the agent resolve them.
 - **Version snapshots** — every accepted change is snapshotted; restore any prior version.
-- **Per-document settings** — model, tool scope, direct vs. proposed edits, standing instructions, and web-search provider.
+- **Suggesting or Editing** — per document, choose whether agent edits wait for your approval or apply directly. Either way each one is recorded and versioned.
+- **Per-document settings** — harness, model, tool scope, edit mode, standing instructions, and web-search provider.
 - **Portable `.hadz` bundles** — export a document with its full review history and re-import it elsewhere.
 
 ## Install (macOS)
@@ -38,7 +39,7 @@ On first launch, docuzen asks you to pick an agent harness — **Pi** or **Codex
 
 ## Run from source (developers)
 
-Prerequisites: Node.js 20+, Rust/Cargo, and Tauri's native dependencies (`xcode-select --install` on macOS). See [docs/install.md](docs/install.md) for per-OS details and full build/test commands.
+Prerequisites: Node.js 22+, Rust/Cargo, and Tauri's native dependencies (`xcode-select --install` on macOS). See [docs/install.md](docs/install.md) for per-OS details and full build/test commands.
 
 ```bash
 npm install

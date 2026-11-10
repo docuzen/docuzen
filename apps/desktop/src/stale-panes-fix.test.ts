@@ -1,5 +1,4 @@
 import { describe, expect, it } from "vitest";
-import { readFileSync } from "node:fs";
 
 // Tab-switch stale-pane fix — root-cause tests.
 //
@@ -17,7 +16,7 @@ import { readFileSync } from "node:fs";
 //
 // Source-text pins per this package's convention (chat.ts's DOM wiring is not
 // otherwise unit-testable in this vitest setup — no jsdom; see agents-panel.test.ts).
-const chatSource = readFileSync(new URL("./chat.ts", import.meta.url), "utf8");
+import { chatSource } from "./module-source.test-support.js";
 
 function sourceBetween(source: string, start: string, end: string): string {
   const startIndex = source.indexOf(start);
@@ -72,25 +71,23 @@ describe("resetChat synchronously clears stale pane content (root cause 2)", () 
     "async function refreshThreadModels(): Promise<void>",
   );
 
-  it("clears threadTreeEl.innerHTML synchronously before the async re-fetch", () => {
-    expect(resetChatSource).toContain('threadTreeEl.innerHTML = "";');
+  // The tree's own state moved to chat-thread-tree.ts; resetChat clears it through
+  // tree.clear(). That a late fetch for the previous document can't repopulate the tree
+  // is asserted behaviourally in chat-behaviour.test.ts.
+  it("clears the thread tree synchronously before the async re-fetch", () => {
+    expect(resetChatSource).toContain("tree.clear();");
+    expect(chatSource).toContain('threadTreeEl.innerHTML = "";');
+    expect(chatSource).toContain("threadNodes = [];");
   });
 
-  it("resets threadNodes to an empty array synchronously", () => {
-    expect(resetChatSource).toContain("threadNodes = [];");
-  });
-
-  it("hides the review form so the previous document's review UI does not persist", () => {
-    expect(resetChatSource).toContain("reviewForm.hidden = true;");
-  });
-
-  it("hides and empties the review status line", () => {
-    expect(resetChatSource).toContain("reviewStatusEl.hidden = true;");
-    expect(resetChatSource).toContain('reviewStatusEl.textContent = "";');
+  // The review form + status reset moved to chat-doc-passes.ts's reset(); that it actually
+  // clears them on a document switch is asserted behaviourally in chat-behaviour.test.ts.
+  it("resets the document-pass controls (review form + status line)", () => {
+    expect(resetChatSource).toContain("passes.reset();");
   });
 
   it("threadTreeEl clear precedes the refreshThreadSelect async kick-off", () => {
-    const treeIdx = resetChatSource.indexOf('threadTreeEl.innerHTML = "";');
+    const treeIdx = resetChatSource.indexOf("tree.clear();");
     const selectIdx = resetChatSource.indexOf("refreshThreadSelect();");
     expect(treeIdx).toBeGreaterThanOrEqual(0);
     expect(selectIdx).toBeGreaterThanOrEqual(0);

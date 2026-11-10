@@ -4,7 +4,7 @@ import { readFileSync } from "node:fs";
 // The HTML surface interactions (popover construction, iframe link handling) moved
 // to surface.ts in the frontend split. Assertion semantics are unchanged; only the
 // source file (and the COMMENT_COLOR/etc. reference now going through `deps`) moved.
-const htmlSurfaceUiSource = readFileSync(new URL("./surface.ts", import.meta.url), "utf8");
+import { surfaceSource as htmlSurfaceUiSource } from "./module-source.test-support.js";
 // html-surface.ts (the HTML iframe surface class) — unrelated to, and unmoved by,
 // this extraction; kept under its pre-existing name.
 const surfaceSource = readFileSync(new URL("./html-surface.ts", import.meta.url), "utf8");

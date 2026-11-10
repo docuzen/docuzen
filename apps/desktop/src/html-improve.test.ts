@@ -5,7 +5,7 @@ import { readFileSync } from "node:fs";
 // unchanged; only the source file (and the routeProposal/api calls now going
 // through `deps`) moved.
 const mainSource = readFileSync(new URL("./main.ts", import.meta.url), "utf8");
-const chatSource = readFileSync(new URL("./chat.ts", import.meta.url), "utf8");
+import { chatSource } from "./module-source.test-support.js";
 
 function sourceBetween(source: string, start: string, end: string): string {
   const startIndex = source.indexOf(start);

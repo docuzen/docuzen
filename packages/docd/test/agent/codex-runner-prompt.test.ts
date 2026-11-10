@@ -157,38 +157,8 @@ describe("buildCodexPrompt — byte-exact capture (pre-refactor baseline)", () =
     `);
   });
 
-  it("allowEdit", () => {
-    expect(buildCodexPrompt({ ...base, allowEdit: true })).toMatchInlineSnapshot(`
-      "You are running as Docuzen's Codex external harness adapter.
-      Use Codex's native capabilities, including its managed web search when useful, but do not claim Docuzen tools are available.
-      To propose a document edit, end your reply with exactly ONE fenced \`\`\`json block of shape {"rationale": string, "hunks": [{"oldText": string, "newText": string}, …]} or {"rationale": string, "fullRewrite": string}. oldText must be copied verbatim from the document. Output no other fenced json blocks.
-
-      ## Document
-      Path: /tmp/doc.md
-      Format: Markdown/body text
-
-      ## Stance
-      Be a skeptical reviewer.
-
-      ## Current document text
-      # Title
-
-      Body text about Redis caching.
-
-      ## Highlight / local context
-      Highlighted text: Redis caching
-      Body text about Redis caching.
-
-      ## Reviewer request
-      Why Redis here?
-
-      ## Adapter limitations
-      Docuzen direct-edit mode is not enabled for the Codex adapter yet; do not edit files. Describe the change instead."
-    `);
-  });
-
-  // Phase 10: conversation turns (discuss/reply/panel/branch) get NO edit contract,
-  // regardless of settings.agentEdit — see canProposeEdits/AgentContext.conversationOnly.
+  // Conversation turns (discuss/reply/panel/branch) get NO edit contract — see
+  // canProposeEdits/AgentContext.conversationOnly.
   it("conversationOnly", () => {
     expect(buildCodexPrompt({ ...base, conversationOnly: true })).toMatchInlineSnapshot(`
       "You are running as Docuzen's Codex external harness adapter.
@@ -218,13 +188,6 @@ describe("buildCodexPrompt — byte-exact capture (pre-refactor baseline)", () =
       This is a conversation turn: discuss only. Docuzen will not apply or offer for approval any edit you include here, even a fenced \`\`\`json block — it will be shown to the reviewer as plain text, not as a proposal. If the reviewer wants a change made, tell them to use Improve, Resolve, or Review instead.
       Do not edit files. Docuzen will persist only your final reply."
     `);
-  });
-
-  it("conversationOnly wins over allowEdit — no contract even when agentEdit was 'direct'", () => {
-    const prompt = buildCodexPrompt({ ...base, conversationOnly: true, allowEdit: true });
-    expect(prompt).not.toContain("To propose a document edit");
-    expect(prompt).toContain("This is a conversation turn: discuss only.");
-    expect(prompt).toContain("Docuzen direct-edit mode is not enabled for the Codex adapter yet");
   });
 
   it("htmlMode, no docPath", () => {

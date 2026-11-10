@@ -8,6 +8,8 @@ import { mkdtemp, copyFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, basename } from "node:path";
 
+import { cleanupTempDirs } from "../parity/launch.mjs";
+
 export { launchTree } from "../parity/launch.mjs";
 
 const tempDirs = [];
@@ -32,6 +34,7 @@ export async function stageFixture(fixtureAbsPath) {
 export async function cleanupStaged() {
   const dirs = tempDirs.splice(0, tempDirs.length);
   await Promise.all(dirs.map((d) => rm(d, { recursive: true, force: true })));
+  await cleanupTempDirs(); // the launcher's own temp dirs (hermetic sidecar HOMEs)
 }
 
 /** Screenshot with focus cleared (kills caret blink) and CSS animations/

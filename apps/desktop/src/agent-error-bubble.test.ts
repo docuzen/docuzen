@@ -1,5 +1,4 @@
 import { describe, expect, it } from "vitest";
-import { readFileSync } from "node:fs";
 
 // task-0: the desktop chat pane's DOM wiring isn't unit-testable in this package's
 // vitest setup (no jsdom — see ui.test.ts's file header), so this pins the real chat.ts
@@ -14,7 +13,7 @@ import { readFileSync } from "node:fs";
 // generic "check your model settings" hint. These tests pin both fixes: `who` is derived
 // only from a model id/name, never `meta`, and both the fail() and empty-reply paths
 // render the real headline prominently with the generic hint demoted to a secondary line.
-const chatSource = readFileSync(new URL("./chat.ts", import.meta.url), "utf8");
+import { chatSource } from "./module-source.test-support.js";
 
 function sourceBetween(source: string, start: string, end: string): string {
   const startIndex = source.indexOf(start);
@@ -33,7 +32,7 @@ const streamingAgentTurnSource = sourceBetween(
 describe("streamingAgentTurn's empty-reply/fail text never blames the stance", () => {
   it("computes `who` from modelId/the footer model — never from `meta` (the stance label)", () => {
     expect(streamingAgentTurnSource).toContain(
-      'const who = modelName(modelId || chatModelEl.value) || "the agent";',
+      'const who = deps.modelName(modelId || deps.getFooterModelId()) || "the agent";',
     );
     // The historical bug: `meta || modelName(...)` — meta is the STANCE for discuss/
     // reply/branch bubbles, so this must never reappear in the who computation.
@@ -89,13 +88,16 @@ describe("streamingAgentTurn call sites pass the actual model driving each bubbl
   });
 
   it("runCardAskAgent passes its resolved modelId alongside the stance", () => {
-    const runCardSource = sourceBetween(
+    // The card resolves its own model picker and hands it over with the stance...
+    const cardSource = sourceBetween(
       chatSource,
       "const runCardAskAgent = async (): Promise<void> => {",
       "discussBtn.addEventListener",
     );
-    expect(runCardSource).toContain("const modelId = modelSel.value || undefined;");
-    expect(runCardSource).toContain("const bubble = streamingAgentTurn(stanceSel.value, modelId);");
+    expect(cardSource).toContain("modelId: modelSel.value || undefined");
+    // ...and the pane-side flow labels the bubble with that stance + model.
+    const flowSource = sourceBetween(chatSource, "async function askAgentFromCard(", "async function resendFromCard(");
+    expect(flowSource).toContain("const bubble = streamingAgentTurn(ask.stance, ask.modelId);");
   });
 
   it("the panel fan-out passes the same per-bubble model id it already uses as meta", () => {

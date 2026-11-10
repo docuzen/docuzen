@@ -18,6 +18,10 @@ export interface ThreadNode {
   /** First "you" turn body, whitespace-collapsed + capped; falls back to anchorExact. */
   title: string;
   turnCount: number;
+  /** Whether the agent has replied at least once (the next message is a reply, not a first ask). */
+  hasAgentTurn: boolean;
+  /** Body of the most recent "you" turn — what a failed turn offers to resend. */
+  lastYouBody?: string;
   status: string;
   createdAt: string;
 }
@@ -44,11 +48,14 @@ export async function listThreadTree(docPath: string): Promise<ThreadNode[]> {
       const anchorExact = fm.anchorExact ?? ann.anchor.exact;
       const youBody = thread.turns.find((t) => t.role === "you")?.body;
       const title = youBody ? deriveTitle(youBody) : anchorExact;
+      const lastYou = [...thread.turns].reverse().find((t) => t.role === "you")?.body;
       const node: ThreadNode = {
         id: ann.id,
         anchorExact,
         title,
         turnCount: thread.turns.length,
+        hasAgentTurn: thread.turns.some((t) => t.role === "agent"),
+        ...(lastYou !== undefined ? { lastYouBody: lastYou } : {}),
         status: fm.status,
         createdAt: ann.createdAt,
       };

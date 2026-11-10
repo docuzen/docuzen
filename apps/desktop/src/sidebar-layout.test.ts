@@ -6,9 +6,8 @@ import { readFileSync } from "node:fs";
 // `document.querySelector` (see each file's own header), so — per the repo's
 // established pattern (see e.g. harness-settings.test.ts, agent-retry-ux.test.ts) —
 // these are source-pin assertions rather than jsdom-driven behavioral tests.
-const shellSource = readFileSync(new URL("./shell.ts", import.meta.url), "utf8");
-const chatSource = readFileSync(new URL("./chat.ts", import.meta.url), "utf8");
-const surfaceSource = readFileSync(new URL("./surface.ts", import.meta.url), "utf8");
+
+import { chatSource, shellSource, surfaceSource } from "./module-source.test-support.js";
 const editorSource = readFileSync(new URL("./editor.ts", import.meta.url), "utf8");
 const mainSource = readFileSync(new URL("./main.ts", import.meta.url), "utf8");
 const htmlSource = readFileSync(new URL("../index.html", import.meta.url), "utf8");

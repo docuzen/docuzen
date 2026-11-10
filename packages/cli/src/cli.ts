@@ -80,7 +80,9 @@ function doctor(): void {
   const cargo = cargoVersion();
   console.log(`${cargo ? "✓" : "✗"} cargo: ${cargo ?? "not found"}`);
   if (!process.env.LLM_API_KEY) {
-    console.log("! LLM_API_KEY is not set; the sidecar will use the offline fake runner.");
+    console.log(
+      "! LLM_API_KEY is not set; live agents need a harness configured in ~/.docuzen/config.toml (first-launch modal).",
+    );
   }
   process.exit(ok ? 0 : 1);
 }
@@ -100,7 +102,6 @@ For future packaged releases, this command will check npm/GitHub Releases and up
 const [cmd, arg] = process.argv.slice(2);
 switch (cmd ?? "open") {
   case "open":
-    launch(arg);
   case "dev":
     launch(arg);
   case "doctor":

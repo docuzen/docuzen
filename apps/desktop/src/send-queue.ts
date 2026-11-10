@@ -13,10 +13,8 @@
 // not-yet-dispatched queued turn — there is no persistence layer for them.
 // This is a deliberate scope limit (see task-1-brief.md), not an oversight.
 //
-// NOTE: this "queued" has nothing to do with the backend TaskRow status also
-// spelled "queued" in chat.ts's Agents panel (a server-side task-scheduling
-// concept). A `QueuedTurn` here is purely a client-side "not sent yet"
-// message; it never becomes a TaskRow until it's actually dispatched.
+// A `QueuedTurn` is purely a client-side "not sent yet" message; it never
+// becomes a backend TaskRow until it's actually dispatched.
 
 /** One not-yet-dispatched (or currently-dispatching) chat message. */
 export interface QueuedTurn {
@@ -35,9 +33,10 @@ export type SendOutcome = "sent" | "failed" | "stopped";
 /**
  * Per-thread FIFO of not-yet-dispatched turns, plus the "is a turn currently
  * in flight for this thread" bit that governs whether a new commit dispatches
- * immediately or queues. One in-flight turn per thread, ever — enforced by
- * `driveSend` below being the only code path that dispatches, and by it being
- * the only caller of `markInFlight`/`clearInFlight`.
+ * immediately or queues. One in-flight turn per thread, ever — `driveSend` below
+ * holds the bit for queued chat messages, and chat.ts's beginExclusiveTurn/
+ * endExclusiveTurn hold the same bit for the turns that aren't chat messages
+ * (card "Ask agent", Improve, Brainstorm, Visualize, Panel).
  */
 export class SendQueue {
   private readonly queues = new Map<string, QueuedTurn[]>();
@@ -127,4 +126,35 @@ export async function driveSend(
   if (outcome !== "sent") return; // halted — remaining queue (if any) stays queued
   const next = queue.dequeueNext(threadId);
   if (next) await driveSend(queue, threadId, next, send);
+}
+
+/**
+ * Claim `threadId` for a turn that is NOT a queued chat message (card "Ask agent",
+ * Improve, Brainstorm, Visualize, Panel), so that `commitSend` queues behind it instead
+ * of dispatching a second concurrent turn on the same thread. Returns false — and the
+ * caller must not start — when the thread already has a turn in flight. Every successful
+ * claim MUST be paired with `releaseExclusive` in a `finally`.
+ */
+export function claimExclusive(queue: SendQueue, threadId: string): boolean {
+  if (queue.isInFlight(threadId)) return false;
+  queue.markInFlight(threadId);
+  return true;
+}
+
+/**
+ * Release a thread claimed by `claimExclusive`. When `drain` is true (the turn succeeded
+ * and wasn't stopped) the messages that queued up behind it start flowing through
+ * `driveSend`; otherwise they stay queued for the user to resend or remove — the same
+ * halt-on-failure rule `driveSend` applies to its own chain. Returns the drain's promise
+ * (resolved immediately when nothing was dispatched).
+ */
+export function releaseExclusive(
+  queue: SendQueue,
+  threadId: string,
+  drain: boolean,
+  send: (item: QueuedTurn) => Promise<SendOutcome>,
+): Promise<void> {
+  queue.clearInFlight(threadId);
+  const next = drain ? queue.dequeueNext(threadId) : undefined;
+  return next ? driveSend(queue, threadId, next, send) : Promise.resolve();
 }

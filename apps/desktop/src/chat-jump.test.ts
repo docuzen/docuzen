@@ -1,5 +1,4 @@
 import { describe, expect, it } from "vitest";
-import { readFileSync } from "node:fs";
 
 // Meta/ctrl+click any agent marker -> its conversation. editor.ts/surface.ts
 // only resolve WHICH
@@ -7,7 +6,7 @@ import { readFileSync } from "node:fs";
 // actual open-thread routing (jumpToAnnotation/jumpToDirective) exercised here.
 // Source-text pins, per this package's convention (chat.ts's DOM wiring isn't
 // otherwise unit-testable in this vitest setup — see agents-panel.test.ts's header).
-const chatSource = readFileSync(new URL("./chat.ts", import.meta.url), "utf8");
+import { chatSource } from "./module-source.test-support.js";
 
 function sourceBetween(source: string, start: string, end: string): string {
   const startIndex = source.indexOf(start);
@@ -29,7 +28,7 @@ describe("jumpToAnnotation (meta/ctrl+click on an annotation marker)", () => {
   });
 
   it("otherwise falls back to the read-only openThreadById view, mirroring the Agents panel's own click routing", () => {
-    expect(fn).toContain("else await openThreadById(id, taskTitle(id));");
+    expect(fn).toContain("else await openThreadById(id, agents.taskTitle(id));");
   });
 
   it("is exposed on ChatApi for editor.ts/surface.ts's onAnnotationJump deps", () => {
@@ -54,14 +53,14 @@ describe("jumpToDirective (meta/ctrl+click on a [[ ]] directive marker)", () => 
   });
 
   it("logs the exact hint instead of opening an empty pane when the directive was never resolved", () => {
-    const guarded = sourceBetween(fn, "} catch {", "await openThreadById(id, taskTitle(id));");
+    const guarded = sourceBetween(fn, "} catch {", "await openThreadById(id, agents.taskTitle(id));");
     expect(guarded).toContain("run Resolve [[ ]] to start this agent");
     expect(guarded).toContain("return;");
     expect(guarded).not.toContain("openThreadById");
   });
 
   it("opens the pseudo-thread view once the thread is confirmed to exist", () => {
-    expect(fn).toContain("await openThreadById(id, taskTitle(id));");
+    expect(fn).toContain("await openThreadById(id, agents.taskTitle(id));");
   });
 
   it("is exposed on ChatApi for editor.ts's onDirectiveJump dep", () => {

@@ -1,6 +1,7 @@
-import { mkdir, readFile, writeFile } from "node:fs/promises";
+import { readFile } from "node:fs/promises";
 import type { VersionCause, VersionEntry, VersionsFile } from "./types.js";
 import { hadPaths } from "./paths.js";
+import { readFileIfExists, readJsonFile, withFileLock, writeFileAtomic, writeJsonFile } from "./io.js";
 
 export interface SnapshotOptions {
   cause: VersionCause;
@@ -11,14 +12,7 @@ export interface SnapshotOptions {
 }
 
 async function readIndex(docPath: string): Promise<VersionsFile> {
-  const p = hadPaths(docPath);
-  try {
-    return JSON.parse(await readFile(p.versionsIndex, "utf8")) as VersionsFile;
-  } catch (err: unknown) {
-    if ((err as NodeJS.ErrnoException).code === "ENOENT")
-      return { version: 1, entries: [] };
-    throw err;
-  }
+  return readJsonFile(hadPaths(docPath).versionsIndex, () => ({ version: 1, entries: [] }));
 }
 
 function nextId(entries: VersionEntry[]): string {
@@ -27,12 +21,7 @@ function nextId(entries: VersionEntry[]): string {
 
 /** Read the live annotations.json as a raw string ("" if the file doesn't exist). */
 async function readCurrentAnnotationsRaw(docPath: string): Promise<string> {
-  try {
-    return await readFile(hadPaths(docPath).annotations, "utf8");
-  } catch (err: unknown) {
-    if ((err as NodeJS.ErrnoException).code === "ENOENT") return "";
-    throw err;
-  }
+  return (await readFileIfExists(hadPaths(docPath).annotations)) ?? "";
 }
 
 /**
@@ -43,12 +32,7 @@ export async function readVersionAnnotations(
   docPath: string,
   id: string,
 ): Promise<string> {
-  try {
-    return await readFile(hadPaths(docPath).versionAnnotationsFile(id), "utf8");
-  } catch (err: unknown) {
-    if ((err as NodeJS.ErrnoException).code === "ENOENT") return "";
-    throw err;
-  }
+  return (await readFileIfExists(hadPaths(docPath).versionAnnotationsFile(id))) ?? "";
 }
 
 export async function snapshot(
@@ -57,7 +41,10 @@ export async function snapshot(
   opts: SnapshotOptions,
 ): Promise<VersionEntry> {
   const p = hadPaths(docPath);
-  await mkdir(p.versionsDir, { recursive: true });
+  // One snapshot at a time per document: the id is "entries.length + 1", so two
+  // concurrent snapshots (an approve racing a turn-base stamp) would otherwise both
+  // claim the same id and overwrite each other's version file.
+  return withFileLock(p.versionsIndex, async () => {
   const idx = await readIndex(docPath);
   const annotations = await readCurrentAnnotationsRaw(docPath);
   // Dedupe: reuse the latest version only if BOTH its doc content AND its
@@ -72,8 +59,10 @@ export async function snapshot(
     return latest;
   }
   const id = nextId(idx.entries);
-  await writeFile(p.versionFile(id), content, "utf8");
-  await writeFile(p.versionAnnotationsFile(id), annotations, "utf8");
+  // Content files first, index last: a crash in between leaves orphan files that the
+  // next snapshot overwrites, never an index entry pointing at a missing version.
+  await writeFileAtomic(p.versionFile(id), content);
+  await writeFileAtomic(p.versionAnnotationsFile(id), annotations);
   const entry: VersionEntry = {
     id,
     timestamp: opts.at,
@@ -82,8 +71,9 @@ export async function snapshot(
     ...(opts.note ? { note: opts.note } : {}),
   };
   idx.entries.push(entry);
-  await writeFile(p.versionsIndex, JSON.stringify(idx, null, 2) + "\n", "utf8");
+  await writeJsonFile(p.versionsIndex, idx);
   return entry;
+  });
 }
 
 export async function listVersions(docPath: string): Promise<VersionEntry[]> {

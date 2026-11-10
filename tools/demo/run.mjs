@@ -44,7 +44,7 @@ async function main() {
   await mkdir(dirname(gifPath), { recursive: true });
 
   const docPath = await stageFixture(fixture);
-  const srv = await launchTree(repoRoot, { vitePort: VITE_PORT, docPath });
+  const srv = await launchTree(repoRoot, { vitePort: VITE_PORT, docPath, realConfig: true }); // records a live agent turn
   const browser = await chromium.launch();
   try {
     const ctx = await browser.newContext({

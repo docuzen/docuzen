@@ -1,5 +1,4 @@
 import { describe, expect, it } from "vitest";
-import { readFileSync } from "node:fs";
 
 // Cursor-style edit-to-fork + Enter-to-send. Source-text pins, per this package's
 // convention (chat.ts's DOM wiring isn't otherwise unit-testable in this vitest
@@ -13,7 +12,7 @@ import { readFileSync } from "node:fs";
 // (2) disabling both triggers (with a tooltip) while the thread is busy/queued,
 // and (3) Enter-to-send + Shift+Enter-newline on #chatInput (no prior Enter
 // handler existed at all).
-const chatSource = readFileSync(new URL("./chat.ts", import.meta.url), "utf8");
+import { chatSource } from "./module-source.test-support.js";
 
 function sourceBetween(source: string, start: string, end: string): string {
   const startIndex = source.indexOf(start);
@@ -42,7 +41,7 @@ describe("double-click a YOU turn bubble to edit-and-fork", () => {
   it("wires a dblclick listener on the turn bubble itself, calling the SAME beginEditBranch as the pre-existing ✎ button (not a forked flow)", () => {
     expect(editableBranch).toContain('t.addEventListener("dblclick"');
     const dblclickHandler = sourceBetween(editableBranch, 't.addEventListener("dblclick"', "});");
-    expect(dblclickHandler).toContain("beginEditBranch(t, text, turnIndex);");
+    expect(dblclickHandler).toContain("deps.onEditTurn(t, text, turnIndex);");
   });
 
   it("the ✎ button's click handler also calls beginEditBranch(t, text, turnIndex) — same entry point, two triggers", () => {
@@ -51,7 +50,7 @@ describe("double-click a YOU turn bubble to edit-and-fork", () => {
       'editBtn.addEventListener("click"',
       "head.appendChild(editBtn);",
     );
-    expect(editBtnHandler).toContain("beginEditBranch(t, text, turnIndex);");
+    expect(editBtnHandler).toContain("deps.onEditTurn(t, text, turnIndex);");
   });
 });
 

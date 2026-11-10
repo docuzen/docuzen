@@ -329,7 +329,7 @@ export function createMcpProxyTool(
       "mcp(search?, describe?, server?, tool?, args?) — search/list/call allowlisted MCP tools for this document session",
     promptGuidelines: [
       "Use mcp({ search: \"query\" }) to discover allowlisted MCP tools, mcp({ describe: \"tool_name\" }) to inspect parameters, and mcp({ tool: \"tool_name\", args: \"{...}\" }) to call one.",
-      "In propose/review modes, only read-only or patch-draft MCP tools are allowlisted. Do not use MCP tools to write the canonical document unless direct-edit mode explicitly exposes that tool.",
+      "Only read-only or patch-draft MCP tools are allowlisted; draft tools return a diff and write nothing. Never use MCP tools to write the canonical document.",
     ],
     parameters: Type.Object({
       tool: Type.Optional(Type.String({ description: "Allowlisted MCP tool name to call." })),
@@ -368,7 +368,14 @@ export function createMcpProxyTool(
             connector,
             location.location.serverName,
             location.location.server,
-            async (connection) => normalizeResult(await connection.callTool(params.tool as string, parsed.args)),
+            async (connection) =>
+              normalizeResult(
+                await connection.callTool(params.tool as string, {
+                  ...parsed.args,
+                  // Pinned last so the model can never override them (e.g. edit_file's dryRun).
+                  ...(location.location.server.forcedArgs?.[params.tool as string] ?? {}),
+                }),
+              ),
           );
         } catch (error) {
           const message = error instanceof Error ? error.message : String(error);

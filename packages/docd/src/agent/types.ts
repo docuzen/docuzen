@@ -55,8 +55,6 @@ export interface AgentContext {
   webSearch?: { enabled?: boolean; provider?: "ddg" | "brave" | "tavily" };
   /** Internal vetted document toolchain selected from the document type. */
   docToolchain?: DocToolchain;
-  /** When true, the agent may edit the document directly (write tools). */
-  allowEdit?: boolean;
   /**
    * When true, this turn wants ONLY raw replacement text for the highlighted
    * passage (the Improve flow). Runners must NOT offer the propose_edit tool or
@@ -73,15 +71,14 @@ export interface AgentContext {
   /**
    * When true, this is a document-wide Agent Review Pass: the agent reads the whole
    * doc and emits findings via the add_review_finding tool instead of discussing one
-   * passage. No direct edit/write tools and no propose_edit (findings carry edits).
+   * passage. No propose_edit (findings carry edits).
    */
   reviewMode?: boolean;
   /**
-   * Phase 10: true for conversation turns — discuss, reply (including annotation-less
-   * threads: directive/review-umbrella chat), panel, and branch. The agent may read the
-   * document and discuss it, but must never propose or apply an edit from these turns —
-   * `allowEdit` is forced false and `propose_edit`/the codex edit contract are withheld
-   * REGARDLESS of `settings.agentEdit` (see Orchestrator.buildContext, which is the sole
+   * True for conversation turns — discuss, reply (including annotation-less threads:
+   * directive/review-umbrella chat), panel, and branch. The agent may read the document
+   * and discuss it, but must never propose an edit from these turns — `propose_edit` and
+   * the codex edit contract are withheld (see Orchestrator.buildContext, which is the sole
    * place this flag is computed). Edits come only from the explicit flows —
    * resolveDirectives, Improve, Review findings — none of which set this true (Improve
    * explicitly forces it back to false after buildContext's anchored default).
@@ -113,7 +110,11 @@ export interface AgentTurn {
 
 /** A streamed event from the agent: reply text, reasoning, or tool activity. */
 export interface AgentEvent {
-  type: "token" | "thinking" | "tool" | "docChanged" | "proposal" | "finding";
+  /**
+   * "proposal": an edit awaiting the reviewer (Suggesting mode). "applied": an edit that
+   * was applied on submission (Editing mode) — the UI should reload the document.
+   */
+  type: "token" | "thinking" | "tool" | "proposal" | "applied" | "finding";
   text: string;
   /** Set by panel fan-out to tag which model produced this event; unset otherwise. */
   model?: string;

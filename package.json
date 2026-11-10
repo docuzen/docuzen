@@ -1,5 +1,5 @@
 {
-  "name": "ai-native-doc",
+  "name": "docuzen-workspace",
   "private": true,
   "license": "Apache-2.0",
   "type": "module",
@@ -12,13 +12,23 @@
   ],
   "scripts": {
     "build": "npm run build --workspaces --if-present",
-    "test": "npm test --workspaces --if-present",
+    "test": "npm test --workspaces --if-present && npm run test:tools",
+    "test:tools": "node tools/version.mjs check && node tools/demo/check-docs.mjs && vitest run --root tools",
+    "version:set": "node tools/version.mjs set",
     "parity": "node tools/parity/run.mjs",
-    "visual": "node tools/visual/run.mjs"
+    "visual": "node tools/visual/run.mjs",
+    "drill:reconnect": "node tools/parity/reconnect-drill.mjs",
+    "live": "node tools/live/run.mjs",
+    "live:ui": "node tools/live/ui.mjs"
   },
   "devDependencies": {
     "pixelmatch": "^7.2.0",
     "playwright": "^1.49.0",
-    "pngjs": "^7.0.0"
+    "pngjs": "^7.0.0",
+    "vite": "^6.4.6",
+    "vitest": "^5.1.0"
+  },
+  "engines": {
+    "node": ">=22"
   }
 }

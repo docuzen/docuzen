@@ -1,336 +1,27 @@
-// The in-document search UI (markdown + HTML iframe): the search panel, its
-// keyboard shortcut (⌘F), and refreshing matches against either surface.
+// The document surfaces' interaction layer: the selection popover and its quick actions
+// (Comment, highlight swatches, Improve, Brainstorm, Visualize), annotating either
+// surface, the annotation action menu, and rendering annotations/proposals over the HTML
+// iframe. The in-document search panel lives in search-panel.ts.
 //
-// Wave-1 scope: search only. The rest of the HTML surface (iframe interactions,
-// annotation rendering, popover wiring, HTML proposal cards) stays in main.ts
-// until this plan's Task 5 wave-2 step.
-//
-// Wiring pattern: initSearch(deps) queries this module's own DOM elements and
-// returns the small external surface main.ts (and, later, other regions) call:
-// searchIsOpen/searchState/refreshMarkdownSearch/refreshHtmlSearch/
-// clearSearchHighlights. The search PluginKey is owned by editor.ts (one module
-// instance) — this module never imports editor.ts (modules may only import
-// ui.ts/session.ts per the plan's wiring rule), so main.ts passes the SAME
-// PluginKey instance in via `deps.searchKey`, typed here only via the third-party
-// `PluginKey` type. Likewise `SearchDecorationMeta`'s shape is redeclared locally
-// (`SearchMeta`) rather than imported — it's a pure compile-time cast, so
-// duplicating the 4-line shape costs nothing and keeps this module decoupled.
-//
-// DOM-query timing: like editor.ts/shell.ts, this module does no module-scope
-// `document.querySelector` — its elements are queried once, inside initSearch()'s
-// body, at the same point main.ts used to query them.
+// Like the other UI modules: no module-scope `document.querySelector`, and it reaches the
+// chat pane, editor and shell only through `deps` (main.ts composes them).
 
 import type { Editor } from "@milkdown/kit/core";
 import { editorViewCtx } from "@milkdown/kit/core";
 import type { EditorView } from "@milkdown/kit/prose/view";
 import type { PluginKey } from "@milkdown/kit/prose/state";
-import mermaid from "mermaid";
 import { openPath, openUrl } from "@tauri-apps/plugin-opener";
 import { createAnchor, resolveAnchor } from "@ai-native-doc/docd/anchor";
 import type { TextQuoteAnchor } from "@ai-native-doc/docd/anchor";
 import type { Annotation, EditHunk, RpcEvent } from "@ai-native-doc/docd/protocol";
-import { projectionOf, offsetForPos, posRangeForOffsets } from "./anchor-map.js";
-import { findTextMatches, nextSearchIndex, type TextMatch } from "./doc-search.js";
+import { projectionOf, offsetForPos } from "./anchor-map.js";
+import type { SearchState } from "./search-panel.js";
+import { initSelectionAgentActions } from "./selection-agent-actions.js";
 import { buildHtmlProjection, offsetsForRange, rangeForOffsets, wrapRange, unwrapAnno } from "./html-projection.js";
 import type { HtmlSurface } from "./html-surface.js";
 import type { DocdApi } from "./session.js";
 import { reportError } from "./ui.js";
 
-/** Mirrors editor.ts's `SearchDecorationMeta` shape — see file header. */
-interface SearchMeta {
-  ranges: { from: number; to: number; index: number }[];
-  activeIndex: number;
-}
-
-export interface SearchState {
-  query: string;
-  matches: TextMatch[];
-  activeIndex: number;
-}
-
-export interface SearchDeps {
-  /** The milkdown mount point (`#editor`), shared with editor.ts (same DOM node). */
-  rootEl: HTMLElement;
-  getEditor: () => Editor | null;
-  getHtmlSurface: () => HtmlSurface | null;
-  getFormat: () => "markdown" | "html";
-  /** editor.ts's singleton search PluginKey — passed in, not imported (see file header). */
-  searchKey: PluginKey;
-}
-
-export interface SearchApi {
-  readonly searchState: SearchState;
-  searchIsOpen(): boolean;
-  refreshMarkdownSearch(resetActive?: boolean, scroll?: boolean): void;
-  refreshHtmlSearch(resetActive?: boolean, scroll?: boolean): void;
-  refreshSearchResults(resetActive?: boolean, scroll?: boolean): void;
-  clearSearchHighlights(): void;
-  /** Also wired directly onto the HTML iframe's own document (see onHtmlReady in main.ts) so ⌘F works with focus inside it. */
-  handleSearchShortcut(e: KeyboardEvent): void;
-}
-
-export function initSearch(deps: SearchDeps): SearchApi {
-  const searchBtnEl = document.querySelector<HTMLButtonElement>("#searchBtn")!;
-  const searchPanelEl = document.querySelector<HTMLDivElement>("#searchPanel")!;
-  const searchInputEl = document.querySelector<HTMLInputElement>("#searchInput")!;
-  const searchCountEl = document.querySelector<HTMLSpanElement>("#searchCount")!;
-  const searchPrevEl = document.querySelector<HTMLButtonElement>("#searchPrev")!;
-  const searchNextEl = document.querySelector<HTMLButtonElement>("#searchNext")!;
-  const searchClearEl = document.querySelector<HTMLButtonElement>("#searchClear")!;
-  const searchCloseEl = document.querySelector<HTMLButtonElement>("#searchClose")!;
-
-  const searchState: SearchState = { query: "", matches: [], activeIndex: -1 };
-
-  function searchIsOpen(): boolean {
-    return !searchPanelEl.hidden;
-  }
-
-  function syncSearchControls(): void {
-    const q = searchState.query.trim();
-    const total = searchState.matches.length;
-    if (!q) searchCountEl.textContent = "Type to search";
-    else if (!total) searchCountEl.textContent = "0 results";
-    else searchCountEl.textContent = `${searchState.activeIndex + 1} / ${total}`;
-    searchPrevEl.disabled = total === 0;
-    searchNextEl.disabled = total === 0;
-    searchClearEl.disabled = !q;
-  }
-
-  function setSearchMatches(matches: TextMatch[], resetActive: boolean): void {
-    searchState.matches = matches;
-    if (!matches.length) {
-      searchState.activeIndex = -1;
-    } else if (resetActive || searchState.activeIndex < 0) {
-      searchState.activeIndex = 0;
-    } else if (searchState.activeIndex >= matches.length) {
-      searchState.activeIndex = matches.length - 1;
-    }
-  }
-
-  function clearMarkdownSearch(): void {
-    deps.getEditor()?.action((ctx) => {
-      const view: EditorView = ctx.get(editorViewCtx);
-      view.dispatch(view.state.tr.setMeta(deps.searchKey, "clear"));
-    });
-  }
-
-  function unwrapHtmlSearch(doc: Document): void {
-    doc.querySelectorAll("[data-had-search]").forEach((span) => {
-      const parent = span.parentNode;
-      if (!parent) return;
-      while (span.firstChild) parent.insertBefore(span.firstChild, span);
-      parent.removeChild(span);
-      parent.normalize();
-    });
-  }
-
-  function clearSearchHighlights(): void {
-    clearMarkdownSearch();
-    const doc = deps.getHtmlSurface()?.doc;
-    if (doc) unwrapHtmlSearch(doc);
-  }
-
-  function scrollActiveMarkdownMatch(): void {
-    requestAnimationFrame(() => {
-      deps.rootEl
-        .querySelector<HTMLElement>(".had-search-match.active")
-        ?.scrollIntoView({ block: "center", inline: "nearest", behavior: "smooth" });
-    });
-  }
-
-  function scrollActiveHtmlMatch(doc: Document): void {
-    requestAnimationFrame(() => {
-      doc
-        .querySelector<HTMLElement>(".had-search-match.active")
-        ?.scrollIntoView({ block: "center", inline: "nearest", behavior: "smooth" });
-    });
-  }
-
-  function refreshMarkdownSearch(resetActive = false, scroll = false): void {
-    const editor = deps.getEditor();
-    if (!editor) return;
-    const q = searchState.query;
-    editor.action((ctx) => {
-      const view: EditorView = ctx.get(editorViewCtx);
-      const proj = projectionOf(view);
-      const matches = findTextMatches(proj.text, q);
-      setSearchMatches(matches, resetActive);
-      if (!q.trim()) {
-        view.dispatch(view.state.tr.setMeta(deps.searchKey, "clear"));
-        return;
-      }
-      const ranges = matches
-        .map((m, index) => {
-          const range = posRangeForOffsets(proj, m.start, m.end);
-          return range ? { ...range, index } : null;
-        })
-        .filter((r): r is { from: number; to: number; index: number } => Boolean(r));
-      view.dispatch(
-        view.state.tr.setMeta(deps.searchKey, {
-          ranges,
-          activeIndex: searchState.activeIndex,
-        } as SearchMeta),
-      );
-    });
-    syncSearchControls();
-    if (scroll && searchState.activeIndex >= 0) scrollActiveMarkdownMatch();
-  }
-
-  function refreshHtmlSearch(resetActive = false, scroll = false): void {
-    const doc = deps.getHtmlSurface()?.doc;
-    if (!doc?.body) {
-      setSearchMatches([], resetActive);
-      syncSearchControls();
-      return;
-    }
-    unwrapHtmlSearch(doc);
-    const q = searchState.query;
-    const proj = buildHtmlProjection(doc.body);
-    const matches = findTextMatches(proj.text, q);
-    setSearchMatches(matches, resetActive);
-    if (q.trim()) {
-      [...matches].reverse().forEach((m, reverseIndex) => {
-        const index = matches.length - 1 - reverseIndex;
-        const range = rangeForOffsets(doc, proj, m.start, m.end);
-        if (!range) return;
-        wrapRange(doc, range, () => {
-          const span = doc.createElement("span");
-          span.setAttribute("data-had-search", "");
-          span.setAttribute("data-search-index", String(index));
-          span.className = `had-search-match${index === searchState.activeIndex ? " active" : ""}`;
-          return span;
-        });
-      });
-    }
-    syncSearchControls();
-    if (scroll && searchState.activeIndex >= 0) scrollActiveHtmlMatch(doc);
-  }
-
-  function refreshSearchResults(resetActive = false, scroll = false): void {
-    if (deps.getFormat() === "html") refreshHtmlSearch(resetActive, scroll);
-    else refreshMarkdownSearch(resetActive, scroll);
-  }
-
-  function openSearchPanel(): void {
-    searchPanelEl.hidden = false;
-    searchBtnEl.classList.add("active");
-    refreshSearchResults(false, false);
-    requestAnimationFrame(() => {
-      searchInputEl.focus();
-      searchInputEl.select();
-    });
-  }
-
-  function closeSearchPanel(): void {
-    searchPanelEl.hidden = true;
-    searchBtnEl.classList.remove("active");
-    clearSearchHighlights();
-  }
-
-  function clearSearch(): void {
-    searchState.query = "";
-    searchState.matches = [];
-    searchState.activeIndex = -1;
-    searchInputEl.value = "";
-    clearSearchHighlights();
-    syncSearchControls();
-    searchInputEl.focus();
-  }
-
-  function goToSearchMatch(direction: 1 | -1): void {
-    if (!searchState.query.trim()) return;
-    refreshSearchResults(false, false);
-    searchState.activeIndex = nextSearchIndex(searchState.activeIndex, searchState.matches.length, direction);
-    refreshSearchResults(false, true);
-  }
-
-  function handleSearchShortcut(e: KeyboardEvent): void {
-    if ((e.metaKey || e.ctrlKey) && !e.shiftKey && !e.altKey && (e.key === "f" || e.key === "F")) {
-      e.preventDefault();
-      e.stopPropagation();
-      openSearchPanel();
-    }
-  }
-
-  searchBtnEl.addEventListener("click", () => {
-    if (searchIsOpen()) closeSearchPanel();
-    else openSearchPanel();
-  });
-  searchInputEl.addEventListener("input", () => {
-    searchState.query = searchInputEl.value;
-    refreshSearchResults(true, true);
-  });
-  searchInputEl.addEventListener("keydown", (e) => {
-    if (e.key === "Enter") {
-      e.preventDefault();
-      goToSearchMatch(e.shiftKey ? -1 : 1);
-    } else if (e.key === "Escape") {
-      e.preventDefault();
-      closeSearchPanel();
-    }
-  });
-  searchPrevEl.addEventListener("click", () => goToSearchMatch(-1));
-  searchNextEl.addEventListener("click", () => goToSearchMatch(1));
-  searchClearEl.addEventListener("click", clearSearch);
-  searchCloseEl.addEventListener("click", closeSearchPanel);
-  window.addEventListener("keydown", handleSearchShortcut, true);
-  syncSearchControls();
-
-  return {
-    searchState,
-    searchIsOpen,
-    refreshMarkdownSearch,
-    refreshHtmlSearch,
-    refreshSearchResults,
-    clearSearchHighlights,
-    handleSearchShortcut,
-  };
-}
-
-// ============================================================================
-// Wave-2: HTML surface interactions (edit mode, iframe CSS, link handling,
-// annotate/decorate/remove, annotation undo stack, annotation action menu),
-// renderLoadedHtml/onHtmlReady, and the selection popover + swatches + quick
-// actions (Brainstorm/Visualize).
-//
-// A second factory, `initHtmlSurface(deps)`, alongside wave-1's `initSearch` in
-// this same file (not merged into one function — the brief's own wave-1/wave-2
-// split already treats them as two independently-gated slices, and there's no
-// forced reason to collapse two already-working, independently-testable
-// closures into one).
-//
-// `annoKey` (editor.ts's singleton annotation-decoration PluginKey),
-// `swatchByName`/`PALETTE`/`COMMENT_COLOR` (the highlight/comment color
-// palette), and `nextMermaidSeq` all cross into this module WITHOUT an
-// editor.ts import, per the plan's "modules never import each other" rule —
-// same by-value precedent `searchKey` already set above. `Swatch` and
-// `LoadedAnno` are redeclared locally rather than imported (the `SearchMeta`
-// precedent from Task 2: a pure compile-time shape, cheap to duplicate, keeps
-// this module import-free of editor.ts). `ProposalView` mirrors proposals.ts's
-// own type of the same name for the same reason (see that file's header) — the
-// two are structurally identical by design, just declared in two files that
-// must not import each other.
-//
-// `commentSeq` (the per-doc comment-numbering counter) moves fully into this
-// module in Task 5: `annotate`/`annotateHtml`/`renderLoadedHtml` (its only
-// three mutators) all live here now, so it's no longer main.ts-owned. Exposed
-// as `nextCommentSeq`/`resetCommentSeq` for editor.ts's proposal-widget deps
-// and chat.ts's `resetChat()` respectively (both still reach it through deps —
-// see main.ts's wiring).
-//
-// `removeAnnotationById` (backend delete + in-document decoration + comment-
-// registry cleanup) also moves fully in: its only OTHER main.ts-side caller,
-// `undoLastAnnotation`, is itself part of the annotation-undo stack moving
-// here, so main.ts no longer needs to own it. chat.ts's comment-card Delete
-// button still reaches it via `deps.removeAnnotationById` (now a forward
-// reference to this module's result — see main.ts's wiring).
-//
-// `resetDocumentViewport`/`captureActiveHtmlEdits`/`tabContent` are textually
-// adjacent to this region in the pre-split file but are tabs-domain (they
-// close over `activeIdx`/`tabs`) — they move to shell.ts instead, alongside
-// the tabs array itself.
-
-/** Mirrors editor.ts's Swatch shape — see file header. */
 interface Swatch {
   name: string;
   bg: string;
@@ -372,7 +63,7 @@ export interface HtmlSurfaceDeps {
   COMMENT_COLOR: Swatch;
   nextMermaidSeq: () => number;
 
-  // This file's own initSearch() result, threaded through by main.ts.
+  // search-panel.ts's initSearch() result, threaded through by main.ts.
   searchIsOpen: () => boolean;
   searchState: SearchState;
   refreshMarkdownSearch: (resetActive?: boolean, scroll?: boolean) => void;
@@ -426,6 +117,8 @@ export interface HtmlSurfaceDeps {
   };
   setChip: (id: string, status: "idle" | "running" | "responded" | "error") => void;
   setChatBusy: (threadId: string | null) => void;
+  beginExclusiveTurn: (threadId: string, label: string) => boolean;
+  endExclusiveTurn: (threadId: string, drain: boolean) => void;
   markDiscussed: (id: string) => void;
   focusCommentInput: (id: string) => void;
   runImprove: (id: string) => Promise<void>;
@@ -447,33 +140,6 @@ export interface HtmlSurfaceApi {
   clearAnnotationUndo(): void;
   nextCommentSeq(): number;
   resetCommentSeq(): void;
-}
-
-/**
- * Insert a fenced block into the doc markdown as its own paragraph, right after
- * the line containing the anchor's matched text (separated by blank lines). Uses
- * `resolveAnchor` (fuzzy-tolerant) to locate the selection in the raw markdown,
- * which correctly handles inline formatting (e.g. `**bold**` → anchor.exact "bold")
- * and multi-paragraph selections (anchor uses single `\n`; markdown uses `\n\n`).
- * Falls back to appending at the document end when the anchor does not resolve.
- *
- * Exported at module level so it can be unit-tested independently of `initHtmlSurface`.
- */
-export function insertBlockAfterQuote(
-  markdown: string,
-  anchor: TextQuoteAnchor,
-  block: string,
-): string {
-  const range = resolveAnchor(markdown, anchor);
-  if (!range) {
-    return markdown.replace(/\s*$/, "") + `\n\n${block}\n`;
-  }
-  // Advance to the end of the line containing the matched span.
-  const lineEnd = markdown.indexOf("\n", range.end);
-  const insertAt = lineEnd === -1 ? markdown.length : lineEnd;
-  const before = markdown.slice(0, insertAt);
-  const after = markdown.slice(insertAt);
-  return `${before}\n\n${block}\n${after}`;
 }
 
 export function initHtmlSurface(deps: HtmlSurfaceDeps): HtmlSurfaceApi {
@@ -1132,156 +798,7 @@ export function initHtmlSurface(deps: HtmlSurfaceDeps): HtmlSurfaceApi {
   // persistence + highlight as 💬 Comment) and then runs the matching agent flow
   // in the chat pane.
 
-  /**
-   * The persisted body of the most recently appended agent turn in `threadId` — same
-   * best-effort re-fetch chat.ts's discuss/reply/panel flows use to re-render a just-
-   * completed streaming bubble from the source of truth (discuss's RPC result is only
-   * `{ ok: boolean }` — see protocol/rpc.ts). Returns undefined (not throw) on any
-   * failure, so `bubble.done(finalText)` degrades to keeping the streamed text.
-   */
-  async function fetchLastAgentReply(threadId: string): Promise<string | undefined> {
-    if (!deps.getDocPath()) return undefined;
-    try {
-      const thread = await deps.api.getThread({ threadId });
-      const last = thread.turns[thread.turns.length - 1];
-      return last?.role === "agent" ? last.body : undefined;
-    } catch {
-      return undefined;
-    }
-  }
-
-  /** Stream a one-shot discuss turn into the chat pane (used by Brainstorm). */
-  async function runBrainstorm(id: string, quoted: string): Promise<void> {
-    if (!deps.getDocPath()) return;
-    deps.activateChatPane(id, quoted);
-    deps.chatTurn("you", "Brainstorm options for this passage.");
-    const bubble = deps.streamingAgentTurn(deps.getStance());
-    let docChanged = false;
-    const modelId = deps.getModelId();
-    deps.setChip(id, "running");
-    deps.setChatBusy(id); // show Stop; cancelKey for discuss is docPath#<id>
-    try {
-      await deps.api.discuss(
-        {
-          threadId: id,
-          annotationId: id,
-          stance: deps.getStance(),
-          comment:
-            "Brainstorm options, alternatives, and improvements for this passage. Give a concise bulleted list.",
-          ...(modelId ? { modelId } : {}),
-        },
-        (e: RpcEvent) => {
-          if (deps.routeProposal(e)) return;
-          if (e.event === "docChanged") docChanged = true;
-          else bubble.onEvent(e);
-        },
-      );
-      bubble.done(await fetchLastAgentReply(id));
-      deps.markDiscussed(id);
-      deps.setChip(id, "responded");
-      if (docChanged) {
-        deps.log("agent edited the document — reloading");
-        await deps.reloadActiveDoc();
-      }
-    } catch (e) {
-      bubble.fail(String(e));
-      deps.setChip(id, "error");
-      reportError("brainstorm", e, deps.log);
-    } finally {
-      deps.setChatBusy(null);
-    }
-  }
-
-  /**
-   * Extract a fenced code block (```…```) from an agent reply, dropping any
-   * surrounding prose. Takes from the first ``` fence to its matching closer; if
-   * there's no complete fence, returns the whole reply trimmed.
-   */
-  function extractFencedBlock(reply: string): string {
-    const open = reply.indexOf("```");
-    if (open === -1) return reply.trim();
-    const close = reply.indexOf("```", open + 3);
-    if (close === -1) return reply.trim();
-    return reply.slice(open, close + 3).trim();
-  }
-
-
-  /** The mermaid source inside a ```mermaid fenced block. */
-  function mermaidSource(block: string): string {
-    return block.replace(/^```mermaid\s*\n?/, "").replace(/\n?```\s*$/, "").trim();
-  }
-  /** Render mermaid `src` into `container`, falling back to showing the source on error. */
-  async function renderMermaidInto(container: HTMLElement, src: string): Promise<void> {
-    try {
-      const { svg } = await mermaid.render(`mermaid-chat-${deps.nextMermaidSeq()}`, src);
-      container.className = "mermaid-rendered";
-      container.innerHTML = svg;
-    } catch {
-      container.className = "mermaid-error";
-      container.textContent = src;
-    }
-  }
-
-  /** Stream a visualize turn into a proposal-style box; offer Insert into doc. */
-  async function runVisualize(id: string, quoted: string, anchor: TextQuoteAnchor): Promise<void> {
-    if (!deps.getDocPath()) return;
-    deps.activateChatPane(id, quoted);
-    const box = document.createElement("div");
-    box.className = "proposal";
-    box.innerHTML = `<div class="ptitle">Proposed diagram</div>
-    <div class="dpreview"></div>
-    <pre class="pnew"></pre>
-    <div class="pacts"><button class="papply" disabled>Insert into doc</button><button class="preject">Reject</button></div>`;
-    const preview = box.querySelector<HTMLDivElement>(".dpreview")!;
-    const pre = box.querySelector<HTMLPreElement>(".pnew")!;
-    const insertBtn = box.querySelector<HTMLButtonElement>(".papply")!;
-    box.querySelector<HTMLButtonElement>(".preject")!.addEventListener("click", () => box.remove());
-    deps.appendCustomTurn(box);
-
-    deps.setChatBusy(id); // show Stop; cancelKey for visualize is docPath#<id>
-    let result: { diagram: string };
-    try {
-      result = await deps.api.visualize({ threadId: id }, (e) => {
-        if (e.event === "token") {
-          pre.textContent += String(e.data);
-          deps.scrollTurnsToBottom();
-        }
-      });
-    } catch (e) {
-      pre.textContent = `⚠ ${String(e)}`;
-      return;
-    } finally {
-      deps.setChatBusy(null);
-    }
-
-    const block = extractFencedBlock(result.diagram);
-    if (!block.trim()) {
-      pre.className = "pnew empty-reply";
-      pre.textContent =
-        `⚠ No diagram from ${deps.modelName(deps.getModelId() ?? "") || "the model"} — it returned no content.` +
-        " Check the model in File ▸ Settings: a wrong/forbidden model id, an unreachable" +
-        " gateway, or rate-limiting all look like this.";
-      return; // nothing to render or insert
-    }
-    pre.textContent = block; // show the clean fenced source under the rendered preview
-    void renderMermaidInto(preview, mermaidSource(block)); // show the actual diagram
-    insertBtn.disabled = false;
-    insertBtn.addEventListener("click", async () => {
-      const docPath = deps.getDocPath();
-      if (!docPath) return;
-      insertBtn.disabled = true;
-      try {
-        const newMarkdown = insertBlockAfterQuote(deps.getCurrentMarkdown(), anchor, block);
-        await deps.api.saveDoc({ text: newMarkdown });
-        deps.log(`inserted diagram for ${id}`);
-        box.remove();
-        await deps.reloadActiveDoc();
-      } catch (e) {
-        reportError("diagram insert", e, deps.log);
-        insertBtn.disabled = false;
-      }
-    });
-  }
+  const { runBrainstorm, runVisualize } = initSelectionAgentActions(deps);
 
   interface QuickAction {
     label: string;

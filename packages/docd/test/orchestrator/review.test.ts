@@ -105,7 +105,6 @@ describe("Orchestrator.review", () => {
     await orch.review(docPath, { stance: "none", rubric: "focus" });
     const ctx = runner.contextFor("fake-1");
     expect(ctx?.reviewMode).toBe(true);
-    expect(ctx?.allowEdit).toBeFalsy();
     expect(ctx?.comment).toContain("focus");
     // Phase 10: review is an explicit flow (unchanged in capability), not a conversation
     // turn — buildContext's reviewMode branch keeps conversationOnly false.

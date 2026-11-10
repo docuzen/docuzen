@@ -1,5 +1,5 @@
-import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { hadPaths } from "./paths.js";
+import { readJsonFile, updateJsonFile, withFileLock, writeJsonFile } from "./io.js";
 import type { EditHunk } from "../agent/types.js";
 
 export type ProposalStatus = "pending" | "approved" | "rejected";
@@ -35,27 +35,16 @@ export interface ProposalsFile {
   proposals: Proposal[];
 }
 
-const EMPTY: ProposalsFile = { version: 1, proposals: [] };
+const empty = (): ProposalsFile => ({ version: 1, proposals: [] });
 
 export async function readProposals(docPath: string): Promise<ProposalsFile> {
-  const p = hadPaths(docPath);
-  try {
-    const raw = await readFile(p.proposals, "utf8");
-    return JSON.parse(raw) as ProposalsFile;
-  } catch (err: unknown) {
-    if ((err as NodeJS.ErrnoException).code === "ENOENT")
-      return { version: EMPTY.version, proposals: [] };
-    throw err;
-  }
+  return readJsonFile(hadPaths(docPath).proposals, empty);
 }
 
-export async function writeProposals(
-  docPath: string,
-  f: ProposalsFile,
-): Promise<void> {
-  const p = hadPaths(docPath);
-  await mkdir(p.dir, { recursive: true });
-  await writeFile(p.proposals, JSON.stringify(f, null, 2) + "\n", "utf8");
+/** Replace the whole proposals file (atomic, serialized with every other writer). */
+export async function writeProposals(docPath: string, f: ProposalsFile): Promise<void> {
+  const path = hadPaths(docPath).proposals;
+  await withFileLock(path, () => writeJsonFile(path, f));
 }
 
 /** All proposals, optionally filtered to one thread. */
@@ -70,9 +59,28 @@ export async function listProposals(
 }
 
 export async function addProposal(docPath: string, p: Proposal): Promise<void> {
-  const f = await readProposals(docPath);
-  f.proposals.push(p);
-  await writeProposals(docPath, f);
+  await updateJsonFile(hadPaths(docPath).proposals, empty, (f) => {
+    f.proposals.push(p);
+    return { next: f, result: undefined };
+  });
+}
+
+/**
+ * Allocate the next per-thread proposal id (`<threadId>#p<N>`) and append the proposal
+ * `build` makes for it, as ONE locked step — parallel directive/review agents finishing
+ * together can neither collide on an id nor drop each other's proposal.
+ */
+export async function appendProposal(
+  docPath: string,
+  threadId: string,
+  build: (id: string) => Proposal,
+): Promise<Proposal> {
+  return updateJsonFile(hadPaths(docPath).proposals, empty, (f) => {
+    const n = f.proposals.filter((p) => p.threadId === threadId).length + 1;
+    const proposal = build(`${threadId}#p${n}`);
+    f.proposals.push(proposal);
+    return { next: f, result: proposal };
+  });
 }
 
 export async function updateProposal(
@@ -80,9 +88,10 @@ export async function updateProposal(
   id: string,
   patch: Partial<Omit<Proposal, "id">>,
 ): Promise<void> {
-  const f = await readProposals(docPath);
-  const idx = f.proposals.findIndex((p) => p.id === id);
-  if (idx === -1) throw new Error(`proposal not found: ${id}`);
-  f.proposals[idx] = { ...f.proposals[idx], ...patch };
-  await writeProposals(docPath, f);
+  await updateJsonFile(hadPaths(docPath).proposals, empty, (f) => {
+    const idx = f.proposals.findIndex((p) => p.id === id);
+    if (idx === -1) throw new Error(`proposal not found: ${id}`);
+    f.proposals[idx] = { ...f.proposals[idx], ...patch };
+    return { next: f, result: undefined };
+  });
 }
