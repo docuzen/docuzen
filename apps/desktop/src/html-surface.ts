@@ -4,6 +4,7 @@
 // WYSIWYG editing, and the document is serialized back to HTML on save — no lossy
 // markdown round-trip. Annotation overlays (Phase 2) live inside the iframe and are
 // stripped on serialization so they never leak into the saved file.
+import { clearRangeBlocks } from "./long-range.js";
 
 export interface HtmlSurfaceCallbacks {
   /** Fired (debounced) when the user edits the rendered document. */
@@ -26,6 +27,7 @@ export function serializeDocument(doc: Document): string {
   const root = doc.documentElement.cloneNode(true) as HTMLElement;
   root.querySelectorAll(`[${BASE_ATTR}]`).forEach((n) => n.remove());
   root.querySelectorAll("[data-had-overlay]").forEach((n) => n.remove());
+  clearRangeBlocks(root); // long comments' margin-bar attributes on the document's own blocks
   // doc-zoom.ts's injected `:root { font-size: … }` style tag — a view-only zoom
   // preference, never part of the document's own saved HTML (mirrors data-had-overlay).
   root.querySelectorAll("[data-had-zoom]").forEach((n) => n.remove());

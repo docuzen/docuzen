@@ -1622,14 +1622,7 @@ textarea {
 .chatfoot.busy {
   box-shadow: inset 0 3px 0 var(--blue);
 }
-.chatfoot.busy::before {
-  content: "Agent is streaming. Stop is available below.";
-  flex: 1 1 100%;
-  color: var(--blue);
-  font: 700 0.68rem/1.2 ui-sans-serif, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
-  letter-spacing: 0.04em;
-  text-transform: uppercase;
-}
+
 
 .diffbox {
   border-color: var(--line);
@@ -2014,3 +2007,63 @@ textarea {
 .comment-card.active.discussed .stance,
 .comment-card.active.discussed .cmodel,
 .comment-card.active.discussed:not(:has(.chip.error)) .discuss { display: none; }
+
+/* ===== quieter chat pane: no title bar, a two-row footer ===== */
+.chathead[hidden] { display: none; }
+.chatfoot #chatInput { order: 0; }
+.chatprimary { display: flex; align-items: center; gap: 0.45rem; flex: 1 1 100%; min-width: 0; }
+.chatprimary .improvebtn { flex: none; padding: 0 0.7rem; white-space: nowrap; }
+.chatprimary .footspacer { flex: 1; }
+.morebtn {
+  min-height: 2rem; min-width: 0; padding: 0 0.6rem; border: none; background: transparent;
+  color: var(--ink-faint); border-radius: 999px; cursor: pointer;
+  font: 600 0.7rem/1.2 ui-sans-serif, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  display: inline-flex; align-items: center; gap: 0.3rem; flex: 0 1 auto; white-space: nowrap;
+}
+.morebtn .morelabel { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+.morebtn::after { content: "▸"; flex: none; }
+.morebtn[aria-expanded="true"]::after { content: "▾"; }
+.morebtn:hover, .morebtn[aria-expanded="true"] { color: var(--ink); background: rgba(0, 0, 0, 0.05); }
+.chatfoot #chatSend, #chatStop { padding: 0 0.95rem; }
+.chatmore { display: flex; flex-wrap: wrap; align-items: center; gap: 0.4rem; flex: 1 1 100%; }
+.chatmore[hidden] { display: none; }
+.chatmore .resolvebtn { flex: 0 1 auto; padding: 0 0.8rem; min-height: 1.8rem; font-size: 0.72rem; }
+.chatmore #chatPanel { padding: 0 0.8rem; font-size: 0.72rem; }
+.chatmore #chatModel { max-width: 11rem; }
+
+/* The rail's how-to line is for an empty rail; with comments in it, it is noise. */
+.panel:has(#comments .comment-card) .railhead .hint { display: none; }
+
+/* ===== markdown in agent replies ===== */
+.turn .tbody.md { white-space: normal; }
+.tbody.md > :first-child { margin-top: 0; }
+.tbody.md > :last-child { margin-bottom: 0; }
+.tbody.md p, .tbody.md ul, .tbody.md ol, .tbody.md pre, .tbody.md blockquote, .tbody.md table { margin: 0.45em 0; }
+.tbody.md ul, .tbody.md ol { padding-left: 1.3em; }
+.tbody.md ul { list-style: disc outside; }
+.tbody.md ol { list-style: decimal outside; }
+.tbody.md li { margin: 0.15em 0; }
+.tbody.md li > p { margin: 0.15em 0; }
+.tbody.md h1, .tbody.md h2, .tbody.md h3, .tbody.md h4, .tbody.md h5, .tbody.md h6 {
+  margin: 0.7em 0 0.3em; font-size: 1em; font-weight: 700; line-height: 1.3;
+}
+.tbody.md code {
+  font: 0.92em/1.4 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  background: rgba(0, 0, 0, 0.06); border-radius: 4px; padding: 0.05em 0.3em;
+}
+.tbody.md pre {
+  background: rgba(0, 0, 0, 0.06); border-radius: 6px; padding: 0.45em 0.6em; overflow-x: auto;
+}
+.tbody.md pre code { background: none; padding: 0; white-space: pre; }
+.tbody.md blockquote { border-left: 3px solid var(--line-strong, #ccc); padding-left: 0.6em; color: var(--ink-soft); }
+.tbody.md table { border-collapse: collapse; display: block; overflow-x: auto; }
+.tbody.md th, .tbody.md td { border: 1px solid var(--line, #ddd); padding: 0.2em 0.45em; text-align: left; }
+.tbody.md a { color: var(--blue); text-decoration: underline; cursor: pointer; }
+.tbody.md hr { border: none; border-top: 1px solid var(--line, #ddd); margin: 0.6em 0; }
+.tbody.md { overflow-wrap: anywhere; }
+
+/* ===== long comment ranges: a margin bar, not a fill on every block (long-range.ts) ===== */
+.had-mark.had-long, .had-mark.had-long.focus { outline: none; box-shadow: none; }
+.had-mark.had-long.focus { background: rgba(120, 120, 140, 0.09) !important; }
+[data-had-range] { box-shadow: -8px 0 0 0 var(--had-range-bg, #fff), -11px 0 0 0 var(--had-range-color, #f06292); }
+[data-had-range][data-had-range-focus] { box-shadow: -7px 0 0 0 var(--had-range-bg, #fff), -12px 0 0 0 var(--had-range-color, #f06292); }

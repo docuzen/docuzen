@@ -21,6 +21,7 @@ import { buildHtmlProjection, offsetsForRange, rangeForOffsets, wrapRange, unwra
 import type { HtmlSurface } from "./html-surface.js";
 import type { DocdApi } from "./session.js";
 import { reportError } from "./ui.js";
+import { LONG_RANGE_CSS, blocksInRange, isLongRange, markRangeBlocks } from "./long-range.js";
 
 interface Swatch {
   name: string;
@@ -187,6 +188,7 @@ export function initHtmlSurface(deps: HtmlSurfaceDeps): HtmlSurfaceApi {
 .had-mark.had-highlight { box-decoration-break: clone; -webkit-box-decoration-break: clone; }
 .had-mark.had-comment { box-decoration-break: clone; -webkit-box-decoration-break: clone; cursor: pointer; }
 .had-mark.focus { outline: 2px solid #1458a8; outline-offset: 1px; }
+${LONG_RANGE_CSS}
 .had-search-match {
   border-radius: 3px;
   background: rgba(255, 220, 92, 0.58);
@@ -306,11 +308,17 @@ export function initHtmlSurface(deps: HtmlSurfaceDeps): HtmlSurfaceApi {
     if (!r) return false;
     const range = rangeForOffsets(doc, proj, r.start, r.end);
     if (!range) return false;
+    // A comment over a long passage gets a bar in the margin, not a tint on every block.
+    // Measured before wrapping: wrapping splits the range's own boundary text nodes.
+    const blocks = kind === "comment" ? blocksInRange(range) : [];
+    const long = kind === "comment" && isLongRange(r.end - r.start, blocks.length);
     const spans = wrapRange(doc, range, () => {
       const span = doc.createElement("span");
       span.setAttribute("data-had-mark", "");
       span.setAttribute("data-anno", id);
-      if (kind === "comment") {
+      if (long) {
+        span.className = "had-mark had-comment had-long";
+      } else if (kind === "comment") {
         span.className = "had-mark had-comment";
         span.style.background = `${color.bg}55`;
       } else {
@@ -320,7 +328,11 @@ export function initHtmlSurface(deps: HtmlSurfaceDeps): HtmlSurfaceApi {
       }
       return span;
     });
-    if (kind === "comment" && spans[0]) {
+    if (long && spans.length) markRangeBlocks(doc, blocks, id, color.edge);
+    // The number badge goes on the first span with visible text: a selection that starts in
+    // the whitespace between blocks must not strand it on an empty line above the passage.
+    const badgeHost = spans.find((sp) => (sp.textContent ?? "").trim() !== "") ?? spans[0];
+    if (kind === "comment" && badgeHost) {
       const badge = doc.createElement("span");
       badge.className = "had-badge";
       badge.setAttribute("data-had-overlay", ""); // stripped on serialize
@@ -332,7 +344,7 @@ export function initHtmlSurface(deps: HtmlSurfaceDeps): HtmlSurfaceApi {
         e.stopPropagation();
         void deps.promoteToChat(id);
       });
-      spans[0].appendChild(badge);
+      badgeHost.appendChild(badge);
     }
     // Clicking the marked text opens the action menu (open discussion / remove). The badge
     // (comments) keeps its own click → open chat and stops propagation, so it isn't shadowed.

@@ -42,6 +42,7 @@ import { initThreadTree } from "./chat-thread-tree.js";
 import { initDocPasses } from "./chat-doc-passes.js";
 import { el, reportError, runStreamingTurn, lastAgentReply } from "./ui.js";
 import { SendQueue, driveSend, type QueuedTurn, type SendOutcome, claimExclusive, releaseExclusive } from "./send-queue.js";
+import { focusRangeBlocks } from "./long-range.js";
 
 export interface ChatDeps {
   api: DocdApi;
@@ -152,6 +153,49 @@ export function initChat(deps: ChatDeps): ChatApi {
   const chatStanceEl = document.querySelector<HTMLSelectElement>("#chatStance")!;
   const chatModelEl = document.querySelector<HTMLSelectElement>("#chatModel")!;
   const chatResolveEl = document.querySelector<HTMLButtonElement>("#chatResolve")!;
+  const chatMoreBtnEl = document.querySelector<HTMLButtonElement>("#chatMoreBtn")!;
+  const chatMoreEl = document.querySelector<HTMLDivElement>("#chatMore")!;
+
+  // --- footer "more" row: stance, model, ask-all-models and Resolve live behind one toggle,
+  // so the footer is a text box plus Send. The toggle names the stance + model in use, which
+  // keeps them visible while the row is closed.
+  const MORE_OPEN_KEY = "docuzen.chatMoreOpen";
+  function refreshMoreLabel(): void {
+    const open = !chatMoreEl.hidden;
+    const stance = chatStanceEl.value && chatStanceEl.value !== "none" ? chatStanceEl.value : "";
+    // Option text carries a leading icon; the toggle is narrow, so it shows the name only.
+    const model = (chatModelEl.selectedOptions[0]?.textContent ?? "").replace(/^[^\p{L}\p{N}]+/u, "").trim();
+    const summary = [stance, model].filter(Boolean).join(" · ") || "Options";
+    // The ▸/▾ is CSS on the button; the label is its own span so a long model name
+    // truncates instead of pushing the arrow out.
+    const label = document.createElement("span");
+    label.className = "morelabel";
+    label.textContent = summary;
+    chatMoreBtnEl.replaceChildren(label);
+    chatMoreBtnEl.title = `${summary} — stance, model, ask all models, resolve`;
+    chatMoreBtnEl.setAttribute("aria-expanded", String(open));
+  }
+  function setMoreOpen(open: boolean): void {
+    chatMoreEl.hidden = !open;
+    refreshMoreLabel();
+  }
+  chatMoreBtnEl.addEventListener("click", () => {
+    setMoreOpen(chatMoreEl.hidden);
+    try {
+      localStorage.setItem(MORE_OPEN_KEY, chatMoreEl.hidden ? "0" : "1");
+    } catch {
+      /* a per-viewer convenience only */
+    }
+  });
+  chatStanceEl.addEventListener("change", refreshMoreLabel);
+  chatModelEl.addEventListener("change", refreshMoreLabel);
+  let moreOpen = false;
+  try {
+    moreOpen = localStorage.getItem(MORE_OPEN_KEY) === "1";
+  } catch {
+    /* storage unavailable: start closed */
+  }
+  setMoreOpen(moreOpen);
   const chatImproveEl = document.querySelector<HTMLButtonElement>("#chatImprove")!;
 
   let activeChatId: string | null = null;
@@ -510,6 +554,7 @@ export function initChat(deps: ChatDeps): ChatApi {
         m.classList.toggle("focus", on);
         if (on && !firstHtml) firstHtml = m;
       });
+      focusRangeBlocks(htmlDoc, id);
       (firstHtml as Element | null)?.scrollIntoView({ block: "center", behavior: "smooth" });
       return;
     }
@@ -519,6 +564,7 @@ export function initChat(deps: ChatDeps): ChatApi {
       m.classList.toggle("focus", on);
       if (on && !first) first = m;
     });
+    focusRangeBlocks(document, id);
     (first as Element | null)?.scrollIntoView({ block: "center", behavior: "smooth" });
   }
 
@@ -567,6 +613,7 @@ export function initChat(deps: ChatDeps): ChatApi {
     // Populate the footer model picker (default for now; promoteToChat refines it
     // to the thread's persisted model once the thread is fetched).
     modelSelectOptions(chatModelEl, defaultModelKey);
+    refreshMoreLabel();
     chatFootEl.hidden = false;
     chatEmptyEl.hidden = true;
   }
@@ -583,6 +630,7 @@ export function initChat(deps: ChatDeps): ChatApi {
       // Picker defaults to the thread's persisted model, else the per-doc default.
       const threadModel = thread.frontmatter?.model ?? defaultModelKey;
       modelSelectOptions(chatModelEl, threadModel);
+      refreshMoreLabel();
       let lastUser: ThreadTurn | undefined;
       thread.turns.forEach((tn, i) => {
         // Persisted agent turns get a subtle "· {model}" tag when the thread has a model.
@@ -918,12 +966,14 @@ export function initChat(deps: ChatDeps): ChatApi {
     chatEmptyEl.hidden = true;
     chatTurnsEl.replaceChildren();
     modelSelectOptions(chatModelEl, defaultModelKey);
+    refreshMoreLabel();
     const gen = ++paneGen;
     try {
       const thread = await deps.api.getThread({ threadId: id });
       if (gen !== paneGen) return; // superseded by a newer thread open (see paneGen)
       if (thread.frontmatter?.stance) chatStanceEl.value = thread.frontmatter.stance;
       modelSelectOptions(chatModelEl, thread.frontmatter?.model ?? defaultModelKey);
+      refreshMoreLabel();
       if (!thread.turns.length) chatTurn("system", "No transcript for this agent task yet.");
       thread.turns.forEach((tn, i) => chatTurn(tn.role, tn.body, tn.meta, tn.thinking, i));
     } catch (e) {
@@ -1018,6 +1068,7 @@ export function initChat(deps: ChatDeps): ChatApi {
     chatStanceEl.value = ask.stance;
     activateChatPane(id, quoted);
     chatModelEl.value = ask.modelId ?? ""; // keep the footer picker in sync
+    refreshMoreLabel();
     setCommentActionState(entry, "running");
     setChatBusy(id); // show Stop; cancelKey for discuss is docPath#<id>
     chatTurn("you", ask.comment);

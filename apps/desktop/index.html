@@ -27,11 +27,9 @@
 
     <div class="layout">
       <aside class="chatpane">
-        <div class="chathead">
-          <div>
-            <div class="chattitle">Agent discussion</div>
-            <div class="panehint">Promote a comment to revise it with agents.</div>
-          </div>
+        <!-- No pane title: the quote below names the thread. The select is the hidden
+             backing store for the branch tree. -->
+        <div class="chathead" hidden>
           <select id="chatThreadSelect" class="threadsel" title="Switch discussion">
             <option value="">— no discussion —</option>
           </select>
@@ -43,20 +41,24 @@
           Open a review-card discussion to work with an agent on the selected passage.
         </div>
         <div id="chatFoot" class="chatfoot" hidden>
-          <div class="chatactions">
-            <button id="chatResolve" class="resolvebtn" title="Mark this discussion resolved">Resolve thread</button>
-            <button id="chatImprove" class="improvebtn" title="Ask the agent to rewrite the highlighted text using this discussion">Improve passage</button>
-          </div>
-          <select id="chatStance" class="stance" title="Agent stance">
-            <option value="none">🗣 none</option>
-            <option value="critiquer">🔍 critiquer</option>
-            <option value="supporter">🤝 supporter</option>
-          </select>
-          <select id="chatModel" class="stance" title="Model"></select>
           <textarea id="chatInput" rows="2" placeholder="Message the agent…"></textarea>
-          <button id="chatSend" title="Send">Send</button>
-          <button id="chatPanel" title="Ask all configured models at once">Panel</button>
-          <button id="chatStop" title="Stop the agent" hidden>Stop</button>
+          <div class="chatprimary">
+            <button id="chatImprove" class="improvebtn" title="Ask the agent to rewrite the highlighted text using this discussion">Improve passage</button>
+            <button id="chatMoreBtn" class="morebtn" type="button" aria-expanded="false" aria-controls="chatMore" title="Stance, model, ask all models, resolve">Options</button>
+            <span class="footspacer"></span>
+            <button id="chatStop" title="Stop the agent" hidden>Stop</button>
+            <button id="chatSend" title="Send">Send</button>
+          </div>
+          <div id="chatMore" class="chatmore" hidden>
+            <select id="chatStance" class="stance" title="Agent stance">
+              <option value="none">🗣 none</option>
+              <option value="critiquer">🔍 critiquer</option>
+              <option value="supporter">🤝 supporter</option>
+            </select>
+            <select id="chatModel" class="stance" title="Model"></select>
+            <button id="chatPanel" title="Ask all configured models at once">Ask all models</button>
+            <button id="chatResolve" class="resolvebtn" title="Mark this discussion resolved">Resolve thread</button>
+          </div>
         </div>
       </aside>
 

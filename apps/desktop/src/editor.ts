@@ -44,6 +44,7 @@ import { projectionOf, buildProjection, posRangeForOffsets } from "./anchor-map.
 import { openMermaidLightbox } from "./mermaid-lightbox.js";
 import { annotationIdAtPos, directiveOrdinalAtPos, type AnnotationRange, type PosRange } from "./click-jump.js";
 import type { Annotation } from "@ai-native-doc/docd/protocol";
+import { RANGE_ATTR, isLongRange, opaqueBackground } from "./long-range.js";
 
 // --- annotation decorations (overlay; auto-map through edits) ---
 export const annoKey = new PluginKey("had-annotations");
@@ -448,17 +449,38 @@ export async function initEditor(deps: EditorDeps): Promise<EditorApi> {
                   },
                   { id: add.id, side: 1 },
                 );
+                // A comment over a long passage gets a bar in the margin beside the
+                // top-level blocks it covers, not a tint on every one of them.
+                const covered: { from: number; to: number }[] = [];
+                tr.doc.forEach((node, offset) => {
+                  const end = offset + node.nodeSize;
+                  if (offset < add.to && end > add.from && node.textContent.trim() !== "") covered.push({ from: offset, to: end });
+                });
+                const long = isLongRange(add.to - add.from, covered.length);
+                const rangeBg = long ? opaqueBackground(document.querySelector(".editor .ProseMirror")) : "";
                 set = set.add(tr.doc, [
                   Decoration.inline(
                     add.from,
                     add.to,
-                    {
-                      class: "had-mark had-comment",
-                      "data-anno": add.id,
-                      style: `background:${color.bg}40;box-shadow:0 0 0 1px ${color.edge}33`,
-                    },
+                    long
+                      ? { class: "had-mark had-comment had-long", "data-anno": add.id }
+                      : {
+                          class: "had-mark had-comment",
+                          "data-anno": add.id,
+                          style: `background:${color.bg}40;box-shadow:0 0 0 1px ${color.edge}33`,
+                        },
                     { id: add.id },
                   ),
+                  ...(long
+                    ? covered.map((b) =>
+                        Decoration.node(
+                          b.from,
+                          b.to,
+                          { [RANGE_ATTR]: add.id, style: `--had-range-color:${color.edge};--had-range-bg:${rangeBg}` },
+                          { id: add.id },
+                        ),
+                      )
+                    : []),
                   badge,
                 ]);
               } else {
