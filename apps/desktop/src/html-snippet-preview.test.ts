@@ -7,7 +7,7 @@ const mainSource = readFileSync(new URL("./main.ts", import.meta.url), "utf8");
 // in the frontend split. Assertion semantics are unchanged; only the source file
 // moved (renderPreviewText/rawPreviewText themselves stay in main.ts, so those
 // slices are untouched below).
-const chatSource = readFileSync(new URL("./chat.ts", import.meta.url), "utf8");
+import { chatSource } from "./module-source.test-support.js";
 // buildProposalWidget/buildHtmlProposalCard moved to proposals.ts in the frontend
 // split.
 const proposalsSource = readFileSync(new URL("./proposals.ts", import.meta.url), "utf8");
@@ -47,7 +47,11 @@ describe("HTML snippet previews", () => {
       "function beginEditBranch(",
     );
     expect(streamingSource).toContain('let replyText = ""');
-    expect(streamingSource).toContain('renderTurnText(body, "agent", replyText)');
+    // Tokens append to a text node while streaming; the preview path (which can build a
+    // sandboxed iframe) runs once, when the turn settles — never once per token.
+    expect(streamingSource).toContain("streamNode.appendData(d);");
+    expect(streamingSource).toContain('renderTurnText(body, "agent", finalText ?? replyText)');
+    expect(streamingSource.match(/renderTurnText\(body, "agent"/g)?.length).toBe(1);
   });
 
   it("renders proposal previews while preserving the raw proposed text for apply", () => {

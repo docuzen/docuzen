@@ -43,6 +43,32 @@ pub struct SidecarHandle {
     port: u16,
     child: Arc<Mutex<Option<Child>>>,
     shutting_down: Arc<AtomicBool>,
+    /// Set by `restart()` just before it kills the child, so the monitor can tell a
+    /// requested bounce from a crash.
+    restart_requested: Arc<AtomicBool>,
+}
+
+/// What the monitor does about a child exit. A requested restart is not a crash: it
+/// never spends the crash budget and respawns without backoff. Without this, three
+/// config-driven restarts inside `STABLE_UPTIME` exhausted `MAX_RESTARTS` and left the
+/// app with no sidecar until relaunch.
+#[derive(Debug, PartialEq)]
+enum ExitAction {
+    Respawn { restarts: u32, backoff: Duration },
+    GiveUp,
+}
+
+fn on_child_exit(requested: bool, stable: bool, restarts: u32) -> ExitAction {
+    if requested {
+        return ExitAction::Respawn { restarts, backoff: Duration::ZERO };
+    }
+    // A previous incarnation that ran long enough makes this a fresh failure streak.
+    let restarts = if stable { 0 } else { restarts };
+    if restarts >= MAX_RESTARTS {
+        return ExitAction::GiveUp;
+    }
+    let restarts = restarts + 1;
+    ExitAction::Respawn { restarts, backoff: Duration::from_secs(1 << restarts.min(3)) }
 }
 
 pub fn parse_port_line(line: &str) -> Option<u16> {
@@ -112,6 +138,8 @@ pub fn start(sidecar_dir: &Path) -> Result<SidecarHandle, String> {
 
     let monitor_child = Arc::clone(&child);
     let monitor_flag = Arc::clone(&shutting_down);
+    let restart_requested = Arc::new(AtomicBool::new(false));
+    let monitor_restart = Arc::clone(&restart_requested);
     let dir = sidecar_dir.to_path_buf();
     thread::spawn(move || {
         let mut restarts: u32 = 0;
@@ -135,19 +163,20 @@ pub fn start(sidecar_dir: &Path) -> Result<SidecarHandle, String> {
             if monitor_flag.load(Ordering::SeqCst) {
                 return;
             }
-            // Finding 2: if previous incarnation was stable, this is not a
-            // consecutive crash — reset the counter before incrementing.
-            if last_spawn.elapsed() >= STABLE_UPTIME {
-                restarts = 0;
-            }
-            if restarts >= MAX_RESTARTS {
-                if let Ok(mut log) = open_log() {
-                    let _ = writeln!(log, "docuzen: sidecar crashed {MAX_RESTARTS} times; giving up");
+            let requested = monitor_restart.swap(false, Ordering::SeqCst);
+            let stable = last_spawn.elapsed() >= STABLE_UPTIME;
+            match on_child_exit(requested, stable, restarts) {
+                ExitAction::GiveUp => {
+                    if let Ok(mut log) = open_log() {
+                        let _ = writeln!(log, "docuzen: sidecar crashed {MAX_RESTARTS} times; giving up");
+                    }
+                    return;
                 }
-                return;
+                ExitAction::Respawn { restarts: next, backoff } => {
+                    restarts = next;
+                    thread::sleep(backoff);
+                }
             }
-            restarts += 1;
-            thread::sleep(Duration::from_secs(1 << restarts.min(3)));
             // Finding 1: stop() may have fired during the backoff sleep.
             if monitor_flag.load(Ordering::SeqCst) {
                 return;
@@ -181,7 +210,7 @@ pub fn start(sidecar_dir: &Path) -> Result<SidecarHandle, String> {
         }
     });
 
-    Ok(SidecarHandle { port, child, shutting_down })
+    Ok(SidecarHandle { port, child, shutting_down, restart_requested })
 }
 
 impl SidecarHandle {
@@ -193,6 +222,8 @@ impl SidecarHandle {
     /// Used after config changes so the sidecar re-reads config.toml.
     pub fn restart(&self) {
         if let Some(c) = self.child.lock().unwrap().as_mut() {
+            // Flag first: the monitor must see it by the time it observes the exit.
+            self.restart_requested.store(true, Ordering::SeqCst);
             let _ = c.kill();
         }
     }
@@ -209,8 +240,39 @@ impl SidecarHandle {
 
 #[cfg(test)]
 mod tests {
-    use super::{augmented_path, parse_port_line};
+    use super::{augmented_path, on_child_exit, parse_port_line, ExitAction, MAX_RESTARTS};
     use std::path::Path;
+    use std::time::Duration;
+
+    #[test]
+    fn requested_restarts_never_spend_the_crash_budget() {
+        // Even with the budget already exhausted, a requested bounce respawns at once.
+        assert_eq!(
+            on_child_exit(true, false, MAX_RESTARTS),
+            ExitAction::Respawn { restarts: MAX_RESTARTS, backoff: Duration::ZERO }
+        );
+    }
+
+    #[test]
+    fn crashes_back_off_then_give_up() {
+        assert_eq!(
+            on_child_exit(false, false, 0),
+            ExitAction::Respawn { restarts: 1, backoff: Duration::from_secs(2) }
+        );
+        assert_eq!(
+            on_child_exit(false, false, 2),
+            ExitAction::Respawn { restarts: 3, backoff: Duration::from_secs(8) }
+        );
+        assert_eq!(on_child_exit(false, false, MAX_RESTARTS), ExitAction::GiveUp);
+    }
+
+    #[test]
+    fn a_crash_after_a_stable_run_starts_a_new_streak() {
+        assert_eq!(
+            on_child_exit(false, true, MAX_RESTARTS),
+            ExitAction::Respawn { restarts: 1, backoff: Duration::from_secs(2) }
+        );
+    }
 
     #[test]
     fn parses_the_port_line() {

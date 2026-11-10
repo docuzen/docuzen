@@ -1,5 +1,4 @@
-import { mkdir, readFile, writeFile } from "node:fs/promises";
-import { dirname } from "node:path";
+import { readJsonFile, withFileLock, writeJsonFile } from "../had/io.js";
 
 /**
  * A single model row, flattened from pi's provider-keyed models.json. `key`
@@ -33,12 +32,7 @@ interface PiModelsFile {
 }
 
 async function readFileOrEmpty(path: string): Promise<PiModelsFile> {
-  try {
-    return JSON.parse(await readFile(path, "utf8")) as PiModelsFile;
-  } catch (err: unknown) {
-    if ((err as NodeJS.ErrnoException).code === "ENOENT") return {};
-    throw err;
-  }
+  return readJsonFile<PiModelsFile>(path, () => ({}));
 }
 
 /**
@@ -100,7 +94,14 @@ export async function readModelWithKey(path: string, key: string): Promise<Model
  * keeps the apiKey already stored on disk for that provider, so editing
  * non-secret fields never wipes the credential.
  */
-export async function saveModels(path: string, models: ModelConfig[]): Promise<void> {
+export function saveModels(path: string, models: ModelConfig[]): Promise<void> {
+  // Locked: the stored apiKey is carried over from the file being replaced, so two
+  // overlapping saves must not interleave their read and write. Atomic: this file holds
+  // credentials, and a torn write would lose every provider's key.
+  return withFileLock(path, () => saveModelsUnlocked(path, models));
+}
+
+async function saveModelsUnlocked(path: string, models: ModelConfig[]): Promise<void> {
   const existing = (await readFileOrEmpty(path)).providers ?? {};
   const providers: Record<string, PiProvider> = {};
 
@@ -123,6 +124,5 @@ export async function saveModels(path: string, models: ModelConfig[]): Promise<v
     });
   }
 
-  await mkdir(dirname(path), { recursive: true });
-  await writeFile(path, JSON.stringify({ providers }, null, 2) + "\n", "utf8");
+  await writeJsonFile(path, { providers });
 }

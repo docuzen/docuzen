@@ -60,13 +60,9 @@ export interface VersionPickerGraphRow {
   graphCells: VersionPickerGraphCell[];
 }
 
-export interface VersionPickerTimelineRow {
-  version: VersionPickerVersion;
-}
-
+/** Every saved version appears as exactly one graph row (there is no separate "unthreaded" list). */
 export interface VersionPickerModel {
   graphRows: VersionPickerGraphRow[];
-  unthreadedVersions: VersionPickerTimelineRow[];
 }
 
 const byCreated = (a: VersionPickerThreadNode, b: VersionPickerThreadNode): number =>
@@ -309,8 +305,5 @@ export function buildVersionPickerModel(
     return { ...row, laneCount, graphCells };
   });
 
-  return {
-    graphRows,
-    unthreadedVersions: [],
-  };
+  return { graphRows };
 }

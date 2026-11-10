@@ -20,11 +20,10 @@ afterEach(async () => {
 
 describe("withEditSnapshot", () => {
   it("takes pre-apply-backup then agent-edit, in that order, around the mutation", async () => {
-    const changed = await withEditSnapshot({ now: () => "t1" }, docPath, "c0001", async () => {
+    await withEditSnapshot({ now: () => "t1" }, docPath, "c0001", async () => {
       await writeFile(docPath, "EDITED\n", "utf8");
     });
 
-    expect(changed).toBe(true);
     const entries = await listVersions(docPath);
     expect(entries.map((e) => e.cause)).toEqual(["pre-apply-backup", "agent-edit"]);
     expect(await readVersion(docPath, entries[0].id)).toBe("ORIGINAL\n");
@@ -109,43 +108,5 @@ describe("withEditSnapshot", () => {
 
     const entries = await listVersions(docPath);
     expect(entries.map((e) => e.cause)).toEqual(["pre-apply-backup"]);
-  });
-
-  describe("skipIfUnchanged (detectDirectEdit's case: the write already happened before this runs)", () => {
-    it("skips both snapshots and returns false when the document didn't change", async () => {
-      const before = await readFile(docPath, "utf8");
-      const changed = await withEditSnapshot(
-        { now: () => "t1" },
-        docPath,
-        "c0001",
-        async () => {
-          /* no-op: nothing wrote to docPath */
-        },
-        { before, skipIfUnchanged: true },
-      );
-
-      expect(changed).toBe(false);
-      expect(await listVersions(docPath)).toEqual([]);
-    });
-
-    it("still records the pair and returns true when the document did change", async () => {
-      const before = await readFile(docPath, "utf8");
-      await writeFile(docPath, "EDITED\n", "utf8"); // the "already happened" external write
-      const changed = await withEditSnapshot(
-        { now: () => "t1" },
-        docPath,
-        "c0001",
-        async () => {
-          /* no-op: mutation already happened before this call */
-        },
-        { before, skipIfUnchanged: true },
-      );
-
-      expect(changed).toBe(true);
-      const entries = await listVersions(docPath);
-      expect(entries.map((e) => e.cause)).toEqual(["pre-apply-backup", "agent-edit"]);
-      expect(await readVersion(docPath, entries[0].id)).toBe("ORIGINAL\n");
-      expect(await readVersion(docPath, entries[1].id)).toBe("EDITED\n");
-    });
   });
 });

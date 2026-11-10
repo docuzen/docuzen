@@ -2,7 +2,12 @@ import { mkdirSync } from "node:fs";
 import { dirname } from "node:path";
 import Database from "better-sqlite3";
 
-export type TaskStatus = "queued" | "running" | "responded" | "error";
+/**
+ * Nothing has ever written "queued" — queueing is a desktop-side concept (send-queue.ts).
+ * The SQL CHECK below still admits it only because the table shipped that way and SQLite
+ * cannot alter a CHECK constraint in place.
+ */
+export type TaskStatus = "running" | "responded" | "error";
 
 export interface TaskRow {
   threadId: string;

@@ -2,7 +2,14 @@
 
 Releases are tag-driven from `main` on `github.com/docuzen/docuzen`:
 
-1. Bump `version` in `apps/desktop/src-tauri/tauri.conf.json`.
+1. Bump the version everywhere with one command (tauri.conf.json, the three
+   package.json files, Cargo.toml and Cargo.lock):
+
+   ```bash
+   npm run version:set -- X.Y.Z
+   ```
+
+   `npm test` fails if any of them disagree (`node tools/version.mjs check`).
 2. Commit, then tag and push:
 
    ```bash
@@ -29,4 +36,8 @@ same workflow signs on the next tag, no changes required. Configure all six toge
 
 Sidecar runtime pins (Node version, ABI, SHA-256 checksums) live in
 `packages/docd/sidecar.json`; bumping them requires updating the pinned
-checksums from official sources.
+checksums from official sources (`https://nodejs.org/dist/vX/SHASUMS256.txt`).
+The pinned Node must satisfy the `engines` of `@earendil-works/pi-coding-agent`,
+which is bundled into the sidecar. After any bump of either, run
+`npm run sidecar:smoke --workspace @ai-native-doc/docd`: it fails unless a real
+pi harness comes up inside the bundle under the pinned Node.

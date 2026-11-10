@@ -3,7 +3,7 @@ import { readFileSync } from "node:fs";
 
 // The selection popover construction/positioning moved to surface.ts in the
 // frontend split. Assertion semantics are unchanged; only the source file moved.
-const surfaceSource = readFileSync(new URL("./surface.ts", import.meta.url), "utf8");
+import { surfaceSource } from "./module-source.test-support.js";
 const stylesSource = readFileSync(new URL("./styles.css", import.meta.url), "utf8");
 
 function sourceBetween(source: string, start: string, end: string): string {
@@ -60,12 +60,8 @@ describe("selection popover layout", () => {
 // whose RPC result is only `{ ok: boolean }` — see protocol/rpc.ts) and lives here
 // in surface.ts, so it needs the identical fetchLastAgentReply round-trip.
 describe("Brainstorm's bubble re-renders to the persisted reply on done()", () => {
-  it("defines the same best-effort fetchLastAgentReply getThread round-trip chat.ts uses", () => {
-    expect(surfaceSource).toContain(
-      "async function fetchLastAgentReply(threadId: string): Promise<string | undefined> {",
-    );
-    expect(surfaceSource).toContain('const last = thread.turns[thread.turns.length - 1];');
-    expect(surfaceSource).toContain('return last?.role === "agent" ? last.body : undefined;');
+  it("uses the same shared lastAgentReply round-trip chat.ts uses (one implementation, in ui.ts)", () => {
+    expect(surfaceSource).toContain("lastAgentReply(deps.api, deps.getDocPath, threadId)");
   });
 
   it("runBrainstorm wires fetchLastAgentReply into bubble.done()", () => {

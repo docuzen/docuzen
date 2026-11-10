@@ -1,9 +1,9 @@
 import { describe, expect, it } from "vitest";
-import { readFileSync } from "node:fs";
 
-// addCommentCard/registerBranchEntry/setCommentActionState moved to chat.ts in the
-// frontend split. Assertion semantics are unchanged; only the source file moved.
-const chatSource = readFileSync(new URL("./chat.ts", import.meta.url), "utf8");
+// addCommentCard/registerBranchEntry/setCommentActionState live in chat-comment-cards.ts.
+// The behaviour itself (click opens the thread; a failed thread offers Retry after a
+// reload) is asserted in chat-behaviour.test.ts; these only pin the markup.
+import { chatSource } from "./module-source.test-support.js";
 
 function sourceBetween(source: string, start: string, end: string): string {
   const startIndex = source.indexOf(start);
@@ -22,7 +22,7 @@ describe("agent retry/open UX", () => {
 
   it("opens a comment card in the chat pane with a single click", () => {
     expect(cardSource).toContain('card.addEventListener("click",');
-    expect(cardSource).toContain("void promoteToChat(id)");
+    expect(cardSource).toContain("deps.onOpen(id);");
   });
 
   it("does not render a separate Open button on comment cards", () => {
@@ -32,6 +32,6 @@ describe("agent retry/open UX", () => {
 
   it("keeps failed discussions actionable as Retry", () => {
     expect(chatSource).toContain('discussBtn.textContent = "Retry"');
-    expect(cardSource).toContain("setCommentActionState");
+    expect(chatSource).toContain('setCommentActionState(entry, "error");');
   });
 });

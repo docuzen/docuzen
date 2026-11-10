@@ -156,30 +156,6 @@ describe("PiRunner.firstPrompt — byte-exact capture (pre-refactor baseline)", 
     `);
   });
 
-  it("direct edit mode (allowEdit)", () => {
-    expect(firstPrompt({ ...base, allowEdit: true })).toMatchInlineSnapshot(`
-      "Be a skeptical reviewer.
-
-      You are a focused document reviewer. Discuss the highlighted passage with the reviewer. When the reviewer asks you to make a change, edit the document file directly using your edit/write tools, then briefly say what you changed. The document is GitHub-flavored Markdown rendered live in a WYSIWYG editor: fenced \`\`\`mermaid blocks render as diagrams (flowchart, sequence, class, state, ER, gantt), GFM tables render as tables, and inline SVG renders as an image. So when a visual would help — a flow, an architecture, a comparison — produce a doc-native \`\`\`mermaid diagram (preferred), a Markdown table, or inline SVG directly in your reply or edit, rather than describing it in prose or referencing an image file. Use your read-only tools (read, grep, ls, find) to consult the rest of the project and the review state under the document's \`.docuzen/\` store for other comments when you need more context.
-
-      ## Document
-      # Title
-
-      Body text about Redis caching.
-
-      ## Local context around the highlighted passage
-      Body text about Redis caching.
-
-      ## The reviewer highlighted
-      "Redis caching"
-
-      ## Their comment
-      Why Redis here?
-
-      Respond to their comment. Be concise and specific."
-    `);
-  });
-
   it("html mode", () => {
     expect(firstPrompt({ ...base, htmlMode: true })).toMatchInlineSnapshot(`
       "Be a skeptical reviewer.
@@ -221,7 +197,7 @@ describe("PiRunner.firstPrompt — byte-exact capture (pre-refactor baseline)", 
       Web search is enabled for this turn (provider: brave). You can call web_search(query) to find sources and web_fetch(url) to read a result. Use these tools for citations, current facts, external references, and named web resources. If search returns no useful results, say that specifically; do not claim web search is unavailable unless the tool returns a configuration error.
 
       ## MCP tool safety
-      Docuzen selected an internal document toolchain for this file. Use the mcp tool when it is available to search, describe, and call allowlisted document tools. In propose/review modes, only read-only or patch-draft MCP tools are allowlisted; do not use MCP tools to write the canonical document. To change the document, call propose_edit/add_review_finding unless direct-edit mode is explicitly enabled.
+      Docuzen selected an internal document toolchain for this file. Use the mcp tool when it is available to search, describe, and call allowlisted document tools. Only read-only or patch-draft MCP tools are allowlisted (a draft returns a diff and writes nothing); do not use MCP tools to write the canonical document. To change the document, call propose_edit/add_review_finding.
 
       ## Document
       # Title

@@ -12,7 +12,7 @@ docuzen needs Node.js, the Rust toolchain, and Tauri v2's native system
 dependencies. Install them in the order below, then verify with
 `node --version` and `cargo --version` (or `docuzen doctor` once linked).
 
-### 1. Node.js 20+ and npm
+### 1. Node.js 22+ and npm
 
 Any install method works:
 
@@ -117,14 +117,29 @@ app installs its own `docuzen` CLI — see the
 
 ## Model and Agent Configuration
 
-The sidecar picks its runner at startup:
+The sidecar answers two separate questions at startup
+(`packages/docd/src/server/select-runner.ts`):
+
+**Is pi usable?** Independent of which harness is the default:
 
 - If `LLM_API_KEY` is set (dev-mode override), it starts the live `PiRunner`
   with `LLM_PROVIDER`/`LLM_MODEL`, regardless of app config.
-- Otherwise, if `~/.docuzen/config.toml` selects the `pi` harness and its
-  `model` resolves to an entry with a stored API key in
-  `~/.pi/agent/models.json`, it starts the live `PiRunner`.
-- Otherwise it starts `FakePiRunner` and logs that Discuss is disabled.
+- Otherwise, if `[pi] model` in `~/.docuzen/config.toml` resolves to an entry
+  with a stored API key in `~/.pi/agent/models.json`, it starts the live
+  `PiRunner` with that model. A configured model that cannot be used is
+  reported, never silently swapped for another.
+- Otherwise, with no `[pi] model` configured, it uses the first model in
+  `models.json` that has a stored key.
+- Otherwise pi is offline (`FakePiRunner`), and the log says why.
+
+**Which harness is the default** for documents that don't pick one?
+
+- The `[harness] default` in `config.toml`, when set.
+- Otherwise the first usable harness: pi if it is usable, else Codex if the
+  `codex` CLI was detected, else pi (so the error names what is missing).
+
+A document can always choose a different harness in its settings; pi stays
+usable when Codex is the default and vice versa.
 
 On first launch with no configured harness, the app shows a one-time setup
 modal that writes `~/.docuzen/config.toml`:
@@ -195,7 +210,6 @@ Useful environment variables:
 | `DOCUZEN_CONFIG_DIR` | sidecar | `~/.docuzen` | Overrides the app-config directory (`config.toml`); used by tests. |
 | `LLM_PROVIDER` | sidecar | `litellm` | Provider key in `~/.pi/agent/models.json`. |
 | `LLM_MODEL` | sidecar/dev launcher | `gpt-5.5` | Model id under the provider. |
-| `LLM_BASE_URL` | sidecar (legacy) | unset | Legacy passthrough; the current live runner resolves `baseUrl` from `~/.pi/agent/models.json`. |
 | `DOCD_PORT` | dev launcher | `8137` | Fixed sidecar port passed to Vite. |
 | `DOCUZEN_AUTHOR` | sidecar | OS username | Author name for human comments/turns. |
 | `BRAVE_API_KEY` | web search | unset | Required only when Brave search is selected. |
@@ -248,9 +262,13 @@ Available settings:
 - **Default model.** Uses a `provider/modelId` key from `~/.pi/agent/models.json`.
 - **Agent tool scope.** `folder` limits file tools to the document folder and
   its `.docuzen/` review state; `repo` walks up to the nearest `.git` root.
-- **Edit mode.** `propose` is the default and asks the agent to propose a diff
-  that you approve/reject. `direct` allows the agent to edit the document file
-  directly and snapshots before/after.
+- **Harness.** Which agent harness (Pi or Codex) answers for this document.
+- **Agent edits.** *Suggesting* (default): every edit from Improve, Resolve
+  `[[ ]]` or Review is a proposal you approve or reject. *Editing*: those edits
+  apply as the agent produces them. In both modes each applied edit is recorded
+  and snapshotted, so File → Save → Versions can restore the document from
+  before it. An edit that no longer matches the text is never forced; it falls
+  back to a proposal. Conversation turns never edit in either mode.
 - **Standing instructions.** Persistent guidance injected into every agent turn
   for that document.
 - **Web search.** Enabled by default with DuckDuckGo; Brave and Tavily are
@@ -298,7 +316,7 @@ cd apps/desktop
 npm run tauri build
 ```
 
-The configured bundle targets are `"all"` in `apps/desktop/src-tauri/tauri.conf.json`.
+The configured bundle targets are `"app"` and `"dmg"` in `apps/desktop/src-tauri/tauri.conf.json`.
 The Rust/Tauri output is under `apps/desktop/src-tauri/target/`.
 
 The packaged app is self-contained: `tauri build` bundles the docd sidecar as

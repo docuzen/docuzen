@@ -35,8 +35,8 @@ describe("PiRunner replacement-only prompt", () => {
   });
 });
 
-// Phase 10: conversation turns (discuss/reply/panel/branch) must never promise or
-// instruct an edit, regardless of settings.agentEdit — see AgentContext.conversationOnly.
+// Conversation turns (discuss/reply/panel/branch) must never promise or instruct an
+// edit — see AgentContext.conversationOnly.
 describe("PiRunner conversationOnly prompt narration", () => {
   const base: AgentContext = {
     docText: "We store limits in Redis with a TTL.",
@@ -54,12 +54,6 @@ describe("PiRunner conversationOnly prompt narration", () => {
     expect(prompt).toContain("Respond to their comment");
   });
 
-  it("conversationOnly wins over allowEdit — no direct-edit instruction even when agentEdit was 'direct'", () => {
-    const prompt = firstPrompt({ ...base, conversationOnly: true, allowEdit: true });
-    expect(prompt).not.toContain("edit the document file directly");
-    expect(prompt).toContain("no edit or edit-proposal tools");
-  });
-
   it("gives conversation-specific MCP guidance instead of the propose/direct-edit phrasing", () => {
     const prompt = firstPrompt({
       ...base,
@@ -67,7 +61,7 @@ describe("PiRunner conversationOnly prompt narration", () => {
       docToolchain: "fast-html",
     });
     expect(prompt).toContain("This is a conversation turn");
-    expect(prompt).not.toContain("call propose_edit/add_review_finding unless direct-edit mode");
+    expect(prompt).not.toContain("To change the document, call propose_edit/add_review_finding");
   });
 });
 
@@ -85,7 +79,7 @@ describe("PiRunner MCP config construction", () => {
 
     expect(prompt).toContain("Docuzen selected an internal document toolchain for this file");
     expect(prompt).toContain("Use the mcp tool when it is available to search, describe, and call allowlisted document tools");
-    expect(prompt).toContain("only read-only or patch-draft MCP tools are allowlisted");
+    expect(prompt).toContain("Only read-only or patch-draft MCP tools are allowlisted");
   });
 
   it("does not mention MCP when no document toolchain has an implemented MCP server", () => {

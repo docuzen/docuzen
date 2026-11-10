@@ -3,7 +3,7 @@ import { readFileSync } from "node:fs";
 
 // The settings modal (harness caps, model manager) moved to shell.ts in the
 // frontend split. Assertion semantics are unchanged; only the source file moved.
-const shellSource = readFileSync(new URL("./shell.ts", import.meta.url), "utf8");
+import { shellSource } from "./module-source.test-support.js";
 const htmlSource = readFileSync(new URL("../index.html", import.meta.url), "utf8");
 
 function sourceBetween(source: string, start: string, end: string): string {

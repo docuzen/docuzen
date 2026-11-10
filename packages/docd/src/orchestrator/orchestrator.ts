@@ -1,30 +1,15 @@
-import { readFile, writeFile } from "node:fs/promises";
-import { existsSync } from "node:fs";
-import { createHash } from "node:crypto";
-import { dirname, join } from "node:path";
+import { readFile } from "node:fs/promises";
+import { dirname } from "node:path";
 import matter from "gray-matter";
-import type {
-  AgentContext,
-  AgentRunner,
-  AgentTurn,
-  EditHunk,
-  ProposedEdit,
-  ReviewFinding,
-  TokenSink,
-} from "../agent/types.js";
+import type { AgentContext, AgentRunner, AgentTurn, ProposedEdit, TokenSink } from "../agent/types.js";
 import { HarnessRegistry, type AgentHarness } from "../agent/harness-registry.js";
-import { validateHtml } from "../agent/html-validation.js";
-import { resolveDocToolchain } from "../agent/mcp.js";
 import type { TaskDB } from "../state/task-db.js";
 import { stancePrompt } from "./stance.js";
-import { diffToHunks } from "./diff.js";
 import { findDirectives } from "./directives.js";
 import { transition } from "./turn-status.js";
 import {
   readAnnotations,
-  addAnnotation,
-  updateAnnotation,
-  nextAnnotationId,
+  appendAnnotation,
   initThread,
   appendTurn,
   readThread,
@@ -33,94 +18,19 @@ import {
   readVersion,
   latestVersionId,
   readSettings,
-  listProposals,
-  addProposal,
-  updateProposal,
   isHtmlDoc,
-  type HadSettings,
 } from "../had/index.js";
-import { createAnchor, resolveAnchor } from "../anchor/index.js";
+import { createAnchor } from "../anchor/index.js";
 import type { Annotation, ThreadTurn } from "../had/types.js";
-import { withEditSnapshot } from "./edit-snapshot.js";
-
-/** Doc-text budget passed inline to the agent (~30k tokens). Tools fetch more. */
-const DOC_TEXT_BUDGET = 120_000;
-
-/** Walk up from `start` to the nearest repo root (.git), else return `start`. */
-function findRepoRoot(start: string): string {
-  let cur = start;
-  for (;;) {
-    if (existsSync(join(cur, ".git"))) return cur;
-    const parent = dirname(cur);
-    if (parent === cur) return start;
-    cur = parent;
-  }
-}
-
-/**
- * The Improve instruction. `discussed` = a real back-and-forth already exists in
- * this thread (and is in the agent's context), so the rewrite should fold it in;
- * otherwise it's a standalone polish of the passage with no discussion to invoke.
- * Markdown stays replacement-only; HTML uses structured raw-source proposals so
- * validation and the normal approve/reject path protect the document.
- */
-function improvePrompt(
-  discussed: boolean,
-  history: { role: "you" | "agent"; body: string }[] = [],
-  htmlMode = false,
-): string {
-  const replyOnly =
-    "Reply with ONLY the replacement text — no preamble, no quotes, no code" +
-    " fences, no explanation.";
-  const latestReviewer = [...history].reverse().find((t) => t.role === "you");
-  const latestAgent = [...history].reverse().find((t) => t.role === "agent");
-  const latest = [
-    latestReviewer ? `Latest reviewer ask: ${latestReviewer.body}` : "",
-    latestAgent ? `Latest agent response: ${latestAgent.body}` : "",
-  ].filter(Boolean);
-  const conversation = history
-    .map((t) => `${t.role === "agent" ? "agent" : "reviewer"}: ${t.body}`)
-    .join("\n");
-
-  if (htmlMode) {
-    const contextLine = discussed
-      ? "Use the conversation so far as context for this rewrite, especially the latest reviewer ask and agent response."
-      : "Improve the highlighted passage without inventing discussion context that is not present.";
-    return (
-      `${contextLine} Produce a focused HTML-safe edit for the document source. ` +
-      "Call propose_edit with raw-source `oldText` copied VERBATIM from the HTML document and `newText` as the replacement raw HTML fragment. " +
-      "If the useful edit needs the containing heading, paragraph, list item, card, or section, include that containing raw HTML in oldText/newText instead of editing only the rendered selected text. " +
-      "Keep tags balanced and properly nested, validate the candidate HTML, and do not paste the replacement HTML in your prose." +
-      (latest.length ? `\n\n${latest.join("\n")}` : "") +
-      (conversation ? `\n\nConversation so far:\n${conversation}` : "")
-    );
-  }
-
-  if (!discussed) {
-    return (
-      "Rewrite the highlighted passage to make it clearer, tighter, and more" +
-      " precise, preserving its meaning and any commitments it makes. Make a" +
-      " focused improvement to that passage only — do not rewrite the rest of" +
-      " the document. " +
-      replyOnly
-    );
-  }
-
-  return (
-    "Use the conversation so far as context for this rewrite. Rewrite the" +
-    " highlighted passage to fold in the discussion above, especially the" +
-    " latest reviewer ask and agent response, improving its clarity and" +
-    " precision while preserving its intent." +
-    (latest.length ? `\n\n${latest.join("\n")}` : "") +
-    (conversation ? `\n\nConversation so far:\n${conversation}` : "") +
-    `\n\n${replyOnly}`
-  );
-}
-
-/** Stable content fingerprint for the staleness compare-and-swap on proposal approval. */
-function bodyHash(body: string): string {
-  return createHash("sha256").update(body, "utf8").digest("hex");
-}
+import { ProposalService } from "./proposal-service.js";
+import {
+  DOC_TEXT_BUDGET,
+  buildAgentContext,
+  cancelKeyFor,
+  improvePrompt,
+  repoScope,
+  type BuildContextOpts,
+} from "./context.js";
 
 /** Max length of a TaskDB `errorText` value — a summary for the UI, not a full stack trace. */
 const ERROR_TEXT_MAX = 300;
@@ -135,28 +45,11 @@ function errorSummary(e: unknown): string {
   return line.length > ERROR_TEXT_MAX ? line.slice(0, ERROR_TEXT_MAX) : line;
 }
 
-function documentBody(raw: string, docPath: string): string {
-  return isHtmlDoc(docPath) ? raw : matter(raw).content;
-}
-
-function containsHtmlTag(text: string): boolean {
-  return /<\/?[A-Za-z][^>]*>/.test(text);
-}
-
 function proposalPreview(pe: ProposedEdit): string {
   if (pe.fullRewrite !== undefined) return pe.fullRewrite.trim();
   const hunks = pe.hunks ?? [];
   if (hunks.length === 1) return hunks[0].newText.trim();
   return hunks.map((h) => h.newText.trim()).filter(Boolean).join("\n\n");
-}
-
-function localSourceContext(raw: string, docPath: string, ann: Annotation): string {
-  if (!isHtmlDoc(docPath)) return ann.anchor.prefix + ann.anchor.exact + ann.anchor.suffix;
-  const at = raw.indexOf(ann.anchor.exact);
-  if (at < 0) return ann.anchor.prefix + ann.anchor.exact + ann.anchor.suffix;
-  const start = Math.max(0, at - 500);
-  const end = Math.min(raw.length, at + ann.anchor.exact.length + 500);
-  return raw.slice(start, end);
 }
 
 export interface OrchestratorDeps {
@@ -194,49 +87,8 @@ export interface MaterializedFinding {
   severity?: string;
   kind?: string;
   proposalId?: string;
-}
-
-/**
- * Inputs to the single `buildContext` builder, covering discuss/reply/resume/branch/
- * improve/visualize (anchored to `ann`), a whole-document Review Pass (`reviewMode`),
- * and an inline-directive pass (`directiveMode`).
- */
-interface BuildContextOpts {
-  docPath: string;
-  /**
-   * Annotation this context is anchored to. Supplies `anchorExact` + `surrounding`
-   * (from the live doc) and is excluded from the OTHER-annotations digest via
-   * `annotationId`. Omitted for `reviewMode` and `directiveMode`, which pass
-   * `anchorExact`/`surrounding` explicitly instead (or leave them empty).
-   */
-  ann?: Annotation;
-  anchorExact?: string;
-  surrounding?: string;
-  comment: string;
-  stance: string;
-  modelId?: string;
-  /**
-   * The "self" annotation id excluded from the OTHER-annotations digest. Ignored in
-   * `reviewMode` (which digests every annotation, no exclusion) and `directiveMode`
-   * (which never builds a digest).
-   */
-  annotationId?: string;
-  /** Thread id the cancelKey is keyed on: `${docPath}#${threadId}`. */
-  threadId: string;
-  /**
-   * Whole-document Review Pass: doc text is always frontmatter-stripped via `matter()`
-   * (NOT html-aware, unlike the anchored passes), the digest covers every annotation
-   * with a 200-char agent-reply slice (vs. 300 elsewhere), `allowEdit` is forced false,
-   * and `reviewMode: true` is set on the resulting context.
-   */
-  reviewMode?: boolean;
-  /**
-   * Inline-directive pass: no annotations digest at all (""), `allowEdit` forced false.
-   * Doc text/scope/settings are supplied via `shared` since resolveDirectives reads the
-   * doc once and fans out one context per directive against that same read.
-   */
-  directiveMode?: boolean;
-  shared?: { docText: string; scopeDir: string; settings: HadSettings };
+  /** Editing mode: this finding's edit was applied on the spot. */
+  applied?: boolean;
 }
 
 /**
@@ -249,7 +101,7 @@ interface BuildContextOpts {
  * owns, in order — harness resolve → doc-version snapshot → append you-turn →
  * transition(running) → the shared per-invoke core (`runAgentStep`: buildContext →
  * afterContext → invoke (try/catch) → append agent-turn) → transition(responded) →
- * persistProposal → detectDirectEdit; on invoke failure it transitions to error (with
+ * persistProposal; on invoke failure it transitions to error (with
  * frontmatter) and rethrows the original value unchanged. Method-unique pre-work (thread
  * init vs load, stance switch, reject-feedback prefix, live-vs-resume routing, fork/
  * thread-copy) stays in the caller, before `runTurn`. The `skip*`/`docVersion`/
@@ -262,7 +114,7 @@ interface BuildContextOpts {
  * comment.
  */
 export interface TurnSpec {
-  /** Thread the turn runs on: keys the transitions, the appended turns, and direct-edit detection. */
+  /** Thread the turn runs on: keys the transitions and the appended turns. */
   threadId: string;
   /** Annotation the turn is anchored to; handed to persistProposal for any structured edit the turn carries. */
   ann: Annotation;
@@ -276,10 +128,8 @@ export interface TurnSpec {
   /** meta stamped on the agent turn — the effective stance (discuss/reply/resumeFromTranscript/branch). */
   agentMeta: string;
   /**
-   * buildContext inputs. The engine builds the context, uses its `allowEdit` to drive the
-   * pre/post direct-edit snapshot, and hands it to `invoke`. (reply's send() ignores the
-   * context arg but still relies on its `allowEdit` — the same value reply's old direct
-   * settings read produced.)
+   * buildContext inputs. The engine builds the context and hands it to `invoke`. (reply's
+   * send() ignores the context arg: a live session already has it.)
    */
   context: BuildContextOpts;
   /**
@@ -301,10 +151,10 @@ export interface TurnSpec {
   sessionId?: string;
   /** Harness override: reply/branch pin the thread's persisted harness so a doc-settings change can't switch mid-thread. Omit for the doc default. */
   preferredHarness?: string;
-  /** Streamed-event sink, threaded to invoke, persistProposal, and detectDirectEdit. */
+  /** Streamed-event sink, threaded to invoke and persistProposal. */
   onToken?: TokenSink;
   /**
-   * Mutator run right after `buildContext`, before the pre-invoke doc snapshot and `invoke`.
+   * Mutator run right after `buildContext`, before `invoke`.
    * A pure data seam, never a branch on caller identity: resumeFromTranscript uses it to
    * attach the prior transcript as replayable history; branch additionally overrides the doc
    * text with a base version's content.
@@ -323,15 +173,13 @@ export interface TurnSpec {
   docVersion?: string | null;
   /** Skip `persistProposal` at the tail. Branch never turns a fork into a reviewable proposal. */
   skipProposalPersist?: boolean;
-  /** Skip the pre/post-invoke direct-edit snapshot. Branch reasons about a past/alternate doc version, so it never enables direct-edit detection either. */
-  skipDetectDirectEdit?: boolean;
 }
 
 export class Orchestrator {
   constructor(private deps: OrchestratorDeps) {}
 
-  /** Serialize proposals.json writes; parallel directive/review agents can finish together. */
-  private proposalWriteChain: Promise<void> = Promise.resolve();
+  /** The agent-edit lifecycle (submit → review → apply | reject), both edit modes. */
+  private readonly proposals = new ProposalService({ now: () => this.deps.now() });
 
   private registry(): HarnessRegistry {
     if (this.deps.registry) return this.deps.registry;
@@ -346,7 +194,7 @@ export class Orchestrator {
 
   /** Opaque key the runner indexes a live session by, so cancel() can abort it. */
   private cancelKey(docPath: string, threadId: string): string {
-    return `${docPath}#${threadId}`;
+    return cancelKeyFor(docPath, threadId);
   }
 
   /** The thread's session id, but only if its owning harness still holds it live (null after a restart). */
@@ -390,411 +238,20 @@ export class Orchestrator {
     };
   }
 
-  /**
-   * If the just-finished agent turn carried a structured edit proposal, persist it as a
-   * pending Proposal and surface it to the UI via a "proposal" event. Shared by discuss,
-   * reply, and resumeFromTranscript so every agent turn can produce a reviewable proposal.
-   */
-  private async persistProposal(
-    docPath: string,
-    ann: Annotation,
-    turn: { proposal?: ProposedEdit },
-    onToken?: TokenSink,
-  ): Promise<void> {
-    const proposal = turn.proposal;
-    if (!proposal) return;
-    const write = async (): Promise<void> => {
-    const pe = proposal;
-    const threadId = ann.id;
-    // Normalize to display/apply hunks: targeted edits ride through verbatim; a full
-    // rewrite is diffed against the CURRENT body for display, but the exact body is
-    // kept in fullText so apply writes it verbatim (no diff round-trip).
-    // Capture the body the agent's edit is based on: its hash gates approval (staleness),
-    // and the rewrite path diffs against it for display.
-    const body = documentBody(await readFile(docPath, "utf8"), docPath);
-    let edits: EditHunk[] = pe.hunks ?? [];
-    let fullText: string | undefined;
-    if (pe.fullRewrite !== undefined) {
-      fullText = pe.fullRewrite;
-      edits = diffToHunks(body, pe.fullRewrite);
-    }
-    const id = `${threadId}#p${(await listProposals(docPath, threadId)).length + 1}`;
-    await addProposal(docPath, {
-      id,
-      threadId,
-      edits,
-      ...(fullText !== undefined ? { fullText } : {}),
-      baseHash: bodyHash(body),
-      rationale: pe.rationale,
-      status: "pending",
-      delivered: false,
-      at: this.deps.now(),
-    });
-    onToken?.({
-      type: "proposal",
-      text: JSON.stringify({
-        id,
-        threadId,
-        edits,
-        rationale: pe.rationale,
-        ...(fullText !== undefined ? { fullText } : {}),
-      }),
-    });
-    };
-    this.proposalWriteChain = this.proposalWriteChain.then(write, write);
-    await this.proposalWriteChain;
+  /** Approve a pending proposal: apply it to the document (see ProposalService.approve). */
+  approveProposal(docPath: string, threadId: string, proposalId: string): Promise<void> {
+    return this.proposals.approve(docPath, threadId, proposalId);
   }
 
-  /**
-   * Persist a markdown Improve rewrite as a legacy single-span proposal (`newText`, no
-   * `edits`/`fullText`) and return its id, so Apply routes through `approveProposal`'s
-   * back-compat branch (`applyLegacySpan`) exactly like an on-disk legacy proposal —
-   * one apply path instead of a separate unpersisted RPC. Serialized on the SAME write
-   * chain as `persistProposal` so concurrent proposal writes for one doc never race.
-   */
-  private async persistLegacyProposal(
-    docPath: string,
-    threadId: string,
-    newText: string,
-  ): Promise<string> {
-    let id = "";
-    const write = async (): Promise<void> => {
-      id = `${threadId}#p${(await listProposals(docPath, threadId)).length + 1}`;
-      await addProposal(docPath, {
-        id,
-        threadId,
-        edits: [],
-        newText,
-        rationale: "",
-        status: "pending",
-        delivered: false,
-        at: this.deps.now(),
-      });
-    };
-    this.proposalWriteChain = this.proposalWriteChain.then(write, write);
-    await this.proposalWriteChain;
-    return id;
-  }
-
-  /**
-   * Build the deferred reject-feedback prefix for a thread: any proposals the reviewer
-   * REJECTED but that haven't yet been delivered to the agent. Mirrors the mid-thread
-   * stance re-injection — the prefix rides along with the NEXT agent message, and each
-   * rejection is marked delivered so it's sent exactly once. Returns "" when none pend.
-   */
-  private async rejectFeedbackPrefix(
-    docPath: string,
-    threadId: string,
-  ): Promise<string> {
-    const pending = (await listProposals(docPath, threadId)).filter(
-      (p) => p.status === "rejected" && !p.delivered,
-    );
-    if (pending.length === 0) return "";
-    let prefix =
-      "(The reviewer rejected your earlier proposed edit(s) — do not repeat them; reconsider:\n";
-    for (const p of pending) {
-      if (p.fullText !== undefined) {
-        prefix += `- a full rewrite\n`;
-      } else if (p.edits?.length) {
-        for (const h of p.edits) {
-          prefix += `- replace "${h.oldText.slice(0, 60)}" → "${h.newText.slice(0, 60)}"\n`;
-        }
-      } else if (p.newText) {
-        prefix += `- "${p.newText.slice(0, 80)}"\n`;
-      }
-      if (p.feedback?.trim()) {
-        prefix += `  Feedback: ${p.feedback.trim()}\n`;
-      }
-    }
-    prefix += ")\n\n";
-    for (const p of pending) await updateProposal(docPath, p.id, { delivered: true });
-    return prefix;
-  }
-
-  /**
-   * Approve a pending proposal: apply it to the doc, then mark approved. Rewrite mode
-   * writes the exact kept body; hunk mode splices each oldText→newText. Frontmatter is
-   * preserved. A legacy single-span proposal (newText only) takes the old anchored path.
-   */
-  async approveProposal(
-    docPath: string,
-    threadId: string,
-    proposalId: string,
-  ): Promise<void> {
-    const p = (await listProposals(docPath, threadId)).find((x) => x.id === proposalId);
-    if (!p) throw new Error(`proposal not found: ${proposalId}`);
-    // Idempotency guard: a lost approve/reject RESPONSE (e.g. a sidecar restart between
-    // applying the change and sending the reply) leaves the client's card/diff-panel live
-    // even though the proposal already resolved server-side. Without this guard, a retry
-    // click on an already-approved fullText/hunk proposal would fall through to the
-    // baseHash staleness check below and throw a confusing "the document changed" error
-    // (the body legitimately changed — because THIS proposal already applied it). This
-    // throws a clean, distinguishable message instead, which the client's proposalActions
-    // recognizes and treats as success-shaped cleanup (remove the card; reload if approved)
-    // rather than a normal failure to retry.
-    if (p.status !== "pending") {
-      throw new Error(`proposal already ${p.status}`);
-    }
-    // Back-compat: legacy single-span proposal (newText, no edits/fullText) → anchor-
-    // resolved apply (see applyLegacySpan), not hunk matching.
-    if (p.fullText === undefined && (!p.edits || p.edits.length === 0) && p.newText !== undefined) {
-      await this.applyLegacySpan(docPath, threadId, p.newText);
-      await updateProposal(docPath, proposalId, { status: "approved" });
-      return;
-    }
-    // Guard a degenerate proposal: no full rewrite AND no hunks. applyHunks([]) would
-    // return the body verbatim, so without this we'd write an identical body, take two
-    // snapshots, and mark it approved as if something happened. Reject it instead, atomically.
-    if (p.fullText === undefined && (p.edits?.length ?? 0) === 0) {
-      throw new Error("proposal has no edits to apply");
-    }
-    const raw = await readFile(docPath, "utf8");
-    const htmlDoc = isHtmlDoc(docPath);
-    const parsed = htmlDoc ? null : matter(raw);
-    const body = htmlDoc ? raw : parsed!.content;
-    // Staleness compare-and-swap: if the body drifted since the proposal was made, refuse
-    // rather than clobber the intervening edits (a full rewrite would overwrite the whole
-    // body; hunks would apply against text the agent never saw). Legacy proposals have no
-    // baseHash, so the guard is skipped for them.
-    if (p.baseHash !== undefined && bodyHash(body) !== p.baseHash) {
-      throw new Error(
-        "the document changed since this edit was proposed — discard it and ask the agent again",
-      );
-    }
-    if (htmlDoc && p.fullText === undefined) this.assertHtmlHunksSafe(p.edits);
-    const newBody = p.fullText !== undefined ? p.fullText : this.applyHunks(body, p.edits);
-    if (htmlDoc) {
-      const validation = validateHtml(newBody);
-      if (!validation.ok) {
-        const feedback =
-          `HTML validation failed: ${validation.error}. ` +
-          "Repair the proposal so the resulting HTML has balanced, properly nested tags.";
-        await updateProposal(docPath, proposalId, {
-          status: "rejected",
-          delivered: false,
-          feedback,
-        });
-        throw new Error(feedback);
-      }
-    }
-    // Unlike the legacy single-span path (applyLegacySpan), this path intentionally leaves the
-    // annotation `open`: the discussion may continue, and after a full rewrite the old anchor
-    // may no longer resolve, so re-anchoring + marking it resolved here would be wrong.
-    await withEditSnapshot(
-      this.deps,
-      docPath,
-      threadId,
-      async () => {
-        await writeFile(docPath, htmlDoc ? newBody : matter.stringify(newBody, parsed!.data), "utf8");
-      },
-      { before: raw },
-    );
-    await updateProposal(docPath, proposalId, { status: "approved" });
-  }
-
-  /**
-   * Apply hunks to `body`. Resolves each hunk in list order with a FORWARD CURSOR, so a
-   * duplicate `oldText` maps to SUCCESSIVE occurrences — the same way the editor's display
-   * scans — instead of every duplicate hitting the first occurrence (which would let the
-   * backend edit a different occurrence than the reviewer saw). Resolved spans are strictly
-   * increasing, so they can never overlap; splicing descending keeps earlier offsets valid.
-   * Atomic: throws before any mutation if a hunk has no anchor or its text isn't found, so
-   * the caller's status stays pending.
-   */
-  private applyHunks(body: string, edits: EditHunk[]): string {
-    // An empty oldText is an insertion with no anchor — we can't place it, and silently
-    // dropping it would "approve" an edit that changes nothing. Reject the whole proposal.
-    // (Full rewrites carry their insertions in fullText, not here.)
-    if (edits.some((h) => h.oldText.length === 0)) {
-      throw new Error(
-        "a proposed edit has no anchor text — ask the agent to include the surrounding text to anchor it",
-      );
-    }
-    let cursor = 0;
-    const placed: { start: number; end: number; newText: string }[] = [];
-    for (const h of edits) {
-      const at = body.indexOf(h.oldText, cursor);
-      if (at < 0) throw new Error(`hunk text not found: ${JSON.stringify(h.oldText.slice(0, 40))}`);
-      placed.push({ start: at, end: at + h.oldText.length, newText: h.newText });
-      cursor = at + h.oldText.length;
-    }
-    let out = body;
-    for (let i = placed.length - 1; i >= 0; i--) {
-      const r = placed[i];
-      out = out.slice(0, r.start) + r.newText + out.slice(r.end);
-    }
-    return out;
-  }
-
-  private assertHtmlHunksSafe(edits: EditHunk[]): void {
-    for (const h of edits) {
-      const oldHasTags = containsHtmlTag(h.oldText);
-      const newHasTags = containsHtmlTag(h.newText);
-      if (oldHasTags && h.newText.trim() !== "" && !newHasTags) {
-        throw new Error(
-          "HTML proposal hunk replaces tagged source with plain text — ask the agent for a raw HTML replacement or a full rewrite",
-        );
-      }
-      if (!oldHasTags && newHasTags) {
-        throw new Error(
-          "HTML proposal hunk inserts raw tags into text-only source — ask the agent to include the containing raw HTML element in oldText or use a full rewrite",
-        );
-      }
-    }
-  }
-
-  /**
-   * Reject a pending proposal. The doc is left untouched; the proposal is marked rejected
-   * but stays undelivered, so its feedback is queued to ride along with the user's NEXT
-   * reply (see rejectFeedbackPrefix), not pushed to the agent immediately.
-   */
-  async rejectProposal(
-    docPath: string,
-    threadId: string,
-    proposalId: string,
-  ): Promise<void> {
-    const p = (await listProposals(docPath, threadId)).find((x) => x.id === proposalId);
-    if (!p) throw new Error(`proposal not found: ${proposalId}`);
-    // Same idempotency guard as approveProposal (see its comment): without it, a stray
-    // reject on an already-APPROVED proposal would silently flip its status to "rejected"
-    // even though the edit is already applied to the doc — corrupting the record (and
-    // rejectFeedbackPrefix would later tell the agent an applied edit was rejected).
-    if (p.status !== "pending") {
-      throw new Error(`proposal already ${p.status}`);
-    }
-    await updateProposal(docPath, proposalId, { status: "rejected" });
-  }
-
-  /**
-   * Assemble the agent's context. One builder powers three passes:
-   *  - anchored (discuss/reply/resume/branch/improve/visualize): `opts.ann` supplies the
-   *    highlight + local surrounding text (html-aware doc body), digest of every OTHER
-   *    annotation (300-char agent-reply slice). This is also where `conversationOnly`
-   *    defaults to true (see below) — improve() is the one anchored caller that flips it
-   *    back to false on the context it hands the runner, since Improve is an explicit
-   *    edit flow, not a conversation turn.
-   *  - `reviewMode` (whole-document Review Pass): no anchor; doc text is always
-   *    frontmatter-stripped via `matter()` regardless of doc type; digest of EVERY
-   *    annotation (200-char agent-reply slice); `allowEdit`/`conversationOnly` forced off.
-   *  - `directiveMode` (inline `[[ … ]]` directives): no digest at all; doc text/scope/
-   *    settings come from `opts.shared` (resolveDirectives reads the doc once and fans
-   *    out one context per directive against that same read); `allowEdit`/
-   *    `conversationOnly` forced off.
-   *
-   * Phase 10: `allowEdit` is now unconditionally false out of this builder — RECORD this
-   * semantic change prominently. `settings.agentEdit === "direct"` used to flow straight
-   * into `allowEdit` here, which is what let discuss/reply/panel write the document
-   * directly; conversation turns must never edit now, under any setting. The setting's
-   * only remaining conceptual scope is the explicit flows (resolveDirectives, Improve —
-   * "apply-directly vs propose"), but neither currently reads it either (both are
-   * propose-only today), so `agentEdit` currently has NO live effect anywhere in docd. It
-   * stays on `HadSettings` for forward-compat and the desktop settings UI. See
-   * had/settings.ts's `agentEdit` doc comment and the Task 1 report for the same note.
-   */
-  private async buildContext(opts: BuildContextOpts): Promise<AgentContext> {
-    const { docPath, ann } = opts;
-
-    let docText: string;
-    let scopeDir: string;
-    let settings: HadSettings;
-    let raw: string | undefined;
-
-    if (opts.shared) {
-      ({ docText, scopeDir, settings } = opts.shared);
-    } else {
-      raw = await readFile(docPath, "utf8");
-      const body = opts.reviewMode ? matter(raw).content : documentBody(raw, docPath);
-      docText =
-        body.length > DOC_TEXT_BUDGET ? body.slice(0, DOC_TEXT_BUDGET) + "\n…[truncated]" : body;
-      settings = await readSettings(docPath);
-      const folder = dirname(docPath);
-      scopeDir = settings.scope === "repo" ? findRepoRoot(folder) : folder;
-    }
-
-    let digest = "";
-    if (!opts.directiveMode) {
-      const all = (await readAnnotations(docPath)).annotations;
-      const others = opts.reviewMode ? all : all.filter((a) => a.id !== opts.annotationId);
-      const sliceLen = opts.reviewMode ? 200 : 300;
-      for (const a of others) {
-        digest += `- [${a.type}] "${a.anchor.exact}"\n`;
-        try {
-          const th = await readThread(docPath, a.id);
-          const you = th.turns.find((t) => t.role === "you");
-          const agent = [...th.turns].reverse().find((t) => t.role === "agent");
-          if (you) digest += `    comment: ${you.body}\n`;
-          if (agent) digest += `    agent: ${agent.body.slice(0, sliceLen)}\n`;
-        } catch {
-          // annotation has no discussion thread yet
-        }
-      }
-    }
-
-    // `ann` is only ever set on the non-`shared` path (anchored passes always read
-    // `raw` above for docText), so `raw` is guaranteed defined here.
-    const anchorExact = ann ? ann.anchor.exact : (opts.anchorExact ?? "");
-    const surrounding = ann ? localSourceContext(raw!, docPath, ann) : (opts.surrounding ?? "");
-
-    // The ONE context predicate conversation turns are gated on (tool-policy.ts,
-    // pi-runner.ts, codex-runner.ts) — true for every anchored call EXCEPT reviewMode/
-    // directiveMode. improve() (the one other anchored caller) overrides this back to
-    // false on the context object it actually hands the runner, since Improve is an
-    // explicit edit flow, not a conversation turn — see its own comment.
-    const conversationOnly = !opts.reviewMode && !opts.directiveMode;
-
-    return {
-      docText,
-      anchorExact,
-      surrounding,
-      comment: opts.comment,
-      stancePrompt: stancePrompt(opts.stance),
-      docPath,
-      scopeDir,
-      annotationsDigest: digest,
-      ...(settings.instructions?.trim() ? { instructions: settings.instructions } : {}),
-      ...(settings.webSearch ? { webSearch: settings.webSearch } : {}),
-      // Phase 10: always false here (never read from settings.agentEdit) — see this
-      // method's doc comment for the recorded semantic change.
-      allowEdit: false,
-      conversationOnly,
-      ...(opts.reviewMode ? { reviewMode: true } : {}),
-      htmlMode: isHtmlDoc(docPath),
-      docToolchain: resolveDocToolchain(docPath),
-      modelId: opts.modelId ?? settings.model,
-      cancelKey: this.cancelKey(docPath, opts.threadId),
-    };
-  }
-
-  /**
-   * In direct-edit mode the agent may write the doc via its tools. Detect that,
-   * snapshot before+after for undo, and tell the UI to reload.
-   */
-  private async detectDirectEdit(
-    docPath: string,
-    threadId: string,
-    before: string,
-    onToken?: TokenSink,
-  ): Promise<void> {
-    // Read the current (post-agent-write) content once, up front — it doubles as the
-    // skipIfUnchanged comparison value AND the "agent-edit" snapshot content, so
-    // withEditSnapshot never re-reads disk for a mutate() that's a no-op here.
-    const current = await readFile(docPath, "utf8");
-    const changed = await withEditSnapshot(
-      this.deps,
-      docPath,
-      threadId,
-      async () => {
-        /* no-op: the agent already wrote the doc directly before this ran */
-      },
-      { before, after: current, skipIfUnchanged: true },
-    );
-    if (changed) onToken?.({ type: "docChanged", text: "" });
+  /** Reject a pending proposal; its feedback rides along with the next reply. */
+  rejectProposal(docPath: string, threadId: string, proposalId: string): Promise<void> {
+    return this.proposals.reject(docPath, threadId, proposalId);
   }
 
   /**
    * Snapshot the current doc (deduped) and return its version id — the doc version a
    * turn is "grounded in". Both the you- and agent-turn of one exchange share this id,
-   * even when the agent then direct-edits the doc (that edit produces a LATER version).
+   * even when an approved proposal then changes the doc (that edit produces a LATER version).
    * Stamping the agent turn with its base (not post-edit) version is deliberate and
    * load-bearing: branch(baseDoc:"at-turn") restores `turn.docVersion` to reconstruct
    * the doc the turn was reasoning about. Do not "fix" it to the post-edit version.
@@ -807,9 +264,8 @@ export class Orchestrator {
 
   /**
    * The per-invoke core every agent turn shares, regardless of who's bracketing it:
-   * buildContext → afterContext → (pre-invoke direct-edit snapshot, if enabled) → invoke →
-   * append the agent turn. `runTurn` wraps this with its own you-turn/transitions/
-   * persistProposal/detectDirectEdit for callers with exactly one invoke per call (discuss/
+   * buildContext → afterContext → invoke → append the agent turn. `runTurn` wraps this
+   * with its own you-turn/transitions/persistProposal for callers with exactly one invoke per call (discuss/
    * reply/resumeFromTranscript/branch); `panel` calls this directly, once per model, so its
    * own try/catch can bracket the whole per-model loop with ONE you-turn and ONE running/
    * responded/error transition instead of one pair per invoke. `resolveDirectives` also
@@ -817,15 +273,6 @@ export class Orchestrator {
    * no-agent-text fallback into the turn BEFORE returning it (this method appends
    * `turn.reply` verbatim, so the fallback has to already be applied), and its own try/catch
    * swallows a directive's failure (`recordAgentError`) instead of rethrowing.
-   *
-   * `before` is the pre-invoke doc snapshot a caller can use for its own direct-edit
-   * detection (null when `skipDetectDirectEdit` is set or the context doesn't allow edits).
-   * It's captured here, between `afterContext` and `invoke`, to preserve the exact read
-   * timing the pre-extraction `runTurn` always used — do not move it relative to those two
-   * calls. `runTurn` reads it off the return value and calls `detectDirectEdit` itself
-   * afterward; `panel` always passes `skipDetectDirectEdit: true` and ignores it.
-   * `resolveDirectives` never calls `detectDirectEdit` either, but doesn't need the flag —
-   * directiveMode's `allowEdit: false` already short-circuits the read.
    */
   private async runAgentStep(
     docPath: string,
@@ -844,19 +291,15 @@ export class Orchestrator {
       ) => Promise<{ turn: AgentTurn; sessionId: string }>;
       onToken?: TokenSink;
       afterContext?: (ctx: AgentContext) => void;
-      skipDetectDirectEdit?: boolean;
     },
   ): Promise<{
     turn: AgentTurn;
     agentTurn: ThreadTurn;
     sessionId: string;
     context: AgentContext;
-    before: string | null;
   }> {
-    const context = await this.buildContext(spec.context);
+    const context = await buildAgentContext(spec.context);
     spec.afterContext?.(context);
-    const before =
-      !spec.skipDetectDirectEdit && context.allowEdit ? await readFile(docPath, "utf8") : null;
     const { turn, sessionId } = await spec.invoke(runner, context, spec.onToken);
     const agentTurn: ThreadTurn = {
       role: "agent",
@@ -867,20 +310,20 @@ export class Orchestrator {
       body: turn.reply,
     };
     await appendTurn(docPath, spec.threadId, agentTurn);
-    return { turn, agentTurn, sessionId, context, before };
+    return { turn, agentTurn, sessionId, context };
   }
 
   /**
    * The shared agent-turn lifecycle for a caller with exactly one you-turn and one invoke:
    * harness resolve → doc-version snapshot → append you-turn → transition(running) →
    * `runAgentStep` (buildContext → afterContext → invoke → append agent-turn) →
-   * transition(responded) → persistProposal → detectDirectEdit; on invoke failure it
+   * transition(responded) → persistProposal; on invoke failure it
    * transitions to error (with frontmatter) and rethrows the original value unchanged.
    * Method-unique pre-work (thread init vs load, stance switch, reject-feedback prefix,
    * live-vs-resume routing, fork/thread-copy) stays in the caller; the differences that vary
    * the spine arrive as TurnSpec fields (youTurn body, agent meta, context opts, the invoke
    * closure, the pre-invoke session id, and the opt-in `docVersion`/`skipProposalPersist`/
-   * `skipDetectDirectEdit`/`afterContext` seams), never as a branch on which method is
+   * `afterContext` seams), never as a branch on which method is
    * calling. `panel` doesn't call this at all — its per-model loop needs its OWN you-turn/
    * transition bracketing around N invokes, so it calls `runAgentStep` directly instead (see
    * that method's doc comment). `resolveDirectives` also skips this entirely, for two
@@ -929,7 +372,6 @@ export class Orchestrator {
     await transition({ db, docPath }, threadId, "running", { piSessionId: sessionId });
 
     let turn: AgentTurn;
-    let before: string | null;
     try {
       const step = await this.runAgentStep(docPath, runner, {
         threadId,
@@ -939,11 +381,9 @@ export class Orchestrator {
         invoke: spec.invoke,
         onToken: spec.onToken,
         afterContext: spec.afterContext,
-        skipDetectDirectEdit: spec.skipDetectDirectEdit,
       });
       turn = step.turn;
       sessionId = step.sessionId;
-      before = step.before;
     } catch (e) {
       await transition({ db, docPath }, threadId, "error", {
         piSessionId: sessionId,
@@ -957,11 +397,11 @@ export class Orchestrator {
       piSessionId: sessionId,
       frontmatter: true,
     });
-    if (!spec.skipProposalPersist) {
-      await this.persistProposal(docPath, spec.ann, turn, spec.onToken);
-    }
-    if (!spec.skipDetectDirectEdit && before !== null) {
-      await this.detectDirectEdit(docPath, threadId, before, spec.onToken);
+    if (!spec.skipProposalPersist && turn.proposal) {
+      // Every runTurn caller is a conversation turn (discuss/reply/resume/branch). Runners
+      // don't offer them an edit tool, but if one returns a proposal anyway it is only ever
+      // recorded for review — never applied, even in Editing mode.
+      await this.proposals.submit(docPath, spec.ann.id, turn.proposal, spec.onToken, { reviewOnly: true });
     }
     return { turn, sessionId };
   }
@@ -1056,9 +496,8 @@ export class Orchestrator {
           ? (e) => onToken({ ...e, model: mid })
           : undefined;
         // Each model's turn goes through the shared runAgentStep core (buildContext→invoke→
-        // append-agent), sharing panel's ONE you-turn/docVersion/runner and skipping
-        // detectDirectEdit (panel never did either, and never called persistProposal, which
-        // isn't part of runAgentStep at all); panel's own try/catch around this loop owns
+        // append-agent), sharing panel's ONE you-turn/docVersion/runner (panel never calls
+        // persistProposal, which isn't part of runAgentStep at all); panel's own try/catch around this loop owns
         // the running/responded/error bracketing instead of one pair per model.
         const { sessionId } = await this.runAgentStep(docPath, runner, {
           threadId: args.threadId,
@@ -1074,7 +513,6 @@ export class Orchestrator {
             modelId: mid,
           },
           invoke: (runner, ctx, tok) => runner.start(ctx, tok),
-          skipDetectDirectEdit: true,
           onToken: tagged,
         });
         lastSessionId = sessionId;
@@ -1114,7 +552,7 @@ export class Orchestrator {
     const { db, now } = this.deps;
     const harness = await this.harnessForDoc(docPath);
     const runner = harness.runner;
-    const context = await this.buildContext({
+    const context = await buildAgentContext({
       docPath,
       threadId: "review",
       stance: args.stance,
@@ -1159,12 +597,12 @@ export class Orchestrator {
 
     const batchId = `review:${now()}`;
     const findings = turn.findings ?? [];
-    const body = matter(await readFile(docPath, "utf8")).content;
-    const anns = (await readAnnotations(docPath)).annotations;
     const out: MaterializedFinding[] = [];
 
     for (const f of findings) {
-      const id = nextAnnotationId(anns);
+      // Re-read per finding: in Editing mode an earlier finding's edit has already
+      // changed the document, and this finding must anchor against what is there now.
+      const body = matter(await readFile(docPath, "utf8")).content;
       const at = body.indexOf(f.anchorText);
       const anchor =
         at >= 0
@@ -1172,13 +610,14 @@ export class Orchestrator {
           : { exact: f.anchorText, prefix: "", suffix: "" };
       const status = at >= 0 ? "open" : "orphaned";
 
-      const annotation: Annotation = {
-        id,
+      // Id allocation + append is one locked step (see had/annotations.ts appendAnnotation).
+      const annotation = await appendAnnotation(docPath, (newId) => ({
+        id: newId,
         type: "comment",
         anchor,
         status: status as Annotation["status"],
-        thread: `threads/${id}.md`,
-        session: `sessions/${id}.session.jsonl`,
+        thread: `threads/${newId}.md`,
+        session: `sessions/${newId}.session.jsonl`,
         createdAt: now(),
         origin: "agent",
         review: {
@@ -1186,9 +625,8 @@ export class Orchestrator {
           ...(f.severity ? { severity: f.severity } : {}),
           ...(f.kind ? { kind: f.kind } : {}),
         },
-      };
-      await addAnnotation(docPath, annotation);
-      anns.push(annotation);
+      }));
+      const id = annotation.id;
 
       // Seed the thread: a system note for provenance + the agent's finding comment,
       // so the margin card and chat both show it and replies continue the discussion.
@@ -1218,15 +656,16 @@ export class Orchestrator {
       // this thread (reusing the normal proposal pipeline). Streamed as a finding event
       // below, not via persistProposal's own event, so the UI gets exactly one per finding.
       let proposalId: string | undefined;
+      let applied = false;
       if ((f.edits && f.edits.length) || f.fullRewrite !== undefined) {
         const proposal: ProposedEdit = {
           rationale: f.comment,
           ...(f.edits && f.edits.length ? { hunks: f.edits } : {}),
           ...(f.fullRewrite !== undefined ? { fullRewrite: f.fullRewrite } : {}),
         };
-        await this.persistProposal(docPath, annotation, { proposal });
-        const ps = await listProposals(docPath, id);
-        proposalId = ps[ps.length - 1]?.id;
+        const submitted = await this.proposals.submit(docPath, id, proposal, undefined, { silent: true });
+        proposalId = submitted.proposal.id;
+        applied = submitted.applied;
       }
 
       const materialized: MaterializedFinding = {
@@ -1235,6 +674,7 @@ export class Orchestrator {
         ...(f.severity ? { severity: f.severity } : {}),
         ...(f.kind ? { kind: f.kind } : {}),
         ...(proposalId ? { proposalId } : {}),
+        ...(applied ? { applied: true } : {}),
       };
       out.push(materialized);
       onToken?.({
@@ -1272,17 +712,17 @@ export class Orchestrator {
   async resolveDirectives(
     docPath: string,
     onToken?: TokenSink,
-  ): Promise<{ count: number; proposed: boolean; reply: string }> {
+  ): Promise<{ count: number; proposed: boolean; applied: number; reply: string }> {
     const { db, now } = this.deps;
     const harness = await this.harnessForDoc(docPath);
     const runner = harness.runner;
     const body = matter(await readFile(docPath, "utf8")).content;
     const directives = findDirectives(body);
-    if (directives.length === 0) return { count: 0, proposed: false, reply: "" };
+    if (directives.length === 0) return { count: 0, proposed: false, applied: 0, reply: "" };
 
     const settings = await readSettings(docPath);
     const folder = dirname(docPath);
-    const scopeDir = settings.scope === "repo" ? findRepoRoot(folder) : folder;
+    const scopeDir = settings.scope === "repo" ? repoScope(folder) : folder;
     const docText =
       body.length > DOC_TEXT_BUDGET ? body.slice(0, DOC_TEXT_BUDGET) + "\n…[truncated]" : body;
 
@@ -1351,19 +791,21 @@ export class Orchestrator {
           },
           onToken,
         });
-        await this.persistProposal(docPath, ann, turn, onToken);
+        const submitted = turn.proposal
+          ? await this.proposals.submit(docPath, threadId, turn.proposal, onToken)
+          : undefined;
         await transition({ db, docPath }, threadId, "responded", {
           piSessionId: sessionId,
           frontmatter: true,
         });
-        return { proposed: turn.proposal !== undefined, reply: rawReply };
+        return { proposed: turn.proposal !== undefined, applied: !!submitted?.applied, reply: rawReply };
       } catch (e) {
         await transition({ db, docPath }, threadId, "error", {
           piSessionId: null,
           error: errorSummary(e),
         });
         await this.recordAgentError(docPath, threadId, `Resolve inline directive ${i + 1}`, e);
-        return { proposed: false, reply: `Error: ${(e as Error).message}` };
+        return { proposed: false, applied: false, reply: `Error: ${(e as Error).message}` };
       }
     });
 
@@ -1371,6 +813,7 @@ export class Orchestrator {
     return {
       count: directives.length,
       proposed: results.some((r) => r.proposed),
+      applied: results.filter((r) => r.applied).length,
       reply: results.map((r, i) => `Directive ${i + 1}: ${r.reply}`).join("\n\n"),
     };
   }
@@ -1413,7 +856,7 @@ export class Orchestrator {
     // Deferred reject feedback: any earlier proposal the reviewer rejected rides along
     // with this reply (once). Prepend it ahead of the stance prefix so the agent reads
     // "don't repeat these rejected edits" before the new instruction.
-    const rejectPrefix = await this.rejectFeedbackPrefix(docPath, threadId);
+    const rejectPrefix = await this.proposals.rejectFeedbackPrefix(docPath, threadId);
     if (rejectPrefix) agentMessage = rejectPrefix + agentMessage;
 
     await this.runTurn(docPath, {
@@ -1433,7 +876,7 @@ export class Orchestrator {
         modelId,
       },
       // Live session: continue it with the prefixed message; the built context is unused by
-      // send() but its allowEdit still governs direct-edit detection. Reuse the same sid.
+      // send(). Reuse the same sid.
       invoke: async (runner, _ctx, tok) => ({
         turn: await runner.send(sid, agentMessage, tok),
         sessionId: sid,
@@ -1445,8 +888,8 @@ export class Orchestrator {
   /**
    * Resume a thread whose live pi session is gone (e.g. after a doc reopen): start a
    * FRESH agent session seeded with the existing transcript as replayable history, then
-   * continue the discussion. Mirrors the live reply() path (stance change, turn stamping,
-   * direct-edit detection) but uses runner.start() with history instead of runner.send().
+   * continue the discussion. Mirrors the live reply() path (stance change, turn stamping)
+   * but uses runner.start() with history instead of runner.send().
    */
   private async resumeFromTranscript(
     docPath: string,
@@ -1477,7 +920,7 @@ export class Orchestrator {
 
     // Deferred reject feedback rides along with this (resumed) reply, once. Prepend it
     // to the comment so the fresh session reads it ahead of the new instruction.
-    const rejectPrefix = await this.rejectFeedbackPrefix(docPath, threadId);
+    const rejectPrefix = await this.proposals.rejectFeedbackPrefix(docPath, threadId);
     const agentComment = rejectPrefix + message;
 
     await this.runTurn(docPath, {
@@ -1562,9 +1005,7 @@ export class Orchestrator {
     // Resolve the base doc text + version the branch is grounded in.
     const { baseText, baseVersion } = await this.resolveBaseDoc(docPath, editPoint, opts);
 
-    const anns = (await readAnnotations(docPath)).annotations;
-    const branchId = nextAnnotationId(anns);
-    const parentAnn = anns.find((a) => a.id === parentThreadId);
+    const parentAnn = (await readAnnotations(docPath)).annotations.find((a) => a.id === parentThreadId);
 
     // Directive-N threads and the "review" umbrella (and any other thread with no
     // persisted annotation) fork with no anchor to inherit — mirrors reply()/
@@ -1578,18 +1019,18 @@ export class Orchestrator {
     // just degrades to an empty anchor; that degraded anchor is kept OUT of the prompt
     // context below, so the agent sees the same empty anchor/surrounding an
     // annotation-less reply() already builds.
-    const branchAnn: Annotation = {
-      id: branchId,
+    const branchAnn = await appendAnnotation(docPath, (newId) => ({
+      id: newId,
       type: parentAnn?.type ?? "comment",
       anchor: parentAnn?.anchor ?? { exact: parent.frontmatter.anchorExact, prefix: "", suffix: "" },
       status: "open",
-      thread: `threads/${branchId}.md`,
-      session: `sessions/${branchId}.session.jsonl`,
+      thread: `threads/${newId}.md`,
+      session: `sessions/${newId}.session.jsonl`,
       createdAt: now(),
       ...(parentAnn?.color ? { color: parentAnn.color } : {}),
       ...(this.deps.author ? { author: this.deps.author } : {}),
-    };
-    await addAnnotation(docPath, branchAnn);
+    }));
+    const branchId = branchAnn.id;
 
     // Effective model: explicit override, else the parent thread's model, else the
     // per-doc settings default; persisted on the branch and threaded into its context.
@@ -1647,7 +1088,7 @@ export class Orchestrator {
         comment: editedMessage,
         modelId: branchModel,
       },
-      // Reuse buildContext for digest/scope/anchor/allowEdit, then override the doc text
+      // Reuse buildContext for digest/scope/anchor, then override the doc text
       // with the base version and attach prior turns as replayable history.
       afterContext: (ctx) => {
         ctx.docText = baseDocText;
@@ -1655,7 +1096,6 @@ export class Orchestrator {
       },
       invoke: (runner, ctx, tok) => runner.start(ctx, tok),
       skipProposalPersist: true,
-      skipDetectDirectEdit: true,
       onToken,
     });
 
@@ -1699,6 +1139,41 @@ export class Orchestrator {
   }
 
   /**
+   * Bracket a one-shot runner call (Improve, Visualize) with the same TaskDB lifecycle
+   * every other turn gets — running → responded | error (with the failure summary) — so
+   * the Agents panel shows it while it works and a failure leaves a record instead of
+   * vanishing. No thread frontmatter is touched: these flows append no turns, and the
+   * thread file may not exist yet (an un-discussed comment).
+   *
+   * By default the thread's existing session id is preserved across all three
+   * transitions; `recordSession` stores the id `run` minted instead.
+   */
+  private async trackOneShot<T extends { turn: AgentTurn; sessionId?: string }>(
+    docPath: string,
+    threadId: string,
+    run: () => Promise<T>,
+    opts: { recordSession?: boolean } = {},
+  ): Promise<T> {
+    const { db } = this.deps;
+    const prior = db.get(threadId)?.piSessionId ?? null;
+    await transition({ db, docPath }, threadId, "running", { piSessionId: prior });
+    let result: T;
+    try {
+      result = await run();
+    } catch (e) {
+      await transition({ db, docPath }, threadId, "error", {
+        piSessionId: prior,
+        error: errorSummary(e),
+      });
+      throw e;
+    }
+    await transition({ db, docPath }, threadId, "responded", {
+      piSessionId: opts.recordSession ? (result.sessionId ?? prior) : prior,
+    });
+    return result;
+  }
+
+  /**
    * Ask the agent to rewrite the highlighted text using the discussion so far.
    * Returns the proposed replacement (not applied — the user reviews a diff first).
    */
@@ -1706,7 +1181,7 @@ export class Orchestrator {
     docPath: string,
     threadId: string,
     onToken?: TokenSink,
-  ): Promise<{ newText: string; proposalId?: string }> {
+  ): Promise<{ newText: string; proposalId?: string; applied?: boolean }> {
     const ann = (await readAnnotations(docPath)).annotations.find((a) => a.id === threadId);
     if (!ann) throw new Error(`annotation not found: ${threadId}`);
 
@@ -1728,7 +1203,7 @@ export class Orchestrator {
     const discussed = history.some((t) => t.role === "agent");
     const htmlDoc = isHtmlDoc(docPath);
 
-    const context = await this.buildContext({
+    const context = await buildAgentContext({
       docPath,
       ann,
       threadId,
@@ -1747,32 +1222,35 @@ export class Orchestrator {
     // false` — buildContext's anchored default is true (see its comment), but Improve is
     // an explicit edit flow, not a conversation turn, so it must not inherit the
     // conversation-only prompt/tool-policy gating.
-    const { sessionId, turn } = await runner.start(
-      htmlDoc
-        ? { ...context, allowEdit: false, improveMode: true, conversationOnly: false }
-        : { ...context, replacementOnly: true, improveMode: true, conversationOnly: false },
-      onToken,
-    );
-    await transition({ db: this.deps.db, docPath }, threadId, "responded", {
-      piSessionId: sessionId,
-    });
-    if (htmlDoc) {
-      if (!turn.proposal) {
+    //
+    // The thread's recorded session id is deliberately left untouched: Improve's session
+    // is a one-shot rewrite session (rewrite-only prompt and tool policy), so a later
+    // reply() must keep continuing the DISCUSSION session, not this one.
+    const { turn } = await this.trackOneShot(docPath, threadId, async () => {
+      const started = await runner.start(
+        htmlDoc
+          ? { ...context, improveMode: true, conversationOnly: false }
+          : { ...context, replacementOnly: true, improveMode: true, conversationOnly: false },
+        onToken,
+      );
+      if (htmlDoc && !started.turn.proposal) {
         throw new Error(
           "HTML Improve requires a structured proposal so the edit can be validated before approval",
         );
       }
-      await this.persistProposal(docPath, ann, turn, onToken);
-      const proposals = await listProposals(docPath, threadId);
-      const proposalId = proposals.at(-1)?.id;
+      return started;
+    });
+    if (htmlDoc && turn.proposal) {
+      const submitted = await this.proposals.submit(docPath, threadId, turn.proposal, onToken);
       return {
         newText: proposalPreview(turn.proposal),
-        ...(proposalId ? { proposalId } : {}),
+        proposalId: submitted.proposal.id,
+        ...(submitted.applied ? { applied: true } : {}),
       };
     }
     const newText = turn.reply.trim();
-    const proposalId = await this.persistLegacyProposal(docPath, threadId, newText);
-    return { newText, proposalId };
+    const submitted = await this.proposals.submitSpan(docPath, threadId, newText, onToken);
+    return { newText, proposalId: submitted.proposal.id, ...(submitted.applied ? { applied: true } : {}) };
   }
 
   /**
@@ -1800,7 +1278,9 @@ export class Orchestrator {
 
     // Continue the existing discussion session if there is a live one...
     if (sid) {
-      const turn = await runner.send(sid, prompt, onToken);
+      const { turn } = await this.trackOneShot(docPath, threadId, async () => ({
+        turn: await runner.send(sid, prompt, onToken),
+      }));
       return { diagram: turn.reply.trim() };
     }
 
@@ -1808,7 +1288,7 @@ export class Orchestrator {
     // comment, or one whose session is gone after a sidecar restart / reopen.
     const ann = (await readAnnotations(docPath)).annotations.find((a) => a.id === threadId);
     if (!ann) throw new Error(`annotation not found: ${threadId}`);
-    const context = await this.buildContext({
+    const context = await buildAgentContext({
       docPath,
       ann,
       threadId,
@@ -1816,56 +1296,14 @@ export class Orchestrator {
       stance: "none",
       comment: prompt,
     });
-    const { sessionId, turn } = await runner.start(context, onToken);
-    await transition({ db: this.deps.db, docPath }, threadId, "responded", {
-      piSessionId: sessionId,
-    });
-    return { diagram: turn.reply.trim() };
-  }
-
-  /**
-   * Apply a legacy single-span proposal (`newText`, no `edits`/`fullText`): resolve its
-   * owning annotation's anchor in the CURRENT doc, splice in the replacement text,
-   * snapshot, and re-anchor the annotation. The sole caller is `approveProposal`'s
-   * back-compat branch — for on-disk proposals persisted before hunks/full-rewrite
-   * existed, or a markdown Improve rewrite (see `improve`) — which resolves via the
-   * anchor (fuzzy-tolerant), NOT literal `oldText` matching like the hunk path.
-   */
-  private async applyLegacySpan(
-    docPath: string,
-    annotationId: string,
-    newText: string,
-  ): Promise<void> {
-    if (isHtmlDoc(docPath)) {
-      throw new Error("HTML proposals must be persisted and approved through approveProposal");
-    }
-    const before = await readFile(docPath, "utf8");
-    const ann = (await readAnnotations(docPath)).annotations.find(
-      (a) => a.id === annotationId,
-    );
-    if (!ann) throw new Error(`annotation not found: ${annotationId}`);
-    const range = resolveAnchor(before, ann.anchor);
-    if (!range) {
-      throw new Error(`cannot apply: anchor for ${annotationId} no longer resolves`);
-    }
-
-    const after = before.slice(0, range.start) + newText + before.slice(range.end);
-    await withEditSnapshot(
-      this.deps,
+    // A fresh conversation session: record it, so a follow-up reply() can continue it.
+    const { turn } = await this.trackOneShot(
       docPath,
-      annotationId,
-      async () => {
-        await writeFile(docPath, after, "utf8");
-      },
-      { before, after },
+      threadId,
+      () => runner.start(context, onToken),
+      { recordSession: true },
     );
-
-    const newStart = after.indexOf(newText, range.start);
-    const newAnchor = createAnchor(after, newStart, newStart + newText.length);
-    await updateAnnotation(docPath, annotationId, {
-      anchor: newAnchor,
-      status: "resolved",
-    });
+    return { diagram: turn.reply.trim() };
   }
 
   /**

@@ -43,7 +43,8 @@ import {
   type LoadedAnno,
 } from "./editor.js";
 import { initShell } from "./shell.js";
-import { initSearch, initHtmlSurface } from "./surface.js";
+import { initHtmlSurface } from "./surface.js";
+import { initSearch } from "./search-panel.js";
 import { initChat } from "./chat.js";
 import { initProposals } from "./proposals.js";
 import { initDocZoom } from "./doc-zoom.js";
@@ -51,9 +52,15 @@ import { connect } from "./rpc.js";
 import { maybeShowFirstRun } from "./first-run.js";
 
 const logEl = document.querySelector<HTMLPreElement>("#log")!;
+// Newest line first. Bounded so a long session (one "edited" line per keystroke) can't
+// grow the <pre> without limit or turn each append into a full-text copy.
+const LOG_MAX_LINES = 500;
+const logLines: string[] = [];
 function log(line: string): void {
   const ts = new Date().toISOString().slice(11, 19);
-  logEl.textContent = `${ts}  ${line}\n` + logEl.textContent;
+  logLines.unshift(`${ts}  ${line}`);
+  if (logLines.length > LOG_MAX_LINES) logLines.length = LOG_MAX_LINES;
+  logEl.textContent = logLines.join("\n") + "\n";
 }
 
 // --- engine banner ---
@@ -66,6 +73,7 @@ function log(line: string): void {
 })();
 
 document.querySelector("#clearlog")!.addEventListener("click", () => {
+  logLines.length = 0;
   logEl.textContent = "";
 });
 
@@ -370,6 +378,8 @@ const htmlSurfaceApi = initHtmlSurface({
   streamingAgentTurn: chat.streamingAgentTurn,
   setChip: chat.setChip,
   setChatBusy: chat.setChatBusy,
+  beginExclusiveTurn: chat.beginExclusiveTurn,
+  endExclusiveTurn: chat.endExclusiveTurn,
   markDiscussed: chat.markDiscussed,
   focusCommentInput: chat.focusCommentInput,
   runImprove: chat.runImprove,

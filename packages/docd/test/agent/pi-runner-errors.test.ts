@@ -109,8 +109,10 @@ describe("captureSessionEvent — each SDK failure shape", () => {
     expect(entry.error).toBe("503 overloaded");
   });
 
-  it("still accumulates text/thinking/tool events exactly as before", () => {
+  it("accumulates text/thinking and reports tool activity from the SDK's top-level tool event", () => {
     const entry = freshEntry();
+    const seen: { type: string; text: string }[] = [];
+    entry.sink = (e) => seen.push({ type: e.type, text: e.text });
     captureSessionEvent(entry, {
       type: "message_update",
       assistantMessageEvent: { type: "text_delta", delta: "Hello" },
@@ -119,10 +121,13 @@ describe("captureSessionEvent — each SDK failure shape", () => {
       type: "message_update",
       assistantMessageEvent: { type: "thinking_delta", delta: "thinking..." },
     });
-    captureSessionEvent(entry, {
-      type: "message_update",
-      assistantMessageEvent: { type: "tool_execution_start", toolName: "read" },
-    });
+    // Real shape (pi-agent-core's AgentEvent): top-level, NOT nested in message_update.
+    captureSessionEvent(entry, { type: "tool_execution_start", toolName: "read" });
+    expect(seen).toEqual([
+      { type: "token", text: "Hello" },
+      { type: "thinking", text: "thinking..." },
+      { type: "tool", text: "read" },
+    ]);
     expect(entry.buf).toBe("Hello");
     expect(entry.think).toBe("thinking...");
     expect(entry.error).toBeNull();

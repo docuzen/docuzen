@@ -1,31 +1,33 @@
-import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { hadPaths } from "./paths.js";
+import { readJsonFile, withFileLock, writeJsonFile } from "./io.js";
 import { readAppConfig } from "../config/app-config.js";
 
 /** Tool/agent scope for a document. "folder" = the doc's directory (+ .had);
  *  "repo" = up to the nearest repo root. */
 export type Scope = "folder" | "repo";
 
-/** How the agent changes the document: propose a diff vs. edit the file directly. */
+/** How agent edits reach the document: Suggesting ("propose") or Editing ("direct"). */
 export type AgentEdit = "propose" | "direct";
 
 export interface HadSettings {
   scope: Scope;
-  /** Which agent harness handles new agent turns for this document. */
+  /**
+   * Which agent harness handles new agent turns for this document. Absent when neither
+   * this document nor ~/.docuzen/config.toml names one — the sidecar then uses its
+   * registry default (the first usable harness; see server/select-runner.ts).
+   */
   harness?: "pi" | "codex" | "claude-code";
   /** Optional per-doc model override (provider/model resolution is the sidecar's). */
   model?: string;
   /**
-   * Whether the agent proposes edits (default) or writes the doc directly.
-   *
-   * Phase 10 (RECORD): this setting no longer governs discuss/reply/panel — those
-   * conversation turns never edit or propose an edit now, under either value (see
-   * Orchestrator.buildContext's `conversationOnly`, forced regardless of this field).
-   * Its only remaining conceptual scope is the explicit edit flows (resolveDirectives,
-   * Improve — apply-directly vs propose), but as of Phase 10 neither of those reads it
-   * either (both always propose), so this field currently has NO live effect anywhere in
-   * docd. It is kept for forward-compat and the desktop settings UI, which still persists
-   * it as a per-doc setting.
+   * How agent edits reach the document — the same two modes as a shared doc editor:
+   *  - "propose" (Suggesting, default): every edit is a pending proposal the reviewer
+   *    approves or rejects.
+   *  - "direct" (Editing): edits from the explicit edit flows (Improve, Resolve [[ ]],
+   *    Review findings) are applied as soon as the agent produces them.
+   * Either way the agent has no write tools and every applied edit is a recorded
+   * proposal with a restorable pre-apply version (see orchestrator/proposal-service.ts).
+   * Conversation turns (discuss/reply/panel) never edit in either mode.
    */
   agentEdit?: AgentEdit;
   /**
@@ -44,7 +46,6 @@ export interface HadSettings {
 
 const DEFAULTS: HadSettings = {
   scope: "folder",
-  harness: "pi",
   agentEdit: "propose",
   webSearch: { enabled: true, provider: "ddg" },
 };
@@ -53,20 +54,13 @@ export async function readSettings(docPath: string): Promise<HadSettings> {
   // Resolve the default harness from the app config at call-time so that a
   // change to ~/.docuzen/config.toml (e.g. via the first-run modal) takes
   // effect for new documents without a sidecar restart.
-  const defaultHarness: HadSettings["harness"] = readAppConfig().harness?.default ?? "pi";
-  const defaults: HadSettings = { ...DEFAULTS, harness: defaultHarness };
-  try {
-    const raw = await readFile(hadPaths(docPath).settings, "utf8");
-    const settings = JSON.parse(raw) as Partial<HadSettings>;
-    return { ...defaults, ...settings };
-  } catch (err: unknown) {
-    if ((err as NodeJS.ErrnoException).code === "ENOENT") return { ...defaults };
-    throw err;
-  }
+  const configured = readAppConfig().harness?.default;
+  const defaults: HadSettings = { ...DEFAULTS, ...(configured ? { harness: configured } : {}) };
+  const settings = await readJsonFile<Partial<HadSettings>>(hadPaths(docPath).settings, () => ({}));
+  return { ...defaults, ...settings };
 }
 
 export async function writeSettings(docPath: string, settings: HadSettings): Promise<void> {
-  const p = hadPaths(docPath);
-  await mkdir(p.dir, { recursive: true });
-  await writeFile(p.settings, JSON.stringify(settings, null, 2) + "\n", "utf8");
+  const path = hadPaths(docPath).settings;
+  await withFileLock(path, () => writeJsonFile(path, settings));
 }

@@ -1,5 +1,4 @@
 import { describe, expect, it } from "vitest";
-import { readFileSync } from "node:fs";
 
 // Regression pin for the "stuck approved proposal card" bug: listProposals returns
 // EVERY proposal for a doc regardless of status (packages/docd/src/had/proposals.ts's
@@ -15,8 +14,7 @@ import { readFileSync } from "node:fs";
 // this package's vitest setup has no DOM, so shell.ts/surface.ts aren't executed here;
 // instead we assert on their source text directly.
 
-const shellSource = readFileSync(new URL("./shell.ts", import.meta.url), "utf8");
-const surfaceSource = readFileSync(new URL("./surface.ts", import.meta.url), "utf8");
+import { shellSource, surfaceSource } from "./module-source.test-support.js";
 
 function sourceBetween(source: string, start: string, end: string): string {
   const startIndex = source.indexOf(start);

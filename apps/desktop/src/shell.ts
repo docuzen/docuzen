@@ -51,16 +51,13 @@ import { listen } from "@tauri-apps/api/event";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import type { Annotation, EditHunk } from "@ai-native-doc/docd/protocol";
 import { baseHrefForDoc, type HtmlSurface } from "./html-surface.js";
-import { el, wireModal, reportError } from "./ui.js";
-import {
-  buildVersionPickerModel,
-  type VersionPickerGraphCell,
-  type VersionPickerGraphRow,
-  type VersionPickerVersion,
-} from "./version-picker-tree.js";
+import { wireModal, reportError } from "./ui.js";
 import type { DocdApi } from "./session.js";
-import type { AgentHarness, HadSettings, ModelConfig, ThreadNode } from "@ai-native-doc/docd/protocol";
+import type { ThreadNode } from "@ai-native-doc/docd/protocol";
 import { initDocPath } from "./status-path.js";
+import { initSettings } from "./shell-settings.js";
+import { initVersions } from "./shell-versions.js";
+import { activeIndexAfterClose } from "./tab-model.js";
 
 /** Mirrors editor.ts's `LoadedAnno` — see this file's header (same policy as surface.ts). */
 type LoadedAnno = Annotation & { body?: string; parent?: string };
@@ -413,407 +410,27 @@ export function initShell(deps: ShellDeps): ShellApi {
     true,
   );
 
-  // --- Settings modal (per-doc tool scope, default model + model manager, stances) ---
-  const settingsModal = document.querySelector<HTMLDivElement>("#settingsModal")!;
-  const setHarnessEl = document.querySelector<HTMLSelectElement>("#setHarness")!;
-  const harnessCapsEl = document.querySelector<HTMLDivElement>("#harnessCaps")!;
-  const setScopeEl = document.querySelector<HTMLSelectElement>("#setScope")!;
-  const setAgentEditEl = document.querySelector<HTMLSelectElement>("#setAgentEdit")!;
-  const setInstructionsEl = document.querySelector<HTMLTextAreaElement>("#setInstructions")!;
-  const setWebSearchEl = document.querySelector<HTMLInputElement>("#setWebSearch")!;
-  const setWebProviderEl = document.querySelector<HTMLSelectElement>("#setWebProvider")!;
-  const setDefaultModelEl = document.querySelector<HTMLSelectElement>("#setDefaultModel")!;
-  const setDefaultModelHintEl = document.querySelector<HTMLSpanElement>("#setDefaultModelHint")!;
-  const setWebSearchHintEl = document.querySelector<HTMLSpanElement>("#setWebSearchHint")!;
-  const modelListEl = document.querySelector<HTMLDivElement>("#modelList")!;
-  const modelAddBtn = document.querySelector<HTMLButtonElement>("#modelAddBtn")!;
-  const modelFormEl = document.querySelector<HTMLDivElement>("#modelForm")!;
-  const mfNameEl = document.querySelector<HTMLInputElement>("#mfName")!;
-  const mfProviderEl = document.querySelector<HTMLInputElement>("#mfProvider")!;
-  const mfModelIdEl = document.querySelector<HTMLInputElement>("#mfModelId")!;
-  const mfBaseUrlEl = document.querySelector<HTMLInputElement>("#mfBaseUrl")!;
-  const mfApiKeyEl = document.querySelector<HTMLInputElement>("#mfApiKey")!;
-  const mfReasoningEl = document.querySelector<HTMLSelectElement>("#mfReasoning")!;
-  const mfSaveBtn = document.querySelector<HTMLButtonElement>("#mfSave")!;
-  const mfCancelBtn = document.querySelector<HTMLButtonElement>("#mfCancel")!;
-
-  // A model as the backend persists/returns it. `apiKey` is write-only: the
-  // backend NEVER returns it (see `hasKey`), and we only ever send it when the
-  // user types a new key — omitting it preserves the existing key for that provider.
-  // (ModelConfig itself is the canonical protocol type, imported above.)
-
-  // listHarnesses never returns `runner` (the server-side adapter instance).
-  type HarnessInfo = Omit<AgentHarness, "runner">;
-  let harnesses: HarnessInfo[] = [];
-
-  /**
-   * Network-only harness fetch, shared by the Settings modal's refreshHarnesses
-   * (which also drives the harness <select>) and the topbar badge's
-   * refreshHarnessBadge (which must NOT touch the modal's DOM).
-   */
-  async function loadHarnesses(): Promise<HarnessInfo[]> {
-    try {
-      harnesses = await deps.api.listHarnesses({});
-    } catch (e) {
-      reportError("harnesses load", e, deps.log);
-      harnesses = [];
-    }
-    return harnesses;
-  }
-
-  function renderHarnessCaps(id: string): void {
-    const h = harnesses.find((x) => x.id === id);
-    harnessCapsEl.replaceChildren();
-    if (!h) return;
-    const caps = [
-      h.capabilities.proposeEdits ? "Proposals" : "",
-      h.capabilities.directEdit ? "Direct edit" : "",
-      h.capabilities.reviewFindings ? "Review" : "",
-      h.capabilities.webSearch === "docuzen-managed"
-        ? "Web: Docuzen"
-        : h.capabilities.webSearch === "harness-managed"
-          ? "Web: harness"
-          : "",
-      h.capabilities.documentTools === "docuzen-managed" ? "Doc tools: managed" : "",
-      h.id === "codex" ? "Model: Docuzen provider" : h.id !== "pi" ? "Model: harness-managed" : "",
-      h.capabilities.thinking ? "Thinking" : "",
-      h.capabilities.cancel ? "Cancel" : "",
-      h.capabilities.multiModelPanel ? "Panel" : "",
-    ].filter(Boolean);
-    for (const c of caps) {
-      harnessCapsEl.appendChild(el("span", { className: "capchip", textContent: c }));
-    }
-    if (!h.available) {
-      harnessCapsEl.appendChild(
-        el("span", {
-          className: "capchip unavailable",
-          textContent: h.unavailableReason ? `Unavailable: ${h.unavailableReason}` : "Unavailable",
-        }),
-      );
-    } else if (h.status) {
-      harnessCapsEl.appendChild(el("span", { className: "capchip", textContent: h.status }));
-    }
-  }
-
-  async function refreshHarnesses(selected = "pi"): Promise<void> {
-    await loadHarnesses();
-    setHarnessEl.replaceChildren();
-    for (const h of harnesses) {
-      setHarnessEl.appendChild(
-        el("option", { value: h.id, textContent: h.available ? h.label : `${h.label} (unavailable)` }),
-      );
-    }
-    setHarnessEl.value = selected;
-    if (!setHarnessEl.value && harnesses.length) setHarnessEl.value = harnesses[0].id;
-    renderHarnessCaps(setHarnessEl.value || selected);
-    syncHarnessManagedControls();
-  }
-
-  function selectedHarnessInfo(): HarnessInfo | undefined {
-    return harnesses.find((h) => h.id === setHarnessEl.value);
-  }
-
-  function syncHarnessManagedControls(): void {
-    const h = selectedHarnessInfo();
-    const harnessManagedModels = !!h && h.id !== "pi" && h.id !== "codex";
-    setDefaultModelEl.disabled = harnessManagedModels;
-    modelAddBtn.disabled = harnessManagedModels;
-    modelListEl.classList.toggle("disabled", harnessManagedModels);
-    for (const btn of modelListEl.querySelectorAll<HTMLButtonElement>("button")) {
-      btn.disabled = harnessManagedModels;
-    }
-    if (harnessManagedModels) {
-      setDefaultModelEl.value = "";
-      hideModelForm();
-    }
-    setDefaultModelHintEl.textContent = harnessManagedModels
-      ? `${h?.label ?? "This harness"} uses its own model configuration.`
-      : h?.id === "codex"
-        ? "Select a model row to launch Codex with a Docuzen provider instead of ~/.codex defaults."
-      : "";
-
-    const harnessManagedWebSearch = h?.capabilities.webSearch === "harness-managed";
-    setWebSearchEl.disabled = harnessManagedWebSearch;
-    setWebProviderEl.disabled = harnessManagedWebSearch;
-    setWebSearchHintEl.textContent = harnessManagedWebSearch
-      ? `${h?.label ?? "This harness"} manages web search itself.`
-      : "";
-  }
-  // Cached list of configured models (from listModels — never carries apiKey).
-  let configuredModels: ModelConfig[] = [];
-
-  /** Strip apiKey from a ModelConfig so saveModels preserves the stored key. */
-  function withoutKey(m: ModelConfig): ModelConfig {
-    const { apiKey: _drop, ...rest } = m;
-    return rest;
-  }
-
-  /**
-   * Re-fetch configured models and rebuild both the model list (with Edit/Remove
-   * per row) and the default-model select. Server strings (names, ids) are placed
-   * via textContent only — never innerHTML — so user input can't inject markup.
-   */
-  async function refreshModels(): Promise<void> {
-    try {
-      configuredModels = await deps.api.listModels({});
-    } catch (e) {
-      reportError("models load", e, deps.log);
-      return;
-    }
-
-    modelListEl.innerHTML = "";
-    for (const m of configuredModels) {
-      const editBtn = el("button", { type: "button", textContent: "Edit" });
-      editBtn.addEventListener("click", () => showModelForm(m));
-
-      const removeBtn = el("button", { type: "button", textContent: "Remove" });
-      removeBtn.addEventListener("click", () => void removeModel(m.key));
-
-      modelListEl.appendChild(
-        el("div", { className: "modelrow" }, [
-          el("span", { className: "mname", textContent: m.name }),
-          el("span", {
-            className: "mmeta",
-            textContent: `${m.provider}/${m.modelId} · ${m.reasoningEffort ?? "none"} · ${m.hasKey ? "🔑" : "no key"}`,
-          }),
-          el("span", { className: "mspace" }),
-          editBtn,
-          removeBtn,
-        ]),
-      );
-    }
-    // Rebuild the default-model select, preserving the current selection if still present.
-    const prev = setDefaultModelEl.value;
-    setDefaultModelEl.innerHTML = "";
-    setDefaultModelEl.appendChild(el("option", { value: "", textContent: "— sidecar default —" }));
-    for (const m of configuredModels) {
-      setDefaultModelEl.appendChild(el("option", { value: m.key, textContent: m.name }));
-    }
-    if (prev && configuredModels.some((m) => m.key === prev)) setDefaultModelEl.value = prev;
-    syncHarnessManagedControls();
-  }
-
-  /** Show the add/edit form. `existing` → Edit mode (key left blank = keep); omitted → empty Add. */
-  function showModelForm(existing?: ModelConfig): void {
-    mfNameEl.value = existing?.name ?? "";
-    mfProviderEl.value = existing?.provider ?? (setHarnessEl.value === "codex" ? "docuzen" : "");
-    mfModelIdEl.value = existing?.modelId ?? "";
-    mfBaseUrlEl.value = existing?.baseUrl ?? "";
-    mfApiKeyEl.value = ""; // never returned — blank means "keep existing key"
-    mfReasoningEl.value = existing?.reasoningEffort ?? "none";
-    modelFormEl.hidden = false;
-  }
-  function hideModelForm(): void {
-    modelFormEl.hidden = true;
-  }
-
-  async function saveModelFromForm(): Promise<void> {
-    const provider = mfProviderEl.value.trim();
-    const modelId = mfModelIdEl.value.trim();
-    const name = mfNameEl.value.trim();
-    if (!provider || !modelId || !name) return void deps.log("model: name, provider and model id are required");
-    const apiKey = mfApiKeyEl.value.trim();
-    const edited: ModelConfig = {
-      key: `${provider}/${modelId}`,
-      name,
-      provider,
-      modelId,
-      baseUrl: mfBaseUrlEl.value.trim() || undefined,
-      reasoningEffort: mfReasoningEl.value as ModelConfig["reasoningEffort"],
-      ...(apiKey ? { apiKey } : {}),
-    };
-    // Merge: replace the same-key entry (Edit) or append (Add). Unchanged rows are
-    // sent WITHOUT apiKey so saveModels preserves their stored keys.
-    const idx = configuredModels.findIndex((m) => m.key === edited.key);
-    const models =
-      idx >= 0
-        ? configuredModels.map((m, i) => (i === idx ? edited : withoutKey(m)))
-        : [...configuredModels.map(withoutKey), edited];
-    try {
-      await deps.api.saveModels({ models });
-      deps.log(`saved model ${edited.key}`);
-    } catch (e) {
-      return void reportError("save model", e, deps.log);
-    }
-    hideModelForm();
-    await refreshModels();
-    await deps.refreshThreadModels(); // keep the thread pickers' cache in sync
-  }
-
-  async function removeModel(key: string): Promise<void> {
-    if (!window.confirm(`Remove model ${key}?`)) return;
-    // Send the remainder without apiKey on any row → all surviving keys preserved.
-    const models = configuredModels.filter((m) => m.key !== key).map(withoutKey);
-    try {
-      await deps.api.saveModels({ models });
-      deps.log(`removed model ${key}`);
-    } catch (e) {
-      return void reportError("remove model", e, deps.log);
-    }
-    await refreshModels();
-    await deps.refreshThreadModels(); // keep the thread pickers' cache in sync
-  }
-
-  modelAddBtn.addEventListener("click", () => showModelForm());
-  mfSaveBtn.addEventListener("click", () => void saveModelFromForm());
-  mfCancelBtn.addEventListener("click", () => hideModelForm());
-
-  async function openSettings(): Promise<void> {
-    if (activeIdx < 0) return void deps.log("settings: open a document first");
-    hideModelForm();
-    try {
-      const s = await deps.api.getSettings({});
-      setScopeEl.value = s.scope ?? "folder";
-      await refreshHarnesses(s.harness ?? "pi");
-      setAgentEditEl.value = s.agentEdit ?? "propose";
-      setInstructionsEl.value = s.instructions ?? "";
-      setWebSearchEl.checked = s.webSearch?.enabled !== false;
-      setWebProviderEl.value = s.webSearch?.provider ?? "ddg";
-      await refreshModels();
-      setDefaultModelEl.value = s.model ?? "";
-      syncHarnessManagedControls();
-    } catch (e) {
-      reportError("settings load", e, deps.log);
-    }
-    settingsModal.hidden = false;
-  }
-  // Settings opens from the native File menu (⌘,) — see the menu-action listener.
-  async function saveSettings(): Promise<void> {
-    if (activeIdx < 0) return;
-    const harness = selectedHarnessInfo();
-    const harnessManagedModels = !!harness && harness.id !== "pi" && harness.id !== "codex";
-    const model = harnessManagedModels ? undefined : setDefaultModelEl.value || undefined;
-    deps.setDefaultModelKey(model ?? ""); // thread pickers default to the new per-doc model
-    const instructions = setInstructionsEl.value.trim() || undefined;
-    const webSearch = {
-      enabled: setWebSearchEl.checked,
-      provider: setWebProviderEl.value as "ddg" | "brave" | "tavily",
-    };
-    try {
-      await deps.api.setSettings({
-        settings: {
-          scope: setScopeEl.value as HadSettings["scope"],
-          harness: (setHarnessEl.value || "pi") as HadSettings["harness"],
-          agentEdit: setAgentEditEl.value as HadSettings["agentEdit"],
-          model,
-          instructions,
-          webSearch,
-        },
-      });
-      deps.log(`settings saved (scope=${setScopeEl.value}, agentEdit=${setAgentEditEl.value}, model=${model ?? "default"})`);
-      void refreshHarnessBadge(); // reflect the just-saved harness/model in the topbar chip
-    } catch (e) {
-      reportError("settings save", e, deps.log);
-    }
-  }
-  setScopeEl.addEventListener("change", () => void saveSettings());
-  setHarnessEl.addEventListener("change", () => {
-    renderHarnessCaps(setHarnessEl.value);
-    syncHarnessManagedControls();
-    void saveSettings();
+  // --- Settings modal, model manager, harness badge (shell-settings.ts) ---
+  const { openSettings, refreshHarnessBadge } = initSettings({
+    api: deps.api,
+    log: deps.log,
+    setDefaultModelKey: deps.setDefaultModelKey,
+    refreshThreadModels: deps.refreshThreadModels,
+    modelName: deps.modelName,
+    hasActiveDoc: () => activeIdx >= 0,
   });
-  setAgentEditEl.addEventListener("change", () => void saveSettings());
-  setDefaultModelEl.addEventListener("change", () => void saveSettings());
-  setInstructionsEl.addEventListener("blur", () => void saveSettings());
-  setWebSearchEl.addEventListener("change", () => void saveSettings());
-  setWebProviderEl.addEventListener("change", () => void saveSettings());
-  document.querySelector("#settingsClose")!.addEventListener("click", () => {
-    settingsModal.hidden = true;
+
+  // --- Version preview + version picker modals (shell-versions.ts) ---
+  const { openVersionPreview, openVersionPicker, versionModal } = initVersions({
+    api: deps.api,
+    log: deps.log,
+    getThreadNodes: deps.getThreadNodes,
+    refreshThreadTree: deps.refreshThreadTree,
+    truncTitle: deps.truncTitle,
+    stripFrontmatter: deps.stripFrontmatter,
+    hasActiveDoc: () => activeIdx >= 0,
+    onEditFromVersion: (versionId, body) => editFromVersion(versionId, body),
   });
-  wireModal(settingsModal); // click backdrop to close
-
-  // --- topbar: harness/model badge (Phase 11 T1) ---
-  // A persistent chip showing the active harness + its default model, so users
-  // always know what agent they're talking to without opening Settings.
-  // Sourced from the same RPCs as the Settings modal (listHarnesses/
-  // getSettings) via the shared `loadHarnesses`/`harnesses` cache above, but
-  // resolves the model KEY to a display NAME through `deps.modelName`
-  // (chat.ts's `threadModels` cache) rather than this module's own
-  // `configuredModels` — that cache is lazy (only populated once Settings is
-  // opened), while chat.ts's is already refreshed at boot by main.ts's
-  // `chat.refreshThreadModels()`, so it's the fresher source for a badge that
-  // must be right immediately on launch. This reflects the per-doc DEFAULT
-  // model only — per-thread overrides still show only in the chat pane's own
-  // pickers (unchanged); the tooltip says so explicitly.
-  const harnessBadgeEl = document.querySelector<HTMLSpanElement>("#harnessBadge")!;
-
-  function renderHarnessBadge(harness: HarnessInfo | undefined, settings: HadSettings | undefined): void {
-    if (!harness) {
-      harnessBadgeEl.textContent = "—";
-      harnessBadgeEl.title = "No agent harness detected.";
-      harnessBadgeEl.classList.remove("unavailable");
-      return;
-    }
-    const harnessManagedModel = harness.id !== "pi" && harness.id !== "codex"; // mirrors syncHarnessManagedControls' own check
-    const modelKey = settings?.model;
-    const modelPart = harnessManagedModel
-      ? "harness-managed" // same vocabulary as this file's own "Model: harness-managed" capchip
-      : modelKey
-        ? deps.modelName(modelKey)
-        : harness.id === "codex"
-          ? "Codex config default"
-        : "sidecar default"; // same vocabulary as refreshModels' "— sidecar default —" option
-    harnessBadgeEl.textContent = `${harness.label} · ${modelPart}`;
-    harnessBadgeEl.classList.toggle("unavailable", !harness.available);
-    harnessBadgeEl.title = [
-      harness.available
-        ? `Available${harness.status ? ` (${harness.status})` : ""}`
-        : `Unavailable${harness.unavailableReason ? `: ${harness.unavailableReason}` : ""}`,
-      "Defaults — per-thread overrides show in the chat pane.",
-      "Change in Settings (⌘,).",
-    ].join("\n");
-  }
-
-  /**
-   * Refresh the badge from the live RPCs. Triggers: boot (main.ts, once the
-   * initial doc/tab is settled) and after saveSettings above — no other
-   * trigger by design (e.g. switching tabs does not re-fetch), matching the
-   * plan's explicit refresh contract rather than inventing extra staleness
-   * handling.
-   */
-  async function refreshHarnessBadge(): Promise<void> {
-    const list = await loadHarnesses();
-    let settings: HadSettings | undefined;
-    if (activeIdx >= 0) {
-      try {
-        settings = await deps.api.getSettings({});
-      } catch (e) {
-        reportError("badge settings load", e, deps.log);
-      }
-    }
-    const harnessId = settings?.harness ?? "pi";
-    renderHarnessBadge(list.find((h) => h.id === harnessId) ?? list[0], settings);
-  }
-
-  // --- Version preview modal (read-only doc-at-version + "Edit from here") ---
-  const versionModal = document.querySelector<HTMLDivElement>("#versionModal")!;
-  const versionModalTitle = document.querySelector<HTMLHeadingElement>("#versionModalTitle")!;
-  const versionModalBody = document.querySelector<HTMLPreElement>("#versionModalBody")!;
-  const versionEditBtn = document.querySelector<HTMLButtonElement>("#versionEditBtn")!;
-  document.querySelector("#versionClose")!.addEventListener("click", () => {
-    versionModal.hidden = true;
-  });
-  wireModal(versionModal); // click backdrop to close
-
-  /**
-   * Open the read-only version-preview modal for `versionId`. Fetches the full
-   * version file via `readVersion`, strips its frontmatter, and shows the body in a
-   * `<pre>` (via textContent — no innerHTML of version data). The footer's
-   * "✎ Edit from here" loads that body into the current editor (revert-then-edit).
-   */
-  async function openVersionPreview(versionId: string): Promise<void> {
-    if (activeIdx < 0) return;
-    try {
-      const { content } = await deps.api.readVersion({ versionId });
-      const body = deps.stripFrontmatter(content);
-      versionModalTitle.textContent = `📄 Document @ ${versionId}`;
-      versionModalBody.textContent = body; // read-only, textContent (no XSS)
-      versionEditBtn.onclick = () => void editFromVersion(versionId, body);
-      versionModal.hidden = false;
-    } catch (e) {
-      deps.log(`preview ${versionId} failed: ${String(e)}`);
-    }
-  }
 
   /**
    * Load a previewed version's body into the CURRENT editor tab (revert-then-edit).
@@ -822,227 +439,12 @@ export function initShell(deps: ShellDeps): ShellApi {
    */
   async function editFromVersion(versionId: string, body: string): Promise<void> {
     if (activeIdx < 0) return;
-    versionModal.hidden = true;
     tabs[activeIdx].markdown = body; // replace the current working copy (not yet on disk)
+    tabs[activeIdx].dirty = false;
+    skipNextHtmlCapture = true; // an HTML tab's iframe still holds the old body; don't capture it back
     await activateTab(activeIdx); // re-renders editor + re-anchors annotations
     deps.log(`editing from ${versionId} — Save to keep it`);
   }
-
-  // --- Version picker modal (Save → restore, Export → bundle a version) ---
-  const versionPickerModal = document.querySelector<HTMLDivElement>("#versionPickerModal")!;
-  const versionPickerList = document.querySelector<HTMLDivElement>("#versionPickerList")!;
-  const versionPickerConfirm = document.querySelector<HTMLButtonElement>("#versionPickerConfirm")!;
-
-  // Resolves to "current", a version id, or null (cancel). Only one picker open at a time.
-  let versionPickerResolve: ((v: string | null) => void) | null = null;
-
-  function pickerSection(title: string, hint?: string): HTMLDivElement {
-    const section = document.createElement("div");
-    section.className = "vpick-section";
-
-    const header = document.createElement("div");
-    header.className = "vpick-section-title";
-    header.textContent = title;
-    section.appendChild(header);
-
-    if (hint) {
-      const help = document.createElement("div");
-      help.className = "vpick-section-hint";
-      help.textContent = hint;
-      section.appendChild(help);
-    }
-
-    return section;
-  }
-
-  function pickerRadio(value: string, checked = false): HTMLInputElement {
-    const radio = document.createElement("input");
-    radio.type = "radio";
-    radio.name = "vpick";
-    radio.value = value;
-    radio.checked = checked;
-    return radio;
-  }
-
-  function appendVersionCopy(
-    parent: HTMLElement,
-    version: VersionPickerVersion,
-    title = version.id,
-  ): void {
-    const copy = document.createElement("span");
-    copy.className = "vpick-copy";
-
-    const line = document.createElement("span");
-    line.className = "vpick-titleline";
-
-    const id = document.createElement("span");
-    id.className = "vpick-versionid";
-    id.textContent = title;
-    line.appendChild(id);
-
-    const cause = document.createElement("span");
-    cause.className = "vpick-cause";
-    cause.textContent = version.cause;
-    line.appendChild(cause);
-
-    copy.appendChild(line);
-    parent.appendChild(copy);
-  }
-
-  function threadRowMeta(row: VersionPickerGraphRow): string {
-    const parts: string[] = [];
-    if (row.title) parts.push(deps.truncTitle(row.title, 64));
-    if (row.thread) parts.push(`thread ${row.thread}`);
-    if (row.turnCount !== undefined) parts.push(`${row.turnCount} turn${row.turnCount === 1 ? "" : "s"}`);
-    if (row.branchFromTurn !== undefined) parts.push(`fork after turn ${row.branchFromTurn + 1}`);
-    if (row.baseDoc) parts.push(row.baseDoc === "at-turn" ? "anchored at turn" : "anchored to latest");
-    if (row.status && row.status !== "open") parts.push(row.status);
-    if (row.baseVersion) parts.push(`based on ${row.baseVersion.id}`);
-    else if (row.missingBaseVersion) parts.push(`based on missing ${row.missingBaseVersion}`);
-    if (row.branchTargets.length) {
-      const branches = row.branchTargets
-        .map((target) => {
-          const turn = target.branchFromTurn !== undefined ? ` after turn ${target.branchFromTurn + 1}` : "";
-          return `${deps.truncTitle(target.title, 28)}${turn}`;
-        })
-        .join(", ");
-      parts.push(`branches: ${branches}`);
-    }
-    return parts.join(" · ");
-  }
-
-  function appendRevisionGraphCell(parent: HTMLElement, cell: VersionPickerGraphCell): void {
-    const lane = document.createElement("span");
-    lane.className = "vpick-lane";
-    if (cell.hasLine) lane.classList.add("line");
-    if (cell.hasHorizontal) lane.classList.add("hline");
-    if (cell.hasNode) lane.classList.add("node");
-    if (cell.branchToLanes.length > 0) lane.classList.add("fork");
-    if (cell.incomingFromLane !== undefined) lane.classList.add("incoming");
-    lane.dataset.lane = String(cell.lane + 1);
-    if (cell.branchToLanes.length > 0) {
-      lane.title = `Branches to lane${cell.branchToLanes.length === 1 ? "" : "s"} ${cell.branchToLanes
-        .map((targetLane) => targetLane + 1)
-        .join(", ")}`;
-    } else if (cell.incomingFromLane !== undefined) {
-      lane.title = `Forked from lane ${cell.incomingFromLane + 1}`;
-    }
-    lane.appendChild(document.createElement("span")).className = "vpick-line-v";
-    lane.appendChild(document.createElement("span")).className = "vpick-line-h";
-    lane.appendChild(document.createElement("span")).className = "vpick-dot";
-    parent.appendChild(lane);
-  }
-
-  function appendRevisionPickerRow(section: HTMLElement, row: VersionPickerGraphRow): void {
-    const shell = document.createElement("label");
-    shell.className = "vpick-row vpick-graph-row";
-    shell.appendChild(pickerRadio(row.id));
-
-    const graph = document.createElement("span");
-    graph.className = "vpick-graph";
-    graph.style.setProperty("--vpick-lanes", String(row.laneCount));
-    graph.setAttribute("aria-hidden", "true");
-    for (const cell of row.graphCells) appendRevisionGraphCell(graph, cell);
-    shell.appendChild(graph);
-
-    const copy = document.createElement("span");
-    copy.className = "vpick-copy";
-
-    const titleLine = document.createElement("span");
-    titleLine.className = "vpick-titleline";
-
-    const title = document.createElement("span");
-    title.className = "vpick-versionid";
-    title.textContent = row.version.id;
-    titleLine.appendChild(title);
-
-    const cause = document.createElement("span");
-    cause.className = "vpick-cause";
-    cause.textContent = row.version.cause;
-    titleLine.appendChild(cause);
-
-    copy.appendChild(titleLine);
-
-    const meta = document.createElement("span");
-    meta.className = "vpick-meta";
-    meta.textContent = threadRowMeta(row);
-    if (meta.textContent) copy.appendChild(meta);
-
-    shell.appendChild(copy);
-    section.appendChild(shell);
-  }
-
-  function appendTimelinePickerRow(section: HTMLElement, version: VersionPickerVersion): void {
-    const row = document.createElement("label");
-    row.className = "vpick-row";
-    row.appendChild(pickerRadio(version.id));
-    appendVersionCopy(row, version);
-    section.appendChild(row);
-  }
-
-  function renderVersionPicker(versions: VersionPickerVersion[]): void {
-    versionPickerList.replaceChildren();
-
-    const current = pickerSection("Current");
-    const currentRow = document.createElement("label");
-    currentRow.className = "vpick-row vpick-current";
-    currentRow.appendChild(pickerRadio("current", true));
-    appendVersionCopy(currentRow, { id: "Current working copy", cause: "unsaved editor contents" });
-    current.appendChild(currentRow);
-    versionPickerList.appendChild(current);
-
-    const model = buildVersionPickerModel(versions, deps.getThreadNodes());
-    if (model.graphRows.length > 0) {
-      const revisions = pickerSection(
-        "Revisions",
-        "Newest first. Every saved revision is selectable; lanes and connectors show inferred branch divergence where available.",
-      );
-      for (const row of model.graphRows) appendRevisionPickerRow(revisions, row);
-      versionPickerList.appendChild(revisions);
-    }
-
-    if (model.unthreadedVersions.length > 0) {
-      const timeline = pickerSection("Other versions", "Newest first; these snapshots are not pinned to a branch row above.");
-      for (const row of model.unthreadedVersions) appendTimelinePickerRow(timeline, row.version);
-      versionPickerList.appendChild(timeline);
-    }
-  }
-
-  async function openVersionPicker(confirmLabel: string): Promise<string | null> {
-    if (activeIdx < 0) return null;
-    let versions: VersionPickerVersion[] = [];
-    try {
-      versions = await deps.api.listVersions({});
-    } catch (e) {
-      reportError("versions", e, deps.log);
-      return null;
-    }
-    await deps.refreshThreadTree();
-    renderVersionPicker(versions);
-    versionPickerConfirm.textContent = confirmLabel;
-    versionPickerModal.hidden = false;
-    return new Promise((resolve) => {
-      versionPickerResolve = resolve;
-    });
-  }
-  function closeVersionPicker(result: string | null): void {
-    versionPickerModal.hidden = true;
-    const r = versionPickerResolve;
-    versionPickerResolve = null;
-    r?.(result);
-  }
-  versionPickerConfirm.addEventListener("click", () => {
-    const sel =
-      versionPickerList.querySelector<HTMLInputElement>('input[name="vpick"]:checked')?.value ??
-      "current";
-    closeVersionPicker(sel);
-  });
-  document
-    .querySelector("#versionPickerCancel")!
-    .addEventListener("click", () => closeVersionPicker(null));
-  versionPickerModal.addEventListener("click", (e) => {
-    if (e.target === versionPickerModal) closeVersionPicker(null);
-  });
 
   // --- Keyboard shortcuts modal ---
   const shortcutsModal = document.querySelector<HTMLDivElement>("#shortcutsModal")!;
@@ -1165,9 +567,16 @@ export function initShell(deps: ShellDeps): ShellApi {
     tabs.forEach((tab, i) => {
       const row = document.createElement("div");
       row.className = `tab${i === activeIdx ? " active" : ""}`;
-      row.innerHTML = `<span class="tname">${tab.name}</span><button class="tclose" title="Close">×</button>`;
-      row.querySelector(".tname")!.addEventListener("click", () => void activateTab(i));
-      row.querySelector(".tclose")!.addEventListener("click", (ev) => {
+      const name = document.createElement("span");
+      name.className = "tname";
+      name.textContent = tab.name; // textContent, not innerHTML: file names are untrusted
+      const close = document.createElement("button");
+      close.className = "tclose";
+      close.title = "Close";
+      close.textContent = "×";
+      row.append(name, close);
+      name.addEventListener("click", () => void activateTab(i));
+      close.addEventListener("click", (ev) => {
         ev.stopPropagation();
         void closeTab(i);
       });
@@ -1183,6 +592,13 @@ export function initShell(deps: ShellDeps): ShellApi {
       deps.rootEl.scrollTop = 0;
     });
   }
+
+  /**
+   * Set by callers that have already replaced the active tab's content (reloadActiveDoc,
+   * editFromVersion) or captured it themselves (closeTab), so the next activateTab does
+   * not clobber that content with the iframe's now-stale DOM. Consumed by activateTab.
+   */
+  let skipNextHtmlCapture = false;
 
   /** Persist the active html tab's in-iframe edits back into its tab before switching. */
   function captureActiveHtmlEdits(): void {
@@ -1218,8 +634,10 @@ export function initShell(deps: ShellDeps): ShellApi {
   }
 
   async function activateTab(idx: number): Promise<void> {
+    const skipCapture = skipNextHtmlCapture;
+    skipNextHtmlCapture = false;
     if (idx < 0 || idx >= tabs.length || !deps.getEditor()) return;
-    captureActiveHtmlEdits(); // persist outgoing html tab edits before switching
+    if (!skipCapture) captureActiveHtmlEdits(); // persist outgoing html tab edits before switching
     deps.clearAnnotationUndo(); // annotation-undo doesn't carry across document switches
     deps.clearSearchHighlights(); // search overlays are per rendered document, not persisted tab state
     const seq = ++activationSeq;
@@ -1341,13 +759,21 @@ export function initShell(deps: ShellDeps): ShellApi {
 
   async function closeTab(idx: number): Promise<void> {
     if (idx < 0 || idx >= tabs.length) return;
+    // Capture BEFORE the splice: once the array has shifted, `tabs[activeIdx]` can point
+    // at a different tab (or nothing), and activateTab's own capture would write the
+    // outgoing iframe's HTML into that wrong tab.
+    captureActiveHtmlEdits();
+    const next = activeIndexAfterClose(activeIdx, idx, tabs.length);
     const [closed] = tabs.splice(idx, 1);
     deps.log(`closed ${closed.name}`);
     if (tabs.length === 0) {
       saveTabSession();
       return void showEmptyState();
     }
-    await activateTab(Math.min(idx, tabs.length - 1));
+    // (activeIndexAfterClose: a non-active close keeps the user's tab; an active close
+    // moves to the nearest neighbour.)
+    skipNextHtmlCapture = true; // already captured above, against the pre-splice index
+    await activateTab(next);
     saveTabSession();
   }
 
@@ -1382,6 +808,7 @@ export function initShell(deps: ShellDeps): ShellApi {
       tabs[idx].format = format;
       tabs[idx].markdown = tabContent(opened.text, format);
       tabs[idx].dirty = false;
+      skipNextHtmlCapture = true; // the iframe still shows the pre-edit doc; keep the fresh text
       await activateTab(idx);
       saveTabSession();
     } catch (e) {

@@ -540,10 +540,32 @@ export function initProposals(deps: ProposalsDeps): ProposalsApi {
    * bubble — the proposal JSON must NOT be dumped as tokens). Shared by every
    * streaming onEvent (chat send, card discuss, brainstorm).
    */
+  // Editing mode: the sidecar applied an edit on its own. Several can land close together
+  // (parallel directives, a batch of review findings), so the reload is coalesced.
+  let appliedReload: ReturnType<typeof setTimeout> | null = null;
+  function scheduleAppliedReload(): void {
+    if (appliedReload) clearTimeout(appliedReload);
+    appliedReload = setTimeout(() => {
+      appliedReload = null;
+      void deps.reloadActiveDoc();
+    }, 150);
+  }
+
   function routeProposal(e: RpcEvent): boolean {
+    if (e.event === "applied") {
+      deps.chatTurn("system", "Applied an edit to the document (Editing mode). Undo it from File ▸ Save ▸ Versions.");
+      deps.log("agent edit applied — reloading");
+      scheduleAppliedReload();
+      return true;
+    }
     if (e.event !== "proposal") return false;
     try {
-      const pr = JSON.parse(String(e.data)) as ProposalView;
+      const pr = JSON.parse(String(e.data)) as ProposalView & { applyError?: string };
+      if (pr.applyError) {
+        // Editing mode refused to apply this one (its text changed, or it was a stale
+        // full rewrite) — it falls back to an ordinary proposal for review.
+        deps.chatTurn("system", `Couldn't apply this edit directly (${pr.applyError}). Review it instead.`);
+      }
       if (pr.fullText !== undefined) {
         // Full-document rewrite: open the side-by-side diff panel (a whole-doc inline
         // strike would be unusable). The panel re-fetches the current doc to diff.

@@ -8,6 +8,8 @@ export class FakePiRunner implements AgentRunner {
   private sessions = new SessionStore<AgentContext>("fake");
   /** Messages passed to send(), recorded for assertions. */
   readonly sentMessages: string[] = [];
+  /** Id of the most recently started session, for assertions that can't go through the TaskDB. */
+  private lastStarted: string | undefined;
   /** cancelKeys passed to cancel(), recorded for assertions. */
   readonly cancelled: string[] = [];
 
@@ -20,6 +22,7 @@ export class FakePiRunner implements AgentRunner {
     onToken?: TokenSink,
   ): Promise<{ sessionId: string; turn: AgentTurn }> {
     const sessionId = this.sessions.start(ctx);
+    this.lastStarted = sessionId;
     const turn = this.next();
     onToken?.({ type: "token", text: turn.reply });
     return { sessionId, turn };
@@ -43,6 +46,11 @@ export class FakePiRunner implements AgentRunner {
   /** True only for ids this fake actually started — lets tests simulate a stale id. */
   hasSession(sessionId: string): boolean {
     return this.sessions.has(sessionId);
+  }
+
+  /** The most recently started session's id (undefined before the first start()). */
+  lastSessionId(): string | undefined {
+    return this.lastStarted;
   }
 
   contextFor(sessionId: string): AgentContext | undefined {

@@ -9,7 +9,7 @@ const mainSource = readFileSync(new URL("./main.ts", import.meta.url), "utf8");
 // `currentFormat` globals). Assertion semantics are unchanged; only the source
 // file (and `deps.`-prefixed calls becoming direct in-module calls once their
 // targets moved into the same module) moved.
-const shellSource = readFileSync(new URL("./shell.ts", import.meta.url), "utf8");
+import { shellSource } from "./module-source.test-support.js";
 
 function sourceBetween(source: string, start: string, end: string): string {
   const startIndex = source.indexOf(start);

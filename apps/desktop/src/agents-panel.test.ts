@@ -1,5 +1,4 @@
 import { describe, expect, it } from "vitest";
-import { readFileSync } from "node:fs";
 
 // Live testing found the Agents badge and panel disagreeing on the running-task count
 // (badge computed from raw server rows, panel from a merged server+optimistic list),
@@ -10,7 +9,7 @@ import { readFileSync } from "node:fs";
 // (agent-retry-ux.test.ts, popover-layout.test.ts): string assertions over the real
 // TypeScript source, since chat.ts's DOM wiring isn't otherwise unit-testable in this
 // package's vitest setup (no jsdom — see ui.test.ts's file header).
-const chatSource = readFileSync(new URL("./chat.ts", import.meta.url), "utf8");
+import { chatSource } from "./module-source.test-support.js";
 
 function sourceBetween(source: string, start: string, end: string): string {
   const startIndex = source.indexOf(start);
@@ -161,8 +160,8 @@ describe("Agents panel row click respects optimistic vs real rows", () => {
   it("still opens real rows (comment threads via promoteToChat, others via openThreadById)", () => {
     const realBranch = sourceBetween(renderGroupSource, "} else {", "agentsPanel.appendChild(row);");
     expect(realBranch).toContain('row.classList.add("clickable")');
-    expect(realBranch).toContain("if (comments.has(t.threadId)) void promoteToChat(t.threadId);");
-    expect(realBranch).toContain("else void openThreadById(t.threadId, taskTitle(t.threadId));");
+    expect(realBranch).toContain("if (deps.hasComment(t.threadId)) void deps.promoteToChat(t.threadId);");
+    expect(realBranch).toContain("else void deps.openThreadById(t.threadId, taskTitle(t.threadId));");
   });
 });
 
@@ -193,7 +192,7 @@ describe("Directive/review pseudo-thread footer is repliable", () => {
   const showDirectiveResultSource = sourceBetween(
     chatSource,
     "function showDirectiveResult(",
-    "async function runResolveDirectives(",
+    "async function askAgentFromCard(", // the next function in chat.ts
   );
 
   it("openThreadById shows the footer and tracks the opened thread as activeChatId", () => {
@@ -277,16 +276,13 @@ describe("Streamed bubbles re-render to the persisted reply on done() (Phase-8 T
     "  /**\n   * Replace a \"you\" turn's body with an inline editor",
   );
 
-  it("done() accepts an optional finalText and re-renders when it differs from the stream", () => {
+  it("done() accepts an optional finalText and renders it (falling back to the stream) exactly once", () => {
     expect(streamingAgentTurnSource).toContain("done: (finalText) => {");
-    expect(streamingAgentTurnSource).toContain("finalText !== undefined && finalText !== replyText");
-    expect(streamingAgentTurnSource).toContain('renderTurnText(body, "agent", finalText)');
+    expect(streamingAgentTurnSource).toContain('renderTurnText(body, "agent", finalText ?? replyText)');
   });
 
-  it("defines fetchLastAgentReply as the best-effort getThread round-trip for {ok}-only RPCs", () => {
-    expect(chatSource).toContain("async function fetchLastAgentReply(threadId: string): Promise<string | undefined> {");
-    expect(chatSource).toContain('const last = thread.turns[thread.turns.length - 1];');
-    expect(chatSource).toContain('return last?.role === "agent" ? last.body : undefined;');
+  it("fetchLastAgentReply delegates to ui.ts's shared lastAgentReply (behaviour tested in last-agent-reply.test.ts)", () => {
+    expect(chatSource).toContain("lastAgentReply(deps.api, deps.getDocPath, threadId)");
   });
 
   it("dispatchQueuedTurn wires fetchLastAgentReply into bubble.done() on success", () => {
@@ -301,10 +297,12 @@ describe("Streamed bubbles re-render to the persisted reply on done() (Phase-8 T
   });
 
   it("the comment card's Ask-agent flow wires fetchLastAgentReply into bubble.done() too", () => {
+    // The card only requests the turn (chat-comment-cards.ts); the pane-side flow that
+    // streams it lives in chat.ts's askAgentFromCard.
     const runCardAskAgentSource = sourceBetween(
       chatSource,
-      "const runCardAskAgent = async (): Promise<void> => {",
-      "discussBtn.addEventListener",
+      "async function askAgentFromCard(",
+      "async function resendFromCard(",
     );
     expect(runCardAskAgentSource).toContain("bubble.done(await fetchLastAgentReply(id));");
   });

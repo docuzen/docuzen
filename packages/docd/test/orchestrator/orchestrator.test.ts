@@ -583,17 +583,12 @@ describe("Orchestrator.switchStance", () => {
   });
 });
 
-// Conversation turns (discuss/reply/panel) never edit or propose an edit, under
-// ANY settings.agentEdit value. This replaces the previous test that asserted the
-// OPPOSITE (agentEdit: "direct" caused discuss to snapshot + emit docChanged when
-// the agent wrote the file). That behavior is deliberately retired: `buildContext`
-// now hands discuss/reply/panel `allowEdit: false` unconditionally (see its doc
-// comment), so `runAgentStep` never even takes the pre-invoke snapshot
-// `detectDirectEdit` needs, regardless of what this fake runner does.
+// Conversation turns (discuss/reply/panel) never edit or propose an edit. There is no
+// direct-edit mode: the orchestrator never snapshots or announces a document change on
+// the agent's behalf — every change is a proposal the reviewer approves.
 describe("Orchestrator.discuss conversation turns never direct-edit", () => {
-  it("does not snapshot or signal docChanged even when agentEdit is 'direct' and the runner writes the file", async () => {
+  it("does not snapshot an agent-edit even when the runner writes the file", async () => {
     await seedComment();
-    await writeSettings(docPath, { scope: "folder", agentEdit: "direct" });
     // A real pi/codex runner would never get edit/write tools here (tool-policy gates
     // them off conversationOnly, not off this fake's own choices) — this fake stands in
     // for a hypothetical agent that wrote the file anyway, to prove the ORCHESTRATOR side
@@ -615,13 +610,12 @@ describe("Orchestrator.discuss conversation turns never direct-edit", () => {
       { threadId: "c0001", annotationId: "c0001", stance: "none", comment: "fix it" },
       (e) => events.push(e.type),
     );
-    expect(events).not.toContain("docChanged");
+    expect(events).toEqual(["token"]);
     expect((await listVersions(docPath)).map((v) => v.cause)).not.toContain("agent-edit");
   });
 
-  it("hands discuss/reply/panel allowEdit:false and conversationOnly:true even when agentEdit is 'direct'", async () => {
+  it("hands discuss/reply/panel conversationOnly:true", async () => {
     await seedComment();
-    await writeSettings(docPath, { scope: "folder", agentEdit: "direct" });
     const runner = new FakePiRunner([
       { reply: "discuss reply" },
       { reply: "resumed reply" },
@@ -631,7 +625,6 @@ describe("Orchestrator.discuss conversation turns never direct-edit", () => {
 
     await orch.discuss(docPath, { threadId: "c0001", annotationId: "c0001", stance: "none", comment: "q" });
     const discussCtx = runner.contextFor(db.get("c0001")!.piSessionId!)!;
-    expect(discussCtx.allowEdit).toBe(false);
     expect(discussCtx.conversationOnly).toBe(true);
 
     // Force reply() through resumeFromTranscript (its own buildContext call, captured via
@@ -639,14 +632,12 @@ describe("Orchestrator.discuss conversation turns never direct-edit", () => {
     db.upsert({ threadId: "c0001", status: "responded", piSessionId: "pi-stale-999" });
     await orch.reply(docPath, "c0001", "another question");
     const replyCtx = runner.contextFor(db.get("c0001")!.piSessionId!)!;
-    expect(replyCtx.allowEdit).toBe(false);
     expect(replyCtx.conversationOnly).toBe(true);
 
     await orch.panel(docPath, { threadId: "c0002", annotationId: "c0001", stance: "none", comment: "q2" }, [
       "litellm/gpt-5.5",
     ]);
     const panelCtx = runner.contextFor(db.get("c0002")!.piSessionId!)!;
-    expect(panelCtx.allowEdit).toBe(false);
     expect(panelCtx.conversationOnly).toBe(true);
   });
 });
@@ -668,7 +659,7 @@ describe("Orchestrator.improve", () => {
 
     const result = await orch.improve(docPath, "c0001");
     expect(result.newText).toBe("an in-memory token bucket");
-    const sid = db.get("c0001")!.piSessionId!;
+    const sid = runner.lastSessionId()!; // Improve never records its one-shot session on the thread
     expect(runner.contextFor(sid)!.comment.toLowerCase()).toContain("rewrite");
   });
 
@@ -714,7 +705,42 @@ describe("Orchestrator.improve", () => {
     const orch = new Orchestrator({ runner, db, now: () => "t" });
     const result = await orch.improve(docPath, "c0001");
     expect(result.newText).toBe("a cleaner sentence");
-    expect(db.get("c0001")?.piSessionId).toMatch(/.+/); // a session now exists
+    expect(runner.lastSessionId()).toMatch(/.+/); // a fresh session answered
+    // ...but the one-shot rewrite session is not recorded as the thread's session.
+    expect(db.get("c0001")?.piSessionId).toBeNull();
+    expect(db.get("c0001")?.status).toBe("responded");
+  });
+
+  it("does not hijack the discussion session: a reply after Improve continues the discussion", async () => {
+    await seedComment();
+    const runner = new FakePiRunner([{ reply: "discussed" }, { reply: "cleaner text" }, { reply: "follow-up" }]);
+    const orch = new Orchestrator({ runner, db, now: () => "t" });
+    await orch.discuss(docPath, { threadId: "c0001", annotationId: "c0001", stance: "none", comment: "q" });
+    const discussionSid = db.get("c0001")!.piSessionId!;
+    await orch.improve(docPath, "c0001");
+    expect(db.get("c0001")?.piSessionId).toBe(discussionSid);
+    await orch.reply(docPath, "c0001", "and another thing");
+    // The reply went to the live discussion session via send(), not into Improve's
+    // rewrite-only session (which would answer with bare replacement text).
+    expect(runner.sentMessages).toEqual(["and another thing"]);
+  });
+
+  it("records running then error (with the reason) when the Improve call fails", async () => {
+    await seedComment();
+    const statuses: string[] = [];
+    const failing: AgentRunner = {
+      async start() {
+        statuses.push(db.get("c0001")!.status);
+        throw new Error("gateway down\nstack line");
+      },
+      async send() {
+        return { reply: "" };
+      },
+    };
+    const orch = new Orchestrator({ runner: failing, db, now: () => "t" });
+    await expect(orch.improve(docPath, "c0001")).rejects.toThrow("gateway down");
+    expect(statuses).toEqual(["running"]);
+    expect(db.get("c0001")).toMatchObject({ status: "error", errorText: "Error: gateway down" });
   });
 
   it("improve starts a fresh session when the stored session is stale", async () => {
@@ -725,7 +751,7 @@ describe("Orchestrator.improve", () => {
     db.upsert({ threadId: "c0001", status: "responded", piSessionId: "pi-stale-1" });
     const res = await orch.improve(docPath, "c0001");
     expect(res.newText).toBe("cleaner text");             // did not throw "unknown session"
-    expect(db.get("c0001")?.piSessionId).not.toBe("pi-stale-1");
+    expect(runner.lastSessionId()).not.toBe("pi-stale-1"); // answered by a fresh session
   });
 
   it("folds a prior discussion into a fresh replacement-only session (not the warm one)", async () => {
@@ -738,7 +764,7 @@ describe("Orchestrator.improve", () => {
     // Improve never resumes the discuss session (which holds propose_edit); it starts a
     // fresh replacement-only one, so no message is ever send()'d.
     expect(runner.sentMessages).toHaveLength(0);
-    const sid = db.get("c0001")!.piSessionId!;
+    const sid = runner.lastSessionId()!; // Improve never records its one-shot session on the thread
     const ctx = runner.contextFor(sid)!;
     expect(ctx.replacementOnly).toBe(true);                          // no propose_edit even when discussed
     expect(ctx.comment.toLowerCase()).toContain("discussion");       // brief folds the discussion in
@@ -763,7 +789,7 @@ describe("Orchestrator.improve", () => {
 
     await orch.improve(docPath, "c0001");
 
-    const sid = db.get("c0001")!.piSessionId!;
+    const sid = runner.lastSessionId()!; // Improve never records its one-shot session on the thread
     const ctx = runner.contextFor(sid)!;
     expect(ctx.history?.map((h) => h.body)).toEqual([
       "We only run one node; should this still say Redis?",
@@ -781,7 +807,7 @@ describe("Orchestrator.improve", () => {
     const runner = new FakePiRunner([{ reply: "cleaner text" }]);
     const orch = new Orchestrator({ runner, db, now: () => "t" });
     await orch.improve(docPath, "c0001");
-    const sid = db.get("c0001")!.piSessionId!;
+    const sid = runner.lastSessionId()!; // Improve never records its one-shot session on the thread
     const comment = runner.contextFor(sid)!.comment.toLowerCase();
     expect(comment).toContain("rewrite");        // still asks for a rewrite
     expect(comment).not.toContain("discussion"); // but does not invoke a discussion that isn't there
@@ -792,7 +818,7 @@ describe("Orchestrator.improve", () => {
     const runner = new FakePiRunner([{ reply: "cleaner text" }]);
     const orch = new Orchestrator({ runner, db, now: () => "t" });
     await orch.improve(docPath, "c0001");
-    const sid = db.get("c0001")!.piSessionId!;
+    const sid = runner.lastSessionId()!; // Improve never records its one-shot session on the thread
     expect(runner.contextFor(sid)!.replacementOnly).toBe(true);
     // Phase 10: Improve is an explicit edit flow, not a conversation turn — it must not
     // inherit buildContext's anchored conversationOnly:true default (see improve()'s
@@ -860,7 +886,7 @@ describe("Orchestrator.improve", () => {
 
     const result = await orch.improve(docPath, "c0001");
 
-    const sid = db.get("c0001")!.piSessionId!;
+    const sid = runner.lastSessionId()!; // Improve never records its one-shot session on the thread
     const ctx = runner.contextFor(sid)!;
     expect(ctx.htmlMode).toBe(true);
     expect(ctx.replacementOnly).not.toBe(true);
@@ -1674,7 +1700,6 @@ describe("Orchestrator.branch", () => {
     expect((runner.contextFor(sid)?.history ?? []).length).toBe(0);
     // Phase 10: branch is a conversation turn too (forking is still just discussing) —
     // never edits or proposes.
-    expect(runner.contextFor(sid)?.allowEdit).toBe(false);
     expect(runner.contextFor(sid)?.conversationOnly).toBe(true);
 
     // parent thread untouched

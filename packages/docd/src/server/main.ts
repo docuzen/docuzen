@@ -1,5 +1,4 @@
-import { homedir, userInfo } from "node:os";
-import { join } from "node:path";
+import { userInfo } from "node:os";
 import { startServer } from "./ws-server.js";
 import { selectRunner } from "./select-runner.js";
 import { createCodexHarness } from "../agent/codex-runner.js";
@@ -9,6 +8,7 @@ import { listModels } from "../agent/index.js";
 import { PiRunner } from "../agent/pi-runner.js";
 import type { AgentRunner } from "../agent/types.js";
 import { appConfigPath, readAppConfig } from "../config/app-config.js";
+import { defaultModelsPath } from "../rpc/handler.js";
 
 // Wrapped in main() rather than top-level await so esbuild can bundle this
 // entrypoint as CJS for the packaged sidecar (see scripts/bundle-sidecar.mjs).
@@ -17,44 +17,54 @@ async function main(): Promise<void> {
   const port = portArg !== -1 ? Number(process.argv[portArg + 1]) : 0;
 
   const config = readAppConfig();
-  const modelsPath = join(homedir(), ".pi", "agent", "models.json");
+  const modelsPath = defaultModelsPath();
   const models = await listModels(modelsPath).catch(() => []);
-  const sel = selectRunner({ env: process.env, config, models });
+  // Codex is detected first: an unconfigured install defaults to whichever harness is usable.
+  const codexHarness = createCodexHarness({ config: { ...config.codex, modelsPath } });
+  const sel = selectRunner({ env: process.env, config, models, codexAvailable: codexHarness.available });
 
-  let runner: AgentRunner;
   const registry = new HarnessRegistry(sel.defaultHarness);
+  let piRunner: AgentRunner | null = null;
+  let piOfflineReason = sel.reason;
   if (sel.live) {
-    runner = new PiRunner({ provider: sel.provider, modelId: sel.modelId });
+    try {
+      piRunner = await PiRunner.create({ provider: sel.provider, modelId: sel.modelId });
+    } catch (e) {
+      // e.g. LLM_API_KEY is set but the model isn't in pi's registry. Stay up with pi
+      // offline (the reason reaches the UI) instead of crashing the whole sidecar.
+      piOfflineReason = e instanceof Error ? e.message : String(e);
+    }
+  }
+  if (piRunner) {
     registry.register({
       id: "pi",
       label: "Pi",
-      runner,
+      runner: piRunner,
       capabilities: PI_CAPABILITIES,
       available: true,
     });
     console.log(`docd: PiRunner (provider=${sel.provider}, model=${sel.modelId}) — ${sel.reason}`);
   } else {
-    runner = new FakePiRunner([]);
     registry.register({
       id: "pi",
       label: "Pi",
-      runner,
+      runner: new FakePiRunner([]),
       capabilities: PI_CAPABILITIES,
       available: false,
-      unavailableReason: sel.reason,
+      unavailableReason: piOfflineReason,
     });
-    console.log(`docd: Discuss disabled (FakePiRunner) — ${sel.reason} [config: ${appConfigPath()}]`);
+    console.log(`docd: pi offline (FakePiRunner) — ${piOfflineReason} [config: ${appConfigPath()}]`);
   }
 
-  const codexHarness = createCodexHarness({ config: { ...config.codex, modelsPath } });
   registry.register(codexHarness);
   console.log(
     codexHarness.available
       ? `docd: Codex harness available (${codexHarness.status ?? "detected"})`
       : `docd: Codex harness unavailable (${codexHarness.unavailableReason ?? "not detected"})`,
   );
+  console.log(`docd: default harness = ${registry.defaultId()}`);
 
-  const author = process.env.DOCUZEN_AUTHOR ?? userInfo().username ?? "you";
+  const author = process.env.DOCUZEN_AUTHOR ?? userInfo().username;
   const server = await startServer({
     port,
     registry,

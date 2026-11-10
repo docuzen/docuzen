@@ -442,7 +442,6 @@ export class CodexEventParser {
   }
 }
 
-/** Exported for tests: byte-exact prompt-fragment characterization (see prompt-sections.ts). */
 /**
  * Argv for `codex exec`. No `--search`: codex-cli 0.142.x removed the flag
  * (search feature flags retired; the CLI manages web access natively), and
@@ -486,10 +485,9 @@ function tomlString(value: string): string {
 
 /**
  * True in the modes where pi would offer the propose_edit tool (see tool-policy.ts's
- * gating): the default propose mode and allowEdit ("directive") mode both want a
- * structured edit back; reviewMode wants findings, replacementOnly wants raw
- * replacement text, and conversationOnly turns (Phase 10: discuss/reply/panel/branch)
- * never edit at all — regardless of `settings.agentEdit` — so none of the three get the
+ * gating): the default propose mode wants a structured edit back; reviewMode wants
+ * findings, replacementOnly wants raw replacement text, and conversationOnly turns
+ * (discuss/reply/panel/branch) never edit at all — so none of the three get the
  * contract. This single predicate gates BOTH the prompt clause below AND the reply
  * parser in `runCodex` (see its call site) — a volunteered trailing ```json block in a
  * conversation turn is never parsed into a proposal; it stays visible prose.
@@ -525,9 +523,7 @@ export function buildCodexPrompt(ctx: AgentContext): string {
     ctx.reviewMode
       ? "This turn is a document review. Return concise findings in prose. The Codex adapter cannot yet file Docuzen review annotations directly."
       : "",
-    ctx.allowEdit
-      ? "Docuzen direct-edit mode is not enabled for the Codex adapter yet; do not edit files. Describe the change instead."
-      : "Do not edit files. Docuzen will persist only your final reply.",
+    "Do not edit files. Docuzen will persist only your final reply.",
   ].filter(Boolean);
 
   return [

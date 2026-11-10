@@ -1,5 +1,4 @@
-import { mkdir, readFile, writeFile } from "node:fs/promises";
-import { dirname } from "node:path";
+import { readFile } from "node:fs/promises";
 import matter from "gray-matter";
 import type {
   ThreadFile,
@@ -8,6 +7,7 @@ import type {
   ThreadTurnRole,
 } from "./types.js";
 import { hadPaths } from "./paths.js";
+import { withFileLock, writeFileAtomic } from "./io.js";
 
 // Turn header. The optional trailing " ::vNNNN" tag records the doc version active
 // at this turn; it's digits-only so it can't collide with the colons in an ISO timestamp.
@@ -109,10 +109,8 @@ export function parseThread(text: string): ThreadFile {
 
 /** Write (overwrite) a complete thread file, creating the threads dir if needed. */
 export async function writeThread(docPath: string, t: ThreadFile): Promise<void> {
-  const p = hadPaths(docPath);
-  const file = p.threadFile(t.frontmatter.id);
-  await mkdir(dirname(file), { recursive: true });
-  await writeFile(file, serializeThread(t), "utf8");
+  const file = hadPaths(docPath).threadFile(t.frontmatter.id);
+  await withFileLock(file, () => writeFileAtomic(file, serializeThread(t)));
 }
 
 export async function initThread(
@@ -133,10 +131,14 @@ export async function appendTurn(
   id: string,
   turn: ThreadTurn,
 ): Promise<void> {
-  const t = await readThread(docPath, id);
-  t.turns.push(turn);
-  const p = hadPaths(docPath);
-  await writeFile(p.threadFile(id), serializeThread(t), "utf8");
+  // Locked read-modify-write: a status transition (updateThreadFrontmatter) racing an
+  // appended turn must not write back a copy of the file that predates the other's change.
+  const file = hadPaths(docPath).threadFile(id);
+  await withFileLock(file, async () => {
+    const t = parseThread(await readFile(file, "utf8"));
+    t.turns.push(turn);
+    await writeFileAtomic(file, serializeThread(t));
+  });
 }
 
 /** Patch a thread's frontmatter fields in place, leaving turns untouched. */
@@ -145,8 +147,10 @@ export async function updateThreadFrontmatter(
   id: string,
   patch: Partial<Omit<ThreadFrontmatter, "id">>,
 ): Promise<void> {
-  const t = await readThread(docPath, id);
-  t.frontmatter = { ...t.frontmatter, ...patch };
-  const p = hadPaths(docPath);
-  await writeFile(p.threadFile(id), serializeThread(t), "utf8");
+  const file = hadPaths(docPath).threadFile(id);
+  await withFileLock(file, async () => {
+    const t = parseThread(await readFile(file, "utf8"));
+    t.frontmatter = { ...t.frontmatter, ...patch };
+    await writeFileAtomic(file, serializeThread(t));
+  });
 }

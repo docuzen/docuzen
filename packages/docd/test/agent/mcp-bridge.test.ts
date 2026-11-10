@@ -30,8 +30,7 @@ function resolvedDocs(tools: string[]): ResolvedMcpSettings {
         tools,
       },
     },
-    readToolNames: tools.filter((name) => name !== "docs_write"),
-    writeToolNames: tools.includes("docs_write") ? ["docs_write"] : [],
+    readToolNames: tools,
   };
 }
 
@@ -58,6 +57,24 @@ describe("MCP bridge proxy tool", () => {
 
     expect(text(result)).toContain("read ok");
     expect(calls).toEqual([{ serverName: "docs", name: "docs_read", args: { path: "guide.md" } }]);
+  });
+
+  it("pins a server's forced args over whatever the model passed (draft tools stay drafts)", async () => {
+    const calls: { name: string; args: unknown }[] = [];
+    const connector: McpConnector = async () => ({
+      async callTool(name, args) {
+        calls.push({ name, args });
+        return { content: [{ type: "text", text: "diff" }] };
+      },
+      async close() {},
+    });
+    const resolved = resolvedDocs(["edit_file"]);
+    resolved.servers.docs.forcedArgs = { edit_file: { dryRun: true } };
+    const tool = asExecutable(createMcpProxyTool(resolved, { connector }));
+
+    await tool.execute("call-1", { tool: "edit_file", args: '{"path":"a.md","dryRun":false}' });
+
+    expect(calls).toEqual([{ name: "edit_file", args: { path: "a.md", dryRun: true } }]);
   });
 
   it("blocks tools filtered out by propose-mode safety", async () => {

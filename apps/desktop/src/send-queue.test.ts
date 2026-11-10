@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { SendQueue, driveSend, type QueuedTurn, type SendOutcome } from "./send-queue.js";
+import { SendQueue, driveSend, type QueuedTurn, type SendOutcome, claimExclusive, releaseExclusive } from "./send-queue.js";
 
 function item(overrides: Partial<QueuedTurn> = {}): QueuedTurn {
   return { id: "q1", threadId: "t1", text: "hello", stance: "none", ...overrides };
@@ -220,5 +220,56 @@ describe("driveSend", () => {
     expect(send).toHaveBeenCalledTimes(2);
     expect(send.mock.calls[1][0].id).toBe("b");
     expect(q.list("t1")).toEqual([]);
+  });
+});
+
+describe("exclusive turns (card Ask agent, Improve, Brainstorm, Visualize, Panel)", () => {
+  const item = (id: string, threadId = "t1"): QueuedTurn => ({ id, threadId, text: id, stance: "none" });
+
+  it("a claimed thread reads as in flight, and cannot be claimed twice", () => {
+    const q = new SendQueue();
+    expect(claimExclusive(q, "t1")).toBe(true);
+    expect(q.isInFlight("t1")).toBe(true);
+    expect(claimExclusive(q, "t1")).toBe(false);
+    expect(claimExclusive(q, "t2")).toBe(true); // other threads are independent
+  });
+
+  it("cannot claim a thread whose queued chat turn is being dispatched", async () => {
+    const q = new SendQueue();
+    let finish!: (o: SendOutcome) => void;
+    const running = driveSend(q, "t1", item("a"), () => new Promise<SendOutcome>((r) => (finish = r)));
+    expect(claimExclusive(q, "t1")).toBe(false);
+    finish("sent");
+    await running;
+    expect(claimExclusive(q, "t1")).toBe(true);
+  });
+
+  it("release with drain delivers the messages that queued up behind it, in order", async () => {
+    const q = new SendQueue();
+    claimExclusive(q, "t1");
+    q.enqueue(item("a"));
+    q.enqueue(item("b"));
+    const sent: string[] = [];
+    await releaseExclusive(q, "t1", true, async (i) => {
+      expect(q.isInFlight("t1")).toBe(true); // one at a time: the bit is held per dispatch
+      sent.push(i.id);
+      return "sent";
+    });
+    expect(sent).toEqual(["a", "b"]);
+    expect(q.isInFlight("t1")).toBe(false);
+  });
+
+  it("release without drain (the turn failed or was stopped) leaves the queue untouched", async () => {
+    const q = new SendQueue();
+    claimExclusive(q, "t1");
+    q.enqueue(item("a"));
+    const sent: string[] = [];
+    await releaseExclusive(q, "t1", false, async (i) => {
+      sent.push(i.id);
+      return "sent";
+    });
+    expect(sent).toEqual([]);
+    expect(q.list("t1").map((i) => i.id)).toEqual(["a"]);
+    expect(q.isInFlight("t1")).toBe(false);
   });
 });

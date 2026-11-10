@@ -85,7 +85,8 @@ export interface RpcSchema {
   };
   improve: {
     params: { docPath: string; threadId: string };
-    result: { newText: string; proposalId?: string };
+    /** `applied`: the document is in Editing mode and the rewrite was applied on the spot. */
+    result: { newText: string; proposalId?: string; applied?: boolean };
     event: true;
   };
   visualize: {
@@ -105,13 +106,16 @@ export interface RpcSchema {
         severity?: string;
         kind?: string;
         proposalId?: string;
+        /** Editing mode: this finding's edit was applied on the spot. */
+        applied?: boolean;
       }>;
     };
     event: true;
   };
   resolveDirectives: {
     params: { docPath: string };
-    result: { count: number; proposed: boolean; reply: string };
+    /** `applied`: how many directives' edits were applied on the spot (Editing mode). */
+    result: { count: number; proposed: boolean; applied: number; reply: string };
     event: true;
   };
   cancelTurn: {

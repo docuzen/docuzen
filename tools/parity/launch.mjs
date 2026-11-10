@@ -3,7 +3,7 @@
 // Vite gets an explicit port so the two trees never collide.
 import { spawn, execFile } from "node:child_process";
 import { promisify } from "node:util";
-import { mkdtemp, writeFile, rm } from "node:fs/promises";
+import { mkdtemp, mkdir, writeFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, basename } from "node:path";
 
@@ -83,12 +83,42 @@ export async function stageDoc(tree, sampleRel) {
   return dst;
 }
 
-export async function launchTree(tree, { vitePort, docPath }) {
+/**
+ * A throwaway HOME for the sidecar holding a minimal app config, so a run never depends on
+ * (or touches) the developer's machine:
+ *  - `~/.docuzen/config.toml` names a harness, so the first-run setup modal never opens
+ *    (it covers the UI and swallows every scripted click on a machine without a config);
+ *  - there is no `~/.pi/agent/models.json`, so pi is deterministically offline and any
+ *    agent call fails fast with the same message everywhere — no accidental live LLM call
+ *    because the developer happens to have a model with a stored key;
+ *  - the global git-excludes write (had/hide.ts) lands in the temp HOME, not the real one.
+ */
+async function hermeticHome() {
+  const home = await mkdtemp(join(tmpdir(), "docuzen-tools-home-"));
+  tempDirs.push(home);
+  await mkdir(join(home, ".docuzen"), { recursive: true });
+  await writeFile(join(home, ".docuzen", "config.toml"), '[harness]\ndefault = "pi"\n');
+  return home;
+}
+
+/**
+ * `realConfig: true` runs the sidecar against the developer's own HOME/config instead —
+ * only tools/demo wants that (it records a live agent turn).
+ */
+export async function launchTree(tree, { vitePort, docPath, realConfig = false }) {
   const env = { ...process.env, VITE_DOCD_PORT: "0", VITE_DOC_PATH: docPath };
-  delete env.LLM_API_KEY; // deterministic: agent harness unavailable on both sides
+  const sidecarEnv = { ...env };
+  if (!realConfig) {
+    delete sidecarEnv.LLM_API_KEY; // deterministic: agent harness unavailable on both sides
+    delete sidecarEnv.DOCUZEN_CONFIG_DIR;
+    sidecarEnv.HOME = await hermeticHome();
+    // Comment cards show the author; pin it so screenshots/reports don't bake in the
+    // OS username of whoever recorded them.
+    sidecarEnv.DOCUZEN_AUTHOR = "reviewer";
+  }
 
   const sidecar = spawn("npx", ["tsx", "packages/docd/src/server/main.ts", "--port", "0"],
-    { cwd: tree, env, stdio: ["ignore", "pipe", "inherit"] });
+    { cwd: tree, env: sidecarEnv, stdio: ["ignore", "pipe", "inherit"] });
   let port;
   try {
     [, port] = await waitForLine(sidecar, /DOCD_PORT=(\d+)/);

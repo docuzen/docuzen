@@ -22,17 +22,17 @@ describe("TaskDB", () => {
   });
 
   it("upserts and reads back a task", () => {
-    db.upsert({ threadId: "c0001", status: "queued", piSessionId: null });
+    db.upsert({ threadId: "c0001", status: "running", piSessionId: null });
     const row = db.get("c0001");
-    expect(row?.status).toBe("queued");
+    expect(row?.status).toBe("running");
     expect(row?.piSessionId).toBeNull();
   });
 
   it("upsert updates status and session id in place", () => {
-    db.upsert({ threadId: "c0001", status: "queued", piSessionId: null });
-    db.upsert({ threadId: "c0001", status: "running", piSessionId: "fake-1" });
+    db.upsert({ threadId: "c0001", status: "running", piSessionId: null });
+    db.upsert({ threadId: "c0001", status: "responded", piSessionId: "fake-1" });
     expect(db.list()).toHaveLength(1);
-    expect(db.get("c0001")?.status).toBe("running");
+    expect(db.get("c0001")?.status).toBe("responded");
     expect(db.get("c0001")?.piSessionId).toBe("fake-1");
   });
 
@@ -45,8 +45,8 @@ describe("TaskDB", () => {
   it("creates its parent directory if it does not exist yet", () => {
     // .had/ may not exist when the orchestrator first opens a fresh doc.
     const nested = new TaskDB(join(dir, ".plan.md.had", "state.db"));
-    nested.upsert({ threadId: "c0001", status: "queued", piSessionId: null });
-    expect(nested.get("c0001")?.status).toBe("queued");
+    nested.upsert({ threadId: "c0001", status: "running", piSessionId: null });
+    expect(nested.get("c0001")?.status).toBe("running");
     nested.close();
   });
 
@@ -64,7 +64,7 @@ describe("TaskDB", () => {
   });
 
   it("defaults errorText to null when omitted", () => {
-    db.upsert({ threadId: "c0001", status: "queued", piSessionId: null });
+    db.upsert({ threadId: "c0001", status: "running", piSessionId: null });
     expect(db.get("c0001")?.errorText).toBeNull();
   });
 

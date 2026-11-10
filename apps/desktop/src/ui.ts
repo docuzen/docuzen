@@ -238,3 +238,27 @@ export function proposalActions(deps: ProposalActionDeps, ids: ProposalActionIds
     }
   };
 }
+
+/**
+ * The persisted body of the most recently appended agent turn in `threadId` — used to
+ * re-render a just-completed streaming bubble from the source of truth. discuss/reply/
+ * panel's RPCs resolve with only `{ ok: boolean }` (no reply text — see protocol/rpc.ts),
+ * so this is the one round-trip that gets it; call it only after the RPC that appended
+ * the turn has resolved. Best-effort: returns undefined (never throws), so a caller
+ * wiring it into `bubble.done(finalText)` degrades to keeping the streamed text.
+ * Shared by chat.ts and surface.ts (which must not import each other).
+ */
+export async function lastAgentReply(
+  api: { getThread(p: { threadId: string }): Promise<{ turns: { role: string; body: string }[] }> },
+  getDocPath: () => string | undefined,
+  threadId: string,
+): Promise<string | undefined> {
+  if (!getDocPath()) return undefined;
+  try {
+    const thread = await api.getThread({ threadId });
+    const last = thread.turns[thread.turns.length - 1];
+    return last?.role === "agent" ? last.body : undefined;
+  } catch {
+    return undefined;
+  }
+}
