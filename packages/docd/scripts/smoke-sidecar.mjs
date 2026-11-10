@@ -34,7 +34,15 @@ delete env.DOCUZEN_CONFIG_DIR;
 delete env.PI_CODING_AGENT_DIR;
 const child = spawn(join(dir, "node"), [join(dir, "main.cjs"), "--port", "0"], { env });
 
-const timeout = setTimeout(() => fail("timed out waiting for DOCD_PORT"), 15_000);
+// Generous: an x64 artifact smoke-tested on an arm64 runner runs under Rosetta, whose
+// first launch translates the whole ~110 MB node binary before a line of JS runs. A
+// native start takes well under a second.
+const TIMEOUT_MS = Number(process.env.SMOKE_TIMEOUT_MS ?? 180_000);
+const startedAt = Date.now();
+const timeout = setTimeout(
+  () => fail(`timed out after ${TIMEOUT_MS / 1000}s waiting for DOCD_PORT\nstdout so far:\n${out || "(none)"}`),
+  TIMEOUT_MS,
+);
 
 function fail(msg) {
   console.error(`smoke FAILED: ${msg}`);
@@ -70,7 +78,9 @@ function probe(port) {
     if (!pi?.available) {
       fail(`pi harness did not come up inside the bundle: ${pi?.unavailableReason ?? "not registered"}\n${out}`);
     }
-    console.log(`smoke OK: listHarnesses -> ${res.result.length} harnesses on :${port}, pi live`);
+    console.log(
+      `smoke OK: listHarnesses -> ${res.result.length} harnesses on :${port}, pi live (${((Date.now() - startedAt) / 1000).toFixed(1)}s)`,
+    );
     process.exit(0);
   });
   ws.on("error", (e) => fail(e.message));
