@@ -48,7 +48,7 @@ jobs:
     # Both legs run on arm64 runners; x64 is a cross-compile (GitHub's free
     # Intel macOS runners are retired/retiring). Rosetta smokes the x64
     # artifact when available.
-    runs-on: macos-14
+    runs-on: macos-15 # arm64; macos-14 images were retired on 2026-11-02
     env:
       SIDECAR_ARCH: ${{ matrix.arch }}
       # secrets is not a valid context in step-level `if`; evaluate it here.
