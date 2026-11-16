@@ -78,6 +78,9 @@ pub fn run() {
             )
             .title("docuzen")
             .inner_size(1100.0, 760.0)
+            // Leave file drops to the page: the native handler would swallow them, and
+            // the document surfaces take dropped images themselves (doc-images.ts).
+            .disable_drag_drop_handler()
             .center();
             if !init_script.is_empty() {
                 win = win.initialization_script(&init_script);
@@ -98,6 +101,12 @@ pub fn run() {
                 .build()?;
 
             // File menu — the home for document actions.
+            let new_doc = MenuItemBuilder::with_id("new", "New Document…")
+                .accelerator("CmdOrCtrl+N")
+                .build(handle)?;
+            let insert_image = MenuItemBuilder::with_id("insert-image", "Insert Image…")
+                .accelerator("CmdOrCtrl+Shift+I")
+                .build(handle)?;
             let open = MenuItemBuilder::with_id("open", "Open…")
                 .accelerator("CmdOrCtrl+O")
                 .build(handle)?;
@@ -118,10 +127,12 @@ pub fn run() {
                     .accelerator("CmdOrCtrl+Shift+D")
                     .build(handle)?;
             let file_menu = SubmenuBuilder::new(handle, "File")
+                .item(&new_doc)
                 .item(&open)
                 .item(&save)
                 .item(&export)
                 .separator()
+                .item(&insert_image)
                 .item(&resolve_directives)
                 .separator()
                 .item(&settings)

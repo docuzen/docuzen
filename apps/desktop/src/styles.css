@@ -2067,3 +2067,16 @@ textarea {
 .had-mark.had-long.focus { background: rgba(120, 120, 140, 0.09) !important; }
 [data-had-range] { box-shadow: -8px 0 0 0 var(--had-range-bg, #fff), -11px 0 0 0 var(--had-range-color, #f06292); }
 [data-had-range][data-had-range-focus] { box-shadow: -7px 0 0 0 var(--had-range-bg, #fff), -12px 0 0 0 var(--had-range-color, #f06292); }
+
+/* Images in a markdown document: never wider than the page; a picture alone in its
+   paragraph (a dropped one) sits as its own block. */
+.editor .ProseMirror img {
+  max-width: 100%;
+  height: auto;
+  border-radius: 4px;
+  vertical-align: middle;
+}
+.editor .ProseMirror img.ProseMirror-selectednode {
+  outline: 2px solid var(--accent, #4c8dff);
+  outline-offset: 2px;
+}

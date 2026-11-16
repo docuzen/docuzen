@@ -121,4 +121,20 @@ describe("ws-server", () => {
     });
     expect(res.ok).toBe(false);
   });
+
+  it("serves a document's images over HTTP, and nothing else", async () => {
+    const png = join(dir, "pic one.png");
+    await writeFile(png, Buffer.from([1, 2, 3]));
+    const base = `http://127.0.0.1:${server.port}`;
+    const ok = await fetch(`${base}/image?path=${encodeURIComponent(png)}`);
+    expect(ok.status).toBe(200);
+    expect(ok.headers.get("content-type")).toBe("image/png");
+    expect(new Uint8Array(await ok.arrayBuffer())).toEqual(new Uint8Array([1, 2, 3]));
+    // Not an image: the markdown document itself is never served.
+    expect((await fetch(`${base}/image?path=${encodeURIComponent(docPath)}`)).status).toBe(400);
+    expect((await fetch(`${base}/image?path=${encodeURIComponent(join(dir, "missing.png"))}`)).status).toBe(404);
+    expect((await fetch(`${base}/image?path=relative.png`)).status).toBe(400);
+    expect((await fetch(`${base}/other`)).status).toBe(404);
+    expect((await fetch(`${base}/image?path=${encodeURIComponent(png)}`, { method: "POST" })).status).toBe(405);
+  });
 });

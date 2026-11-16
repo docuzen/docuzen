@@ -19,7 +19,8 @@ vi.mock("@tauri-apps/api/event", () => ({
 }));
 vi.mock("@tauri-apps/api/window", () => ({ getCurrentWindow: () => ({ setTitle: vi.fn(async () => {}) }) }));
 
-import { initShell, type ShellDeps } from "./shell.js";
+import * as dialog from "@tauri-apps/plugin-dialog";
+import { initShell, newDocPath, type ShellDeps } from "./shell.js";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const bodyHtml = /<body[^>]*>([\s\S]*)<\/body>/.exec(readFileSync(resolve(here, "..", "index.html"), "utf8"))![1];
@@ -244,6 +245,48 @@ describe("topbar harness badge", () => {
     await shell.refreshHarnessBadge();
     expect($("#harnessBadge").textContent).toContain("Pi");
     expect($("#harnessBadge").textContent).toContain("Opus");
+  });
+});
+
+describe("New document and Insert image", () => {
+  it("File > New Document creates the file where the user chose and opens it in a tab", async () => {
+    const { shell, api, deps } = setup();
+    const createDoc = vi.fn(async (p: { docPath: string }) => ({ docPath: p.docPath }));
+    (deps.api as Record<string, unknown>).createDoc = createDoc;
+    vi.mocked(dialog.save).mockResolvedValueOnce("/d/Untitled.md");
+    menu.fire("new");
+    await settle();
+    expect(vi.mocked(dialog.save).mock.calls.at(-1)![0]).toMatchObject({ defaultPath: "Untitled.md" });
+    expect(createDoc).toHaveBeenCalledWith({ docPath: "/d/Untitled.md" });
+    expect(shell.getDocPath()).toBe("/d/Untitled.md");
+    expect(api.openDoc).toHaveBeenCalledWith({ docPath: "/d/Untitled.md" });
+    expect(all(".tab").some((t) => t.textContent?.includes("Untitled.md"))).toBe(true);
+  });
+
+  it("defaults to markdown when the chosen name has no extension, keeps .html, and does nothing on cancel", async () => {
+    expect(newDocPath("/d/notes")).toBe("/d/notes.md");
+    expect(newDocPath("/d/report.html")).toBe("/d/report.html");
+    expect(newDocPath("/d/v1.2 draft")).toBe("/d/v1.2 draft.md");
+    const { shell, deps } = setup();
+    const createDoc = vi.fn(async (p: { docPath: string }) => ({ docPath: p.docPath }));
+    (deps.api as Record<string, unknown>).createDoc = createDoc;
+    vi.mocked(dialog.save).mockResolvedValueOnce(null);
+    menu.fire("new");
+    await settle();
+    expect(createDoc).not.toHaveBeenCalled();
+    expect(shell.getTabCount()).toBe(0);
+  });
+
+  it("File > Insert Image hands the picked files to the image store, and needs an open document", async () => {
+    const { shell, deps, log } = setup();
+    menu.fire("insert-image");
+    await settle();
+    expect(log.join("\n")).toContain("insert image: no doc open");
+    await shell.openInTab("/d/a.md");
+    vi.mocked(dialog.open).mockResolvedValueOnce(["/p/one.png", "/p/two.jpg"]);
+    menu.fire("insert-image");
+    await settle();
+    expect(deps.addImagePaths).toHaveBeenCalledWith(["/p/one.png", "/p/two.jpg"]);
   });
 });
 

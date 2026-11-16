@@ -10,6 +10,8 @@ export interface HadPaths {
   sessionsDir: string;
   versionsDir: string;
   versionsIndex: string;
+  /** Images dropped into the document (see assets.ts). */
+  assetsDir: string;
   stateDb: string;
   settings: string;
   threadFile: (id: string) => string;
@@ -33,6 +35,7 @@ export function hadPaths(docPath: string): HadPaths {
     sessionsDir,
     versionsDir,
     versionsIndex: join(versionsDir, "index.json"),
+    assetsDir: join(dir, "assets"),
     stateDb: join(dir, "state.db"),
     settings: join(dir, "settings.json"),
     threadFile: (id) => join(threadsDir, `${id}.md`),

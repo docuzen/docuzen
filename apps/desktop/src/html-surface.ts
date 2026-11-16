@@ -17,6 +17,17 @@ export interface HtmlSurfaceCallbacks {
 
 /** Marker attributes for elements we inject so serialization can strip them. */
 const BASE_ATTR = "data-had-base";
+/** Holds an image's authored `src` while the live one points at the sidecar (doc-images.ts). */
+export const IMG_SRC_ATTR = "data-had-src";
+
+/** Put every image's authored `src` back (the live one is a sidecar URL, never saved). */
+export function restoreHtmlImages(root: ParentNode): void {
+  for (const img of Array.from(root.querySelectorAll(`img[${IMG_SRC_ATTR}]`))) {
+    img.setAttribute("src", img.getAttribute(IMG_SRC_ATTR) ?? "");
+    img.removeAttribute(IMG_SRC_ATTR);
+    img.removeAttribute("data-had-fallback");
+  }
+}
 
 /**
  * Serialize a live iframe Document back to an HTML string, stripping editing
@@ -27,6 +38,7 @@ export function serializeDocument(doc: Document): string {
   const root = doc.documentElement.cloneNode(true) as HTMLElement;
   root.querySelectorAll(`[${BASE_ATTR}]`).forEach((n) => n.remove());
   root.querySelectorAll("[data-had-overlay]").forEach((n) => n.remove());
+  restoreHtmlImages(root);
   clearRangeBlocks(root); // long comments' margin-bar attributes on the document's own blocks
   // doc-zoom.ts's injected `:root { font-size: … }` style tag — a view-only zoom
   // preference, never part of the document's own saved HTML (mirrors data-had-overlay).

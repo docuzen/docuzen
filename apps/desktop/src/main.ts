@@ -48,7 +48,8 @@ import { initSearch } from "./search-panel.js";
 import { initChat } from "./chat.js";
 import { initProposals } from "./proposals.js";
 import { initDocZoom } from "./doc-zoom.js";
-import { connect } from "./rpc.js";
+import { connect, docdPort } from "./rpc.js";
+import { initDocImages } from "./doc-images.js";
 import { maybeShowFirstRun } from "./first-run.js";
 
 const logEl = document.querySelector<HTMLPreElement>("#log")!;
@@ -268,6 +269,21 @@ const chat = initChat({
   uncollapseLeftPane: () => shell.uncollapseLeftPane(),
 });
 
+// --- images: drop/paste into either surface, stored in the doc's .had/assets (doc-images.ts).
+const docImages = initDocImages({
+  rootEl: editorEl,
+  log,
+  reportError: (scope, e) => reportError(scope, e, log),
+  getEditor: () => editorRef ?? undefined,
+  getHtmlSurface: () => htmlSurface,
+  getDocPath: activeDocPath,
+  getFormat: activeFormat,
+  port: docdPort,
+  saveImage: (p) => api.saveImage(p),
+  readImage: (path) => api.readImage({ path }),
+  onHtmlEdited: () => shell.markActiveHtmlTabDirty(),
+});
+
 // --- in-document search UI (markdown + HTML iframe). See surface.ts's file header.
 const searchApi = initSearch({
   rootEl: editorEl,
@@ -287,6 +303,7 @@ const shell = initShell({
   getEditor: () => editorRef,
   getHtmlSurface: () => htmlSurface,
   rootEl: editorEl,
+  addImagePaths: (paths) => docImages.addPaths(paths),
   runResolveDirectives: chat.runResolveDirectives,
   refreshThreadModels: chat.refreshThreadModels,
   setDefaultModelKey: chat.setDefaultModelKey,
@@ -361,6 +378,7 @@ const htmlSurfaceApi = initHtmlSurface({
   handleZoomShortcut: docZoom.handleZoomShortcut,
   applyDocZoom: docZoom.applyToIframeDoc,
   wirePinchZoom: docZoom.wirePinchZoom,
+  wireHtmlImages: docImages.wireHtmlDocument,
   routeProposal: proposals.routeProposal,
   renderProposalHtml: proposals.renderProposalHtml,
   openDiffPanel: proposals.openDiffPanel,
@@ -424,6 +442,8 @@ async function init(): Promise<void> {
     log,
     getFormat: activeFormat,
     onMarkdownUpdated: onEditorMarkdownUpdated,
+    resolveImageSrc: docImages.resolve,
+    readImage: docImages.read,
     promoteToChat: chat.promoteToChat,
     onAnnotationJump: chat.jumpToAnnotation,
     onDirectiveJump: chat.jumpToDirective,

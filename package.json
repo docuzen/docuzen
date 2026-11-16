@@ -17,6 +17,7 @@
     "version:set": "node tools/version.mjs set",
     "parity": "node tools/parity/run.mjs",
     "visual": "node tools/visual/run.mjs",
+    "check:images": "node tools/visual/images.mjs",
     "drill:reconnect": "node tools/parity/reconnect-drill.mjs",
     "live": "node tools/live/run.mjs",
     "live:ui": "node tools/live/ui.mjs"
