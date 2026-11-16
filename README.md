@@ -18,6 +18,7 @@ docuzen is a desktop app for AI-native document review. You open a Markdown or H
 - **Version snapshots** — every accepted change is snapshotted; restore any prior version.
 - **Suggesting or Editing** — per document, choose whether agent edits wait for your approval or apply directly. Either way each one is recorded and versioned.
 - **Per-document settings** — harness, model, tool scope, edit mode, standing instructions, and web-search provider.
+- **Images** — drop or paste an image onto a markdown or HTML document (or **File → Insert Image…**); it is stored beside the review state in `.docuzen/<doc>.had/assets/` and linked from the document by a relative path.
 - **Portable `.hadz` bundles** — export a document with its full review history and re-import it elsewhere.
 
 ## Install (macOS)
@@ -62,7 +63,7 @@ docuzen is a Tauri desktop app (`apps/desktop`) backed by a Node sidecar, `docd`
 
 ## Limitations
 
-- The dev launcher opens the bundled sample document first; use **File → Open…** (`Cmd/Ctrl+O`) for your own docs.
+- The dev launcher opens the bundled sample document first; use **File → Open…** (`Cmd/Ctrl+O`) for your own docs, or **File → New Document…** (`Cmd/Ctrl+N`) to start one (markdown unless you name it `.html`).
 - Release builds are self-contained (the `docd` sidecar ships inside the app) but remain unsigned until code signing lands.
 - Live agent use needs a configured harness (Pi or Codex CLI); without one, discussion is disabled but everything else works.
 - Web search defaults to DuckDuckGo's keyless Instant Answer API; Brave and Tavily need API keys.

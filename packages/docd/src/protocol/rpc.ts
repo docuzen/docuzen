@@ -216,6 +216,21 @@ export interface RpcSchema {
     params: { hadzPath: string; destDir?: string };
     result: { docPath: string };
   };
+  /** Create a new document file with starter content (replaces an existing file). */
+  createDoc: {
+    params: { docPath: string };
+    result: { docPath: string };
+  };
+  /** An image file's bytes (the fallback when the webview cannot load it over HTTP). */
+  readImage: {
+    params: { path: string };
+    result: { mime: string; dataBase64: string };
+  };
+  /** Store an image in the doc's `.had/assets/`; `relPath` is what the doc links. */
+  saveImage: {
+    params: { docPath: string; name: string; dataBase64?: string; sourcePath?: string };
+    result: { path: string; relPath: string; name: string };
+  };
 }
 
 export type RpcMethod = keyof RpcSchema;

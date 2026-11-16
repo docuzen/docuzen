@@ -113,6 +113,10 @@ export interface ShellDeps {
   renderProposal: (p: ProposalView) => void;
   openDiffPanel: (p: ProposalView) => Promise<void>;
 
+  // doc-images.ts
+  /** Store images picked from disk and insert them at the caret. */
+  addImagePaths: (paths: string[]) => Promise<void>;
+
   // chat.ts
   resetChat: () => void;
   chatTurnWithAction: (label: string, onClick: () => void) => void;
@@ -188,6 +192,11 @@ export function filterOpenablePaths(paths: string[], log: (line: string) => void
   });
 }
 
+/** Path for a new document: markdown unless the chosen name is already .md/.markdown/.html/.htm. */
+export function newDocPath(picked: string): string {
+  return /\.(md|markdown|html|htm)$/i.test(picked) ? picked : `${picked}.md`;
+}
+
 export function initShell(deps: ShellDeps): ShellApi {
   // --- document actions, driven by the native File menu (see src-tauri menu) ---
   async function doSave(): Promise<void> {
@@ -260,6 +269,56 @@ export function initShell(deps: ShellDeps): ShellApi {
     await routeExternalPath(path, externalOpenIo);
   }
 
+  /** File ▸ New Document: pick where it lives, create it (markdown unless named .html), open it. */
+  async function doNew(): Promise<void> {
+    let picked: string | null;
+    try {
+      picked = await save({
+        title: "New document",
+        defaultPath: "Untitled.md",
+        filters: [
+          { name: "Markdown", extensions: ["md"] },
+          { name: "HTML", extensions: ["html"] },
+        ],
+      });
+    } catch (e) {
+      return void reportError("new document dialog", e, deps.log);
+    }
+    if (!picked) return void deps.log("new document canceled");
+    const docPath = newDocPath(picked);
+    try {
+      await deps.api.createDoc({ docPath });
+    } catch (e) {
+      return void reportError("new document", e, deps.log);
+    }
+    deps.log(`created ${docPath}`);
+    // Replacing a file that is already open: show the new content in its tab.
+    const existing = tabs.findIndex((t) => t.docPath === docPath);
+    if (existing >= 0) {
+      await activateTab(existing);
+      return void (await reloadActiveDoc());
+    }
+    await openInTab(docPath);
+  }
+
+  /** File ▸ Insert Image: the same result as dropping the files, placed at the caret. */
+  async function doInsertImage(): Promise<void> {
+    if (activeIdx < 0) return void deps.log("insert image: no doc open");
+    let picked: string | string[] | null;
+    try {
+      picked = await open({
+        title: "Insert image",
+        multiple: true,
+        filters: [{ name: "Images", extensions: ["png", "jpg", "jpeg", "gif", "webp", "svg", "avif", "bmp"] }],
+      });
+    } catch (e) {
+      return void reportError("insert image dialog", e, deps.log);
+    }
+    const paths = picked === null ? [] : Array.isArray(picked) ? picked : [picked];
+    if (!paths.length) return void deps.log("insert image canceled");
+    await deps.addImagePaths(paths);
+  }
+
   const externalOpenIo: ExternalOpenIo = {
     importHadz: (p) => deps.api.importHadz(p),
     openInTab,
@@ -292,6 +351,8 @@ export function initShell(deps: ShellDeps): ShellApi {
     // File-menu clicks (and their accelerators ⌘O / ⌘S / ⇧⌘E / ⌘W) arrive as events.
     void listen<string>("menu-action", (e) => {
       if (e.payload === "open") void doOpen();
+      else if (e.payload === "new") void doNew();
+      else if (e.payload === "insert-image") void doInsertImage();
       else if (e.payload === "save") void doSave();
       else if (e.payload === "export") void doExport();
       else if (e.payload === "close") void closeTab(activeIdx);
@@ -623,7 +684,7 @@ export function initShell(deps: ShellDeps): ShellApi {
     deps.showMarkdownSurface();
     setWindowTitle("docuzen");
     deps.resetChat(); // clears the comment registry, chat pane, AND the #comments margin list
-    deps.getEditor()?.action(replaceAll("# No document open\n\nUse File → Open (⌘O).\n"));
+    deps.getEditor()?.action(replaceAll("# No document open\n\nUse File → New Document (⌘N) or File → Open (⌘O).\n"));
     deps.getEditor()?.action((ctx) => {
       const view: EditorView = ctx.get(editorViewCtx);
       view.dispatch(view.state.tr.setMeta(deps.annoKey, "clear"));

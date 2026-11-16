@@ -22,6 +22,9 @@ import {
   restoreVersion,
   exportHadz,
   importHadz,
+  createDoc,
+  saveImage,
+  readImage,
   saveComment,
   resolveComment,
 } from "../had/index.js";
@@ -138,6 +141,9 @@ export class RpcHandler {
       readVersion: async (p) => ({ content: await readVersion(p.docPath, p.versionId) }),
       exportHadz: (p) => exportHadz(p.docPath, { versionId: p.versionId, outPath: p.outPath }),
       importHadz: (p) => importHadz(p.hadzPath, p.destDir),
+      createDoc: (p) => createDoc(p.docPath),
+      readImage: (p) => readImage(p.path),
+      saveImage: (p) => saveImage(p.docPath, { name: p.name, dataBase64: p.dataBase64, sourcePath: p.sourcePath }),
 
       // ---- annotations + comments ----
       createAnnotation: (p) => createAnnotation(p.docPath, p, { now: now(), defaultAuthor: this.deps.author }),

@@ -1,4 +1,9 @@
+import { createReadStream } from "node:fs";
+import { stat } from "node:fs/promises";
+import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
+import { isAbsolute } from "node:path";
 import { WebSocketServer } from "ws";
+import { imageMimeType } from "../had/assets.js";
 import type { AgentRunner } from "../agent/types.js";
 import type { HarnessRegistry } from "../agent/index.js";
 import { RpcHandler } from "../rpc/handler.js";
@@ -21,6 +26,39 @@ export interface RunningServer {
 }
 
 /**
+ * `GET /image?path=<absolute path>` — the one plain-HTTP route. The webview cannot load
+ * `file://` images (its page is not a file origin), so a document's images come through
+ * here. Images only, by extension: this is not a general file server. Served so that a
+ * direct navigation to it (an SVG, say) can run nothing.
+ */
+async function serveImage(req: IncomingMessage, res: ServerResponse): Promise<void> {
+  const fail = (status: number, message: string): void => {
+    res.writeHead(status, { "Content-Type": "text/plain; charset=utf-8" });
+    res.end(message);
+  };
+  if (req.method !== "GET" && req.method !== "HEAD") return fail(405, "method not allowed");
+  const url = new URL(req.url ?? "/", "http://127.0.0.1");
+  if (url.pathname !== "/image") return fail(404, "not found");
+  const path = url.searchParams.get("path") ?? "";
+  const type = imageMimeType(path);
+  if (!isAbsolute(path) || !type) return fail(400, "not an image path");
+  const info = await stat(path).catch(() => null);
+  if (!info?.isFile()) return fail(404, "no such image");
+  res.writeHead(200, {
+    "Content-Type": type,
+    "Content-Length": info.size,
+    "Cache-Control": "no-cache",
+    "X-Content-Type-Options": "nosniff",
+    "Content-Security-Policy": "default-src 'none'; style-src 'unsafe-inline'; sandbox",
+    "Cross-Origin-Resource-Policy": "cross-origin",
+  });
+  if (req.method === "HEAD") return void res.end();
+  createReadStream(path)
+    .on("error", () => res.destroy())
+    .pipe(res);
+}
+
+/**
  * Minimal WebSocket transport over RpcHandler. Each message is one RpcRequest
  * JSON; each reply is one RpcResponse JSON. Malformed input yields an error
  * response rather than crashing the connection.
@@ -31,7 +69,13 @@ export function startServer(opts: StartServerOptions): Promise<RunningServer> {
     now: opts.now,
     author: opts.author,
   });
-  const wss = new WebSocketServer({ port: opts.port ?? 0, host: opts.host ?? "127.0.0.1" });
+  const http = createServer((req, res) => {
+    void serveImage(req, res).catch(() => {
+      if (!res.headersSent) res.writeHead(500);
+      res.end();
+    });
+  });
+  const wss = new WebSocketServer({ server: http });
 
   wss.on("connection", (socket) => {
     socket.on("message", async (data) => {
@@ -53,16 +97,19 @@ export function startServer(opts: StartServerOptions): Promise<RunningServer> {
   });
 
   return new Promise((resolve, reject) => {
-    wss.on("error", reject);
-    wss.on("listening", () => {
-      const addr = wss.address();
+    http.on("error", reject);
+    http.listen(opts.port ?? 0, opts.host ?? "127.0.0.1", () => {
+      const addr = http.address();
       const port = typeof addr === "object" && addr ? addr.port : 0;
       resolve({
         port,
         close: () =>
           new Promise<void>((res) => {
             handler.closeAll();
-            wss.close(() => res());
+            for (const client of wss.clients) client.terminate();
+            wss.close();
+            http.closeAllConnections();
+            http.close(() => res());
           }),
       });
     });

@@ -78,6 +78,8 @@ export interface HtmlSurfaceDeps {
   applyDocZoom: (doc: Document) => void;
   /** Wire trackpad pinch (ctrlKey wheel + WebKit GestureEvent) onto the iframe's own document below — its own browsing context, so wheel/gesture events over its rendered content never reach the parent page and it needs its own listener, same reasoning as handleZoomShortcut/applyDocZoom just above. */
   wirePinchZoom: (target: EventTarget) => void;
+  /** Wire image drop/paste onto the iframe document and load its local images (doc-images.ts). */
+  wireHtmlImages: (doc: Document) => void;
 
   // proposals.ts
   routeProposal: (e: RpcEvent) => boolean;
@@ -620,6 +622,7 @@ ${LONG_RANGE_CSS}
     // menu from here too (a click on a mark re-opens it via the span's own handler).
     doc.addEventListener("mousedown", () => closeAnnoMenu(), true);
     doc.addEventListener("click", handleHtmlLinkClick);
+    deps.wireHtmlImages(doc); // drop/paste images + load the document's local ones
     if (doc.head && !doc.head.querySelector("style[data-had-overlay]")) {
       const style = doc.createElement("style");
       style.setAttribute("data-had-overlay", "");

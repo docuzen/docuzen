@@ -44,6 +44,7 @@ import { projectionOf, buildProjection, posRangeForOffsets } from "./anchor-map.
 import { openMermaidLightbox } from "./mermaid-lightbox.js";
 import { annotationIdAtPos, directiveOrdinalAtPos, type AnnotationRange, type PosRange } from "./click-jump.js";
 import type { Annotation } from "@ai-native-doc/docd/protocol";
+import { makeImageView, safeImageSchema } from "./doc-images.js";
 import { RANGE_ATTR, isLongRange, opaqueBackground } from "./long-range.js";
 
 // --- annotation decorations (overlay; auto-map through edits) ---
@@ -343,6 +344,10 @@ export interface EditorDeps {
   log: (line: string) => void;
   /** Reads the (still main.ts-owned) currentFormat global — used to gate directive redecoration. */
   getFormat: () => "markdown" | "html";
+  /** URL to load for an image `src` written in the active document (doc-images.ts). */
+  resolveImageSrc: (src: string) => string;
+  /** Fallback read of an image's bytes when the webview cannot load it over HTTP. */
+  readImage: (path: string) => Promise<{ mime: string; dataBase64: string }>;
   /** The markdownUpdated listener body — tabs/search/log bookkeeping still lives in main.ts. */
   onMarkdownUpdated: (markdown: string, prev: string) => void;
   promoteToChat: (id: string) => void | Promise<void>;
@@ -651,6 +656,8 @@ export async function initEditor(deps: EditorDeps): Promise<EditorApi> {
     .use(directivePlugin)
     .use(clickJumpPlugin)
     .use(mermaidView)
+    .use(safeImageSchema)
+    .use(makeImageView(deps.resolveImageSrc, deps.readImage))
     .create();
 
   /** Force the directive decorations to recompute (e.g. when the working flag flips). */
