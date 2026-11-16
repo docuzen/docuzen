@@ -2081,6 +2081,29 @@ textarea {
   outline-offset: 2px;
 }
 
+/* Links in a markdown document are editable text, so a plain click places the caret;
+   hovering says how to follow one (doc-links.ts). */
+.editor .ProseMirror a[href] { position: relative; }
+.editor .ProseMirror a[href]:hover::after {
+  content: "⌘-click to open";
+  position: absolute;
+  left: 0;
+  top: 100%;
+  z-index: 5;
+  margin-top: 3px;
+  padding: 2px 7px;
+  border-radius: 5px;
+  background: #24292f;
+  color: #fff;
+  font: 500 11px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  white-space: nowrap;
+  text-decoration: none;
+  pointer-events: none;
+  opacity: 0;
+  animation: linkhint 0.12s ease-out 0.45s forwards;
+}
+@keyframes linkhint { to { opacity: 0.94; } }
+
 /* A short message over the document (e.g. "Click Edit to add images"). */
 .docnotice {
   position: fixed;

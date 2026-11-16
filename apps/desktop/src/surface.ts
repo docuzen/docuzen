@@ -10,7 +10,6 @@ import type { Editor } from "@milkdown/kit/core";
 import { editorViewCtx } from "@milkdown/kit/core";
 import type { EditorView } from "@milkdown/kit/prose/view";
 import type { PluginKey } from "@milkdown/kit/prose/state";
-import { openPath, openUrl } from "@tauri-apps/plugin-opener";
 import { createAnchor, resolveAnchor } from "@ai-native-doc/docd/anchor";
 import type { TextQuoteAnchor } from "@ai-native-doc/docd/anchor";
 import type { Annotation, EditHunk, RpcEvent } from "@ai-native-doc/docd/protocol";
@@ -80,6 +79,8 @@ export interface HtmlSurfaceDeps {
   wirePinchZoom: (target: EventTarget) => void;
   /** Wire image drop/paste onto the iframe document and load its local images (doc-images.ts). */
   wireHtmlImages: (doc: Document) => void;
+  /** doc-links.ts: open a link as written in the document; `root` is where a #fragment is looked up. */
+  openLink: (href: string, root: ParentNode) => Promise<void>;
 
   // proposals.ts
   routeProposal: (e: RpcEvent) => boolean;
@@ -186,6 +187,8 @@ export function initHtmlSurface(deps: HtmlSurfaceDeps): HtmlSurfaceApi {
 
   /** CSS injected into the iframe so highlight/comment marks + badges render there. */
   const HAD_IFRAME_CSS = `
+body[contenteditable="true"] a[href] { position: relative; }
+body[contenteditable="true"] a[href]:hover::after { content: "⌘-click to open"; position: absolute; left: 0; top: 100%; z-index: 5; margin-top: 3px; padding: 2px 7px; border-radius: 5px; background: #24292f; color: #fff; font: 500 11px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; white-space: nowrap; text-decoration: none; pointer-events: none; }
 .had-mark { border-radius: 3px; }
 .had-mark.had-highlight { box-decoration-break: clone; -webkit-box-decoration-break: clone; }
 .had-mark.had-comment { box-decoration-break: clone; -webkit-box-decoration-break: clone; cursor: pointer; }
@@ -236,64 +239,21 @@ ${LONG_RANGE_CSS}
     return target?.closest?.("a[href]") as HTMLAnchorElement | null;
   }
 
-  function scrollHtmlHashLink(doc: Document, hash: string): void {
-    let id = hash.slice(1);
-    try {
-      id = decodeURIComponent(id);
-    } catch {
-      // Keep the raw fragment when the page authored an invalid escape sequence.
-    }
-    const target = doc.getElementById(id) ?? doc.getElementsByName(id)[0];
-    target?.scrollIntoView({ block: "start" });
-  }
-
-  function localPathFromFileUrl(url: URL): string {
-    const path = decodeURIComponent(url.pathname);
-    if (url.hostname) return `//${url.hostname}${path}`;
-    return /^\/[A-Za-z]:/.test(path) ? path.slice(1) : path;
-  }
-
-  async function openHtmlLink(url: URL): Promise<void> {
-    if (url.protocol === "file:") {
-      await openPath(localPathFromFileUrl(url));
-      return;
-    }
-    await openUrl(url.href);
-  }
-
   function handleHtmlLinkClick(e: MouseEvent): void {
     const doc = deps.getHtmlSurface()?.doc;
     const anchor = htmlLinkFromEvent(e);
     if (!doc || !anchor) return;
     if (e.button !== 0) return;
 
-    // In edit mode, keep links inert so a click places the caret instead of navigating.
-    if (htmlEditMode) {
-      e.preventDefault();
-      return;
-    }
-
-    const rawHref = anchor.getAttribute("href")?.trim();
-    if (!rawHref || rawHref.startsWith("javascript:")) return;
-
-    if (rawHref.startsWith("#")) {
-      e.preventDefault();
-      scrollHtmlHashLink(doc, rawHref);
-      return;
-    }
-
-    let url: URL;
-    try {
-      url = new URL(rawHref, doc.baseURI);
-    } catch {
-      deps.log(`open link failed: invalid URL "${rawHref}"`);
-      return;
-    }
-    if (!["http:", "https:", "mailto:", "tel:", "file:"].includes(url.protocol)) return;
-
+    // A page's own script-driven or empty anchors are its business, not a link to open.
+    const rawHref = anchor.getAttribute("href")?.trim() ?? "";
+    if (!rawHref || /^javascript:/i.test(rawHref)) return;
+    // Edit mode: a plain click places the caret; ⌘/Ctrl-click opens. Review mode: a click opens.
+    // The webview itself never navigates (that would replace the document in the frame).
     e.preventDefault();
+    if (htmlEditMode && !(e.metaKey || e.ctrlKey)) return;
     e.stopPropagation();
-    void openHtmlLink(url).catch((err) => reportError("open link", err, deps.log));
+    void deps.openLink(rawHref, doc);
   }
 
   /** Decorate one resolved annotation inside the iframe (highlight fill or comment tint + badge). */
@@ -355,6 +315,8 @@ ${LONG_RANGE_CSS}
     const frame = deps.getHtmlSurface()?.frameEl;
     for (const span of spans) {
       span.addEventListener("click", (e) => {
+        // ⌘/Ctrl-click on a link always opens the link, annotated or not (doc-links.ts).
+        if ((e.metaKey || e.ctrlKey) && span.closest("a[href]")) return;
         e.stopPropagation();
         if (e.metaKey || e.ctrlKey) {
           void deps.onAnnotationJump(id);

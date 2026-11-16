@@ -32,11 +32,10 @@ describe("HTML surface interactions", () => {
     expect(popoverConstruction).not.toContain('annotate("comment", deps.COMMENT_COLOR)');
   });
 
-  it("handles iframe link clicks with the Tauri opener instead of sandbox navigation", () => {
-    expect(htmlSurfaceUiSource).toContain('from "@tauri-apps/plugin-opener"');
+  it("handles iframe link clicks itself instead of sandbox navigation", () => {
     expect(htmlSurfaceUiSource).toContain("function handleHtmlLinkClick");
     expect(htmlSurfaceUiSource).toContain('doc.addEventListener("click", handleHtmlLinkClick');
-    expect(htmlSurfaceUiSource).toContain("openUrl(");
+    expect(htmlSurfaceUiSource).toContain("deps.openLink(");
   });
 
   it("lets user-initiated popups escape the iframe sandbox", () => {
