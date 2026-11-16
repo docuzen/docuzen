@@ -5,6 +5,10 @@
 // not the document. Every local image is fetched through the sidecar's `/image` route
 // instead, while the document itself keeps the plain relative path.
 //
+// An image is an edit. An HTML document opens in review mode, where nothing the user does
+// to the page changes it; images are refused there, with a visible pointer to the Edit
+// button, exactly as typing is. Markdown documents are always editable.
+//
 // Placement: a drop has no visible caret on either surface, so a dropped image becomes its
 // own block next to the block it was dropped on (above when dropped on its top half). A
 // paste or File ▸ Insert Image has a caret, so it goes there.
@@ -269,6 +273,8 @@ export interface DocImagesDeps {
   saveImage: (p: { name: string; dataBase64?: string; sourcePath?: string }) => Promise<SavedImageRef>;
   /** Fallback read of an image's bytes when the webview cannot load it over HTTP. */
   readImage: ImageReader;
+  /** Tell the user something they need to act on (shown over the document, not only logged). */
+  notify: (message: string) => void;
   /** An image was inserted into the HTML document (marks the tab dirty). */
   onHtmlEdited: () => void;
 }
@@ -282,6 +288,8 @@ export interface DocImagesApi {
   addFiles(files: File[], at: Placement): Promise<void>;
   /** Store images by filesystem path (the native picker) and insert them at the caret. */
   addPaths(paths: string[]): Promise<void>;
+  /** Whether the active document can take an image now; tells the user why when it cannot. */
+  canInsert(): boolean;
   /** Resolve an image `src` of the active document for display. */
   resolve(src: string): string;
   /** The RPC fallback reader (for the markdown image view). */
@@ -353,18 +361,39 @@ export function initDocImages(deps: DocImagesDeps): DocImagesApi {
     deps.onHtmlEdited();
   }
 
+  /** Why the active document cannot take an image right now, or null when it can. */
+  function refusal(): string | null {
+    if (!deps.getDocPath()) return "Open or create a document before adding an image.";
+    if (deps.getFormat() === "html" && !deps.getHtmlSurface()?.isEditable) {
+      return "This document is in review mode. Click Edit to add images.";
+    }
+    return null;
+  }
+
+  /** True (after telling the user why) when an image must not be added. */
+  function refused(): boolean {
+    const why = refusal();
+    if (why) {
+      deps.notify(why);
+      deps.log(`image not added: ${why}`);
+    }
+    return why !== null;
+  }
+
   async function insertSaved(docPath: string, saved: SavedImageRef[], at: Placement): Promise<void> {
     if (!saved.length) return;
     // The saves are async: only insert if the user is still on the document they dropped on.
     if (deps.getDocPath() !== docPath) return void deps.log("image saved, but the document changed before it could be inserted");
+    if (refused()) return; // Edit was switched off while the image was being stored
     if (deps.getFormat() === "html") insertHtml(saved, at);
     else insertMarkdown(saved, at);
     deps.log(`inserted ${saved.length} image(s): ${saved.map((s) => s.name).join(", ")}`);
   }
 
   async function addFiles(files: File[], at: Placement): Promise<void> {
+    if (refused()) return; // checked before anything is written to disk
     const docPath = deps.getDocPath();
-    if (!docPath) return void deps.log("image: open or create a document first");
+    if (!docPath) return;
     const saved: SavedImageRef[] = [];
     for (const file of files) {
       try {
@@ -377,8 +406,9 @@ export function initDocImages(deps: DocImagesDeps): DocImagesApi {
   }
 
   async function addPaths(paths: string[]): Promise<void> {
+    if (refused()) return;
     const docPath = deps.getDocPath();
-    if (!docPath) return void deps.log("image: open or create a document first");
+    if (!docPath) return;
     const saved: SavedImageRef[] = [];
     for (const sourcePath of paths) {
       try {
@@ -396,7 +426,7 @@ export function initDocImages(deps: DocImagesDeps): DocImagesApi {
       const ev = e as DragEvent;
       if (!dragHasFiles(ev.dataTransfer)) return;
       ev.preventDefault();
-      if (ev.dataTransfer) ev.dataTransfer.dropEffect = deps.getDocPath() ? "copy" : "none";
+      if (ev.dataTransfer) ev.dataTransfer.dropEffect = refusal() ? "none" : "copy";
     });
     target.addEventListener(
       "drop",
@@ -443,5 +473,5 @@ export function initDocImages(deps: DocImagesDeps): DocImagesApi {
     if (docPath) rewriteHtmlImages(doc, docPath, deps.port(), deps.readImage);
   }
 
-  return { wireHtmlDocument, addFiles, addPaths, resolve, read: deps.readImage };
+  return { wireHtmlDocument, addFiles, addPaths, canInsert: () => !refused(), resolve, read: deps.readImage };
 }

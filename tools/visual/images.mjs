@@ -95,8 +95,19 @@ async function run(engineName, engine, kind, vitePort) {
     await page.waitForTimeout(500);
     check("an existing relative image renders", await loaded(existing));
 
-    // Drop on the lower half of the first paragraph: the image becomes the next block.
     const firstPara = root.locator("p").first();
+    if (kind === "html") {
+      // HTML opens in review mode: a drop there changes nothing and says why.
+      await sendImage(firstPara, "drop", "Screen Shot.png");
+      await page.locator("#docNotice").waitFor({ state: "visible", timeout: 5_000 });
+      check(
+        "review mode refuses the image and points at Edit",
+        (await root.locator(IMG).count()) === 1 && /Edit/.test(await page.locator("#docNotice").innerText()) && !(await readdir(assets).catch(() => [])).length,
+      );
+      if (shotDir) await page.screenshot({ path: join(shotDir, `images-${engineName}-review.png`) });
+      await page.locator("#htmlEditToggle").click();
+    }
+    // Drop on the lower half of the first paragraph: the image becomes the next block.
     await sendImage(firstPara, "dragover", "Screen Shot.png");
     await sendImage(firstPara, "drop", "Screen Shot.png");
     await page.waitForFunction(

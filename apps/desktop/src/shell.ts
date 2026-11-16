@@ -116,6 +116,8 @@ export interface ShellDeps {
   // doc-images.ts
   /** Store images picked from disk and insert them at the caret. */
   addImagePaths: (paths: string[]) => Promise<void>;
+  /** Whether the active document can take an image now (tells the user why when it cannot). */
+  canInsertImage: () => boolean;
 
   // chat.ts
   resetChat: () => void;
@@ -304,6 +306,7 @@ export function initShell(deps: ShellDeps): ShellApi {
   /** File ▸ Insert Image: the same result as dropping the files, placed at the caret. */
   async function doInsertImage(): Promise<void> {
     if (activeIdx < 0) return void deps.log("insert image: no doc open");
+    if (!deps.canInsertImage()) return; // review mode: say so before opening a file picker
     let picked: string | string[] | null;
     try {
       picked = await open({
