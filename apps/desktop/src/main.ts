@@ -44,6 +44,8 @@ import {
 } from "./editor.js";
 import { initShell } from "./shell.js";
 import { initHtmlSurface } from "./surface.js";
+import { initDocLinks } from "./doc-links.js";
+import { openPath, openUrl, revealItemInDir } from "@tauri-apps/plugin-opener";
 import { initSearch } from "./search-panel.js";
 import { initChat } from "./chat.js";
 import { initProposals } from "./proposals.js";
@@ -302,6 +304,17 @@ const docImages = initDocImages({
   onHtmlEdited: () => shell.markActiveHtmlTabDirty(),
 });
 
+// --- links: ⌘-click (or a click in HTML review mode) opens what a link points at (doc-links.ts).
+const docLinks = initDocLinks({
+  getDocPath: activeDocPath,
+  openUrl: (url) => openUrl(url),
+  openPath: (path) => openPath(path),
+  revealPath: (path) => revealItemInDir(path),
+  openInTab: (path) => shell.openInTab(path),
+  notify: showDocNotice,
+  log,
+});
+
 // --- in-document search UI (markdown + HTML iframe). See surface.ts's file header.
 const searchApi = initSearch({
   rootEl: editorEl,
@@ -398,6 +411,7 @@ const htmlSurfaceApi = initHtmlSurface({
   applyDocZoom: docZoom.applyToIframeDoc,
   wirePinchZoom: docZoom.wirePinchZoom,
   wireHtmlImages: docImages.wireHtmlDocument,
+  openLink: docLinks.open,
   routeProposal: proposals.routeProposal,
   renderProposalHtml: proposals.renderProposalHtml,
   openDiffPanel: proposals.openDiffPanel,
@@ -463,6 +477,7 @@ async function init(): Promise<void> {
     onMarkdownUpdated: onEditorMarkdownUpdated,
     resolveImageSrc: docImages.resolve,
     readImage: docImages.read,
+    openLink: docLinks.open,
     promoteToChat: chat.promoteToChat,
     onAnnotationJump: chat.jumpToAnnotation,
     onDirectiveJump: chat.jumpToDirective,

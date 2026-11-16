@@ -348,6 +348,8 @@ export interface EditorDeps {
   resolveImageSrc: (src: string) => string;
   /** Fallback read of an image's bytes when the webview cannot load it over HTTP. */
   readImage: (path: string) => Promise<{ mime: string; dataBase64: string }>;
+  /** doc-links.ts: open a link as written in the document (⌘/Ctrl-click). */
+  openLink: (href: string, root: ParentNode) => Promise<void>;
   /** The markdownUpdated listener body — tabs/search/log bookkeeping still lives in main.ts. */
   onMarkdownUpdated: (markdown: string, prev: string) => void;
   promoteToChat: (id: string) => void | Promise<void>;
@@ -612,6 +614,14 @@ export async function initEditor(deps: EditorDeps): Promise<EditorApi> {
         props: {
           handleClick(view, pos, event) {
             if (!(event.metaKey || event.ctrlKey)) return false;
+            // A link wins over an annotation on the same text: ⌘-click always opens it.
+            const href = (event.target as Element | null)?.closest?.("a[href]")?.getAttribute("href");
+            if (href) {
+              event.preventDefault();
+              event.stopPropagation();
+              void deps.openLink(href, view.dom);
+              return true;
+            }
             const annoId = annotationIdAtPos(annotationRanges(view.state), pos);
             if (annoId) {
               event.preventDefault();
@@ -631,6 +641,12 @@ export async function initEditor(deps: EditorDeps): Promise<EditorApi> {
         },
       }),
   );
+
+  // ⌘/Ctrl-click on a link is handled by clickJumpPlugin; the webview must not also try to
+  // navigate or open a window for it.
+  deps.rootEl.addEventListener("click", (e) => {
+    if ((e.metaKey || e.ctrlKey) && (e.target as Element | null)?.closest?.("a[href]")) e.preventDefault();
+  });
 
   const editor = await Editor.make()
     .config((ctx) => {
