@@ -2080,3 +2080,22 @@ textarea {
   outline: 2px solid var(--accent, #4c8dff);
   outline-offset: 2px;
 }
+
+/* A short message over the document (e.g. "Click Edit to add images"). */
+.docnotice {
+  position: fixed;
+  left: 50%;
+  top: 108px;
+  transform: translateX(-50%);
+  z-index: 60;
+  max-width: min(420px, 80vw);
+  padding: 0.55rem 0.9rem;
+  border-radius: 8px;
+  background: var(--ink, #1f1b15);
+  color: var(--surface-strong, #fffdf8);
+  font-size: 0.85rem;
+  line-height: 1.35;
+  box-shadow: 0 6px 20px rgba(0, 0, 0, 0.18);
+  pointer-events: none;
+}
+.docnotice[hidden] { display: none; }

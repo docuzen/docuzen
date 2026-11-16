@@ -283,6 +283,13 @@ describe("New document and Insert image", () => {
     await settle();
     expect(log.join("\n")).toContain("insert image: no doc open");
     await shell.openInTab("/d/a.md");
+    // A document in review mode: no file picker is opened at all.
+    (deps as Record<string, unknown>).canInsertImage = () => false;
+    const opens = vi.mocked(dialog.open).mock.calls.length;
+    menu.fire("insert-image");
+    await settle();
+    expect(vi.mocked(dialog.open).mock.calls.length).toBe(opens);
+    (deps as Record<string, unknown>).canInsertImage = () => true;
     vi.mocked(dialog.open).mockResolvedValueOnce(["/p/one.png", "/p/two.jpg"]);
     menu.fire("insert-image");
     await settle();

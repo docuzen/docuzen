@@ -91,13 +91,16 @@ describe("HTML documents", () => {
     const saveImage = vi.fn(async (p: { name: string }) => ({ relPath: `.docuzen/report.html.had/assets/${p.name}`, name: p.name }));
     const readImage = vi.fn(async () => ({ mime: "image/png", dataBase64: "AQID" }));
     const onHtmlEdited = vi.fn();
+    const notify = vi.fn();
+    const mode = { editable: true };
     const log: string[] = [];
     const api = initDocImages({
       rootEl: document.createElement("div"),
       log: (l) => void log.push(l),
       reportError: (scope, e) => void log.push(`${scope}: ${String(e)}`),
       getEditor: () => undefined,
-      getHtmlSurface: () => ({ doc }) as never,
+      getHtmlSurface: () => ({ doc, get isEditable() { return mode.editable; } }) as never,
+      notify,
       getDocPath: () => "/d/report.html",
       getFormat: () => "html",
       port: () => PORT,
@@ -107,7 +110,7 @@ describe("HTML documents", () => {
       ...over,
     });
     api.wireHtmlDocument(doc);
-    return { api, saveImage, readImage, onHtmlEdited, log };
+    return { api, saveImage, readImage, onHtmlEdited, notify, mode, log };
   }
 
   function fire(doc: Document, type: string, key: "dataTransfer" | "clipboardData", data: unknown): Event {
@@ -136,6 +139,37 @@ describe("HTML documents", () => {
     expect(img.getAttribute("alt")).toBe("shot one");
     expect(onHtmlEdited).toHaveBeenCalled();
     expect(serializeDocument(doc)).toContain('src=".docuzen/report.html.had/assets/shot one.png"');
+  });
+
+  it("review mode takes no images by drop, paste or picker: nothing is stored, the user is told to click Edit", async () => {
+    const doc = htmlDoc("<h1>Title</h1><p>Body</p>");
+    const { api, saveImage, onHtmlEdited, notify, mode } = setup(doc);
+    mode.editable = false;
+    const before = doc.body.innerHTML;
+    const file = new File([new Uint8Array([1, 2, 3])], "shot.png", { type: "image/png" });
+    const drop = fire(doc, "drop", "dataTransfer", { types: ["Files"], files: [file] });
+    const paste = fire(doc, "paste", "clipboardData", { types: ["Files"], files: [file] });
+    await api.addPaths(["/p/photo.jpg"]);
+    await settle();
+    expect(drop.defaultPrevented).toBe(true); // still must not navigate the window to the file
+    expect(paste.defaultPrevented).toBe(true);
+    expect(saveImage).not.toHaveBeenCalled();
+    expect(onHtmlEdited).not.toHaveBeenCalled();
+    expect(doc.body.innerHTML).toBe(before);
+    expect(notify).toHaveBeenCalledTimes(3);
+    expect(notify.mock.calls[0][0]).toMatch(/review mode.*Edit/);
+    expect(api.canInsert()).toBe(false);
+    mode.editable = true;
+    expect(api.canInsert()).toBe(true);
+  });
+
+  it("does not insert if Edit is switched off while the image is being stored", async () => {
+    const doc = htmlDoc("<p>Body</p>");
+    const { mode } = setup(doc);
+    fire(doc, "drop", "dataTransfer", { types: ["Files"], files: [new File([new Uint8Array([1])], "a.png", { type: "image/png" })] });
+    mode.editable = false;
+    await settle();
+    expect(doc.querySelector("img")).toBeNull();
   });
 
   it("a non-image drop is refused without navigating away", async () => {

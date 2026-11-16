@@ -269,6 +269,23 @@ const chat = initChat({
   uncollapseLeftPane: () => shell.uncollapseLeftPane(),
 });
 
+/** A short message over the document that goes away by itself (the log is hidden by default). */
+let docNoticeTimer: ReturnType<typeof setTimeout> | undefined;
+function showDocNotice(message: string): void {
+  let box = document.querySelector<HTMLElement>("#docNotice");
+  if (!box) {
+    box = document.createElement("div");
+    box.id = "docNotice";
+    box.className = "docnotice";
+    box.setAttribute("role", "status");
+    document.body.appendChild(box);
+  }
+  box.textContent = message;
+  box.hidden = false;
+  clearTimeout(docNoticeTimer);
+  docNoticeTimer = setTimeout(() => (box.hidden = true), 4500);
+}
+
 // --- images: drop/paste into either surface, stored in the doc's .had/assets (doc-images.ts).
 const docImages = initDocImages({
   rootEl: editorEl,
@@ -281,6 +298,7 @@ const docImages = initDocImages({
   port: docdPort,
   saveImage: (p) => api.saveImage(p),
   readImage: (path) => api.readImage({ path }),
+  notify: showDocNotice,
   onHtmlEdited: () => shell.markActiveHtmlTabDirty(),
 });
 
@@ -304,6 +322,7 @@ const shell = initShell({
   getHtmlSurface: () => htmlSurface,
   rootEl: editorEl,
   addImagePaths: (paths) => docImages.addPaths(paths),
+  canInsertImage: () => docImages.canInsert(),
   runResolveDirectives: chat.runResolveDirectives,
   refreshThreadModels: chat.refreshThreadModels,
   setDefaultModelKey: chat.setDefaultModelKey,
