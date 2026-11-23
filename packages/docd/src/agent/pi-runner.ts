@@ -1,8 +1,12 @@
-import { dirname } from "node:path";
+import { statSync } from "node:fs";
+import { dirname, join } from "node:path";
 import {
   createAgentSession,
   defineTool,
+  DefaultResourceLoader,
+  getAgentDir,
   SessionManager,
+  SettingsManager,
   ModelRuntime,
 } from "@earendil-works/pi-coding-agent";
 // pi's schema lib is the unscoped `typebox` (v1.x), NOT `@sinclair/typebox` (v0.x);
@@ -23,6 +27,7 @@ import { resolveMcpToolchain, type PiMcpServerConfig } from "./mcp.js";
 import { createMcpProxyTool } from "./mcp-bridge.js";
 import { SessionStore } from "./runner-base.js";
 import { historySection, standingInstructionsSection } from "./prompt-sections.js";
+import { scopedFileTools } from "./scoped-file-tools.js";
 
 /** pi's history/standing-instructions phrasing (see prompt-sections.ts for the codex divergence). */
 const PI_HISTORY_LABELS = { agent: "agent", reviewer: "reviewer" };
@@ -68,10 +73,24 @@ interface PiEvent {
   finalError?: string;
 }
 interface PiSession {
-  prompt(text: string): Promise<unknown>;
+  /** `expandPromptTemplates: false` sends the text as typed: no extension commands, skills or templates. */
+  prompt(text: string, options?: { expandPromptTemplates?: boolean }): Promise<unknown>;
   subscribe(cb: (event: PiEvent) => void): unknown;
   /** Abort the current operation and wait for the agent to become idle. */
   abort?(): Promise<void>;
+  /** Release the session's listeners, timers and abort hooks. */
+  dispose?(): void;
+}
+
+/** One prompt queued or running on a session, registered under its thread's cancel key. */
+interface PendingRun {
+  entry: SessionEntry;
+  /** Set by cancel(): a run that hasn't started its prompt skips it; a running one is aborted. */
+  cancelled: boolean;
+  /** True once the prompt has been handed to pi. */
+  started: boolean;
+  /** True once a cancelled run's abort was repeated from its event stream (see createSession). */
+  abortResent?: boolean;
 }
 
 type PiSessionOptions = Record<string, unknown> & {
@@ -116,6 +135,11 @@ export interface SessionEntry {
   findings: ReviewFinding[];
   /** Serializes prompts: pi sessions are single-flight, so we queue. */
   chain: Promise<unknown>;
+  /** The thread this session answers for (ctx.cancelKey, docPath#threadId): every run on it,
+   * including later send()s, is stoppable through that key. */
+  cancelKey?: string;
+  /** The run whose prompt pi is executing, if any. */
+  active?: PendingRun;
 }
 
 /**
@@ -224,6 +248,56 @@ function sessionCwd(ctx: AgentContext): string {
   return ctx.scopeDir ?? (ctx.docPath ? dirname(ctx.docPath) : process.cwd());
 }
 
+/**
+ * Identity of pi's models.json as it is on disk now (inode, size, mtime), or "missing".
+ * Settings saves it by atomic rename, so every save gets a new inode.
+ */
+function modelsFileVersion(): string {
+  try {
+    const st = statSync(join(getAgentDir(), "models.json"));
+    return `${st.ino}:${st.size}:${st.mtimeMs}`;
+  } catch {
+    return "missing";
+  }
+}
+
+/**
+ * Settings and resources for a session whose cwd is the document's folder. Left to pi's
+ * defaults, createAgentSession trusts that folder as a pi project: it imports and runs
+ * `<cwd>/.pi/extensions/*` (and any extension or npm package `<cwd>/.pi/settings.json`
+ * names) inside docd, and loads the folder's prompt templates, skills, themes, SYSTEM.md,
+ * and every AGENTS.md/CLAUDE.md from it up to `/` into the system prompt. A document
+ * folder is untrusted, so none of that loads.
+ *
+ * Decision: pi's global config under ~/.pi/agent (extensions, settings.json, skills, prompt
+ * templates, AGENTS.md, SYSTEM.md) doesn't load either. Extensions there are written for
+ * pi as a coding agent and run with hooks on every request and tool call, so docuzen's
+ * guarantees (read-only tools, no document writes outside a reviewed proposal) could not
+ * hold with them; settings.json `packages` are npm-installed at session start. Only
+ * models.json and auth.json are read from there, through ModelRuntime.
+ */
+async function isolatedResources(cwd: string): Promise<{
+  settingsManager: SettingsManager;
+  resourceLoader: DefaultResourceLoader;
+}> {
+  const settingsManager = SettingsManager.inMemory({}, { projectTrusted: false });
+  const resourceLoader = new DefaultResourceLoader({
+    cwd,
+    agentDir: getAgentDir(),
+    settingsManager,
+    noExtensions: true,
+    noSkills: true,
+    noPromptTemplates: true,
+    noThemes: true,
+    noContextFiles: true,
+    // The global SYSTEM.md / APPEND_SYSTEM.md are read whatever the trust setting.
+    systemPromptOverride: () => undefined,
+    appendSystemPromptOverride: () => [],
+  });
+  await resourceLoader.reload();
+  return { settingsManager, resourceLoader };
+}
+
 function mcpPrompt(ctx: AgentContext): string[] {
   const mcp = resolveMcpToolchain(ctx.docToolchain, { scopeDir: sessionCwd(ctx) });
   if (!Object.keys(mcp.servers).length) return [];
@@ -248,23 +322,32 @@ function mcpPrompt(ctx: AgentContext): string[] {
  */
 export class PiRunner implements AgentRunner {
   private sessions = new SessionStore<SessionEntry>("pi");
-  /** Live sessions indexed by ctx.cancelKey (docPath#threadId), so cancel() can abort one. */
-  private byKey = new Map<string, SessionEntry>();
   /**
-   * pi's model + credential runtime (models.json, auth.json). Replaced wholesale when a
-   * requested model isn't found, so models added via Settings after startup resolve
-   * without a sidecar restart; sessions already created keep the runtime they started with.
+   * Runs queued or in flight, by cancel key (docPath#threadId), so cancel() stops every
+   * run of that thread. A run registers when it is asked for and leaves when it settles, so
+   * a thread's Discuss session and a one-shot Improve session can each be stopped.
+   */
+  private runsByKey = new Map<string, Set<PendingRun>>();
+  /**
+   * pi's model + credential runtime (models.json, auth.json), and the default model in it.
+   * Reloaded when models.json changes on disk (e.g. a key rotated or a model added in
+   * Settings) or a requested model isn't in it; sessions already created keep the runtime
+   * they started with.
    */
   private runtime: ModelRuntime;
   private model: unknown;
+  /** modelsFileVersion() when `runtime` was loaded. */
+  private modelsVersion: string;
 
   private constructor(
     private cfg: PiConfig,
     runtime: ModelRuntime,
     model: unknown,
+    modelsVersion: string,
   ) {
     this.runtime = runtime;
     this.model = model;
+    this.modelsVersion = modelsVersion;
   }
 
   /**
@@ -273,6 +356,7 @@ export class PiRunner implements AgentRunner {
    * isn't in pi's registry — the caller decides whether that is fatal.
    */
   static async create(cfg: PiConfig): Promise<PiRunner> {
+    const modelsVersion = modelsFileVersion();
     const runtime = await ModelRuntime.create();
     const model = runtime.getModel(cfg.provider, cfg.modelId);
     if (!model) {
@@ -280,14 +364,71 @@ export class PiRunner implements AgentRunner {
         `pi model ${cfg.provider}/${cfg.modelId} not found — check ~/.pi/agent/models.json`,
       );
     }
-    return new PiRunner(cfg, runtime, model);
+    return new PiRunner(cfg, runtime, model, modelsVersion);
+  }
+
+  /** Load models.json/auth.json afresh and re-resolve the default model from them. */
+  private async reloadModels(): Promise<void> {
+    const version = modelsFileVersion();
+    const runtime = await ModelRuntime.create();
+    this.runtime = runtime;
+    this.modelsVersion = version;
+    const model = runtime.getModel(this.cfg.provider, this.cfg.modelId);
+    if (model) this.model = model;
+    else {
+      console.warn(
+        `pi: default model ${this.cfg.provider}/${this.cfg.modelId} is no longer in models.json — keeping the one loaded earlier`,
+      );
+    }
   }
 
   async start(
     ctx: AgentContext,
     onToken?: TokenSink,
   ): Promise<{ sessionId: string; turn: AgentTurn }> {
+    // `entry` is created (and its first run registered under the cancel key) before the
+    // first await, so a Stop pressed while the session is still being created is kept and
+    // honoured once it exists. The propose_edit tool closes over `entry` to write the
+    // captured proposal back onto the in-flight turn; `session` is filled in once
+    // createAgentSession returns (no tool can run before then).
+    const entry: SessionEntry = {
+      session: undefined as unknown as PiSession,
+      sink: null,
+      buf: "",
+      think: "",
+      error: null,
+      aborted: false,
+      proposal: null,
+      findings: [],
+      chain: Promise.resolve(),
+      ...(ctx.cancelKey ? { cancelKey: ctx.cancelKey } : {}),
+    };
+    const firstRun = this.register(entry);
+    let sessionId: string;
+    try {
+      sessionId = await this.createSession(entry, ctx);
+    } catch (e) {
+      this.unregister(firstRun);
+      throw e;
+    }
+    let turn: AgentTurn;
+    try {
+      turn = await this.run(entry, this.firstPrompt(ctx), onToken, firstRun);
+    } catch (e) {
+      this.drop(sessionId); // the caller never learns this session's id
+      throw e;
+    }
+    // Improve's session is a one-shot rewrite: the orchestrator never continues it. A
+    // session stopped before its first prompt never received the document, so a later
+    // reply must start afresh (hasSession() → false) instead of continuing it.
+    if (ctx.improveMode || !firstRun.started) this.drop(sessionId);
+    return { sessionId, turn };
+  }
+
+  /** Create the pi session for `ctx` onto `entry` and store it. Returns its session id. */
+  private async createSession(entry: SessionEntry, ctx: AgentContext): Promise<string> {
     const cwd = sessionCwd(ctx);
+    if (modelsFileVersion() !== this.modelsVersion) await this.reloadModels();
     // pi's `tools` is an allowlist that also gates custom tools (AgentSession filters
     // customTools through isAllowedTool). toolPolicy() decides the per-mode tool set and
     // whether propose_edit is offered, so propose_edit exists only in proposal-style
@@ -305,28 +446,15 @@ export class PiRunner implements AgentRunner {
       const modelId = slash >= 0 ? ctx.modelId.slice(slash + 1) : ctx.modelId;
       let resolved = this.runtime.getModel(provider, modelId);
       if (!resolved) {
-        // Models added via Settings after startup aren't in the loaded runtime — load a
-        // fresh one from disk and retry before falling back.
-        this.runtime = await ModelRuntime.create();
+        // Not in the loaded runtime even though models.json looked unchanged (e.g. an
+        // edit within the file's timestamp resolution) — reload and retry before falling back.
+        await this.reloadModels();
         resolved = this.runtime.getModel(provider, modelId);
+        sessionModel = this.model; // the fallback, from the reloaded runtime
       }
       if (resolved) sessionModel = resolved;
       else console.warn(`pi: model ${ctx.modelId} not found in models.json — using default`);
     }
-    // `entry` is created first so the propose_edit tool can close over it and write
-    // the captured proposal back onto the in-flight turn. `session` is filled in once
-    // createAgentSession returns (the tool's execute() can't fire until then anyway).
-    const entry = {
-      session: undefined as unknown as PiSession,
-      sink: null,
-      buf: "",
-      think: "",
-      error: null,
-      aborted: false,
-      proposal: null,
-      findings: [],
-      chain: Promise.resolve(),
-    } as SessionEntry;
 
     const proposeEdit = defineTool({
       name: "propose_edit",
@@ -560,6 +688,8 @@ export class PiRunner implements AgentRunner {
     });
 
     const customTools = [
+      // pi's read/grep/ls/find, confined to the session's folder (same names replace pi's own).
+      ...scopedFileTools(cwd, cwd),
       ...(policy.offerProposeEdit ? [proposeEdit] : []),
       ...(policy.offerReviewFinding ? [addReviewFinding] : []),
       ...(policy.offerValidateHtml ? [validateHtmlTool] : []),
@@ -571,23 +701,35 @@ export class PiRunner implements AgentRunner {
       model: sessionModel,
       sessionManager: SessionManager.inMemory(cwd),
       modelRuntime: this.runtime,
+      ...(await isolatedResources(cwd)),
       tools,
       customTools,
       ...(Object.keys(mcp.servers).length ? { mcpServers: mcp.servers } : {}),
     }) as unknown as Parameters<typeof createAgentSession>[0])) as { session: PiSession };
 
     entry.session = created.session;
-    entry.session.subscribe((event) => captureSessionEvent(entry, event));
-
-    const sessionId = this.sessions.start(entry);
-    if (ctx.cancelKey) this.byKey.set(ctx.cancelKey, entry);
-    const turn = await this.run(entry, this.firstPrompt(ctx), onToken);
-    return { sessionId, turn };
+    entry.session.subscribe((event) => {
+      captureSessionEvent(entry, event);
+      // pi ignores abort() while it is still preparing a prompt, so a Stop that lands then
+      // is applied again as soon as the run reports anything.
+      const run = entry.active;
+      if (run?.cancelled && !run.abortResent) {
+        run.abortResent = true;
+        void entry.session.abort?.();
+      }
+    });
+    return this.sessions.start(entry);
   }
 
-  /** Abort the live session indexed by `cancelKey` (set on AgentContext by the orchestrator). */
+  /**
+   * Stop every run of the thread `cancelKey` names (set on AgentContext by the
+   * orchestrator): runs not yet prompting skip their prompt, running ones are aborted.
+   */
   async cancel(cancelKey: string): Promise<void> {
-    await this.byKey.get(cancelKey)?.session.abort?.();
+    const runs = [...(this.runsByKey.get(cancelKey) ?? [])];
+    for (const run of runs) run.cancelled = true;
+    const running = new Set(runs.filter((r) => r.started).map((r) => r.entry));
+    await Promise.all([...running].map((entry) => entry.session.abort?.()));
   }
 
   async send(sessionId: string, message: string, onToken?: TokenSink): Promise<AgentTurn> {
@@ -601,8 +743,39 @@ export class PiRunner implements AgentRunner {
     return this.sessions.has(sessionId);
   }
 
+  /** Register a run of `entry` under its cancel key until it settles. */
+  private register(entry: SessionEntry): PendingRun {
+    const run: PendingRun = { entry, cancelled: false, started: false };
+    if (entry.cancelKey) {
+      const runs = this.runsByKey.get(entry.cancelKey) ?? new Set<PendingRun>();
+      runs.add(run);
+      this.runsByKey.set(entry.cancelKey, runs);
+    }
+    return run;
+  }
+
+  private unregister(run: PendingRun): void {
+    const key = run.entry.cancelKey;
+    const runs = key ? this.runsByKey.get(key) : undefined;
+    if (!key || !runs) return;
+    runs.delete(run);
+    if (!runs.size) this.runsByKey.delete(key);
+  }
+
+  /** Forget a session and release what pi holds for it. */
+  private drop(sessionId: string): void {
+    const entry = this.sessions.get(sessionId);
+    this.sessions.delete(sessionId);
+    entry?.session.dispose?.();
+  }
+
   /** Serialize prompts per session — pi rejects overlapping turns. */
-  private run(entry: SessionEntry, prompt: string, onToken?: TokenSink): Promise<AgentTurn> {
+  private run(
+    entry: SessionEntry,
+    prompt: string,
+    onToken?: TokenSink,
+    pending: PendingRun = this.register(entry),
+  ): Promise<AgentTurn> {
     const task = entry.chain.then(async () => {
       entry.buf = "";
       entry.think = "";
@@ -613,7 +786,15 @@ export class PiRunner implements AgentRunner {
       entry.sink = onToken ?? null;
       let promptError: unknown;
       try {
-        await entry.session.prompt(prompt);
+        if (pending.cancelled) {
+          entry.aborted = true; // stopped before it began: settle like a Stop mid-turn
+        } else {
+          pending.started = true;
+          entry.active = pending;
+          // The reviewer's text goes to the model as typed: a reply starting with "/" is
+          // not an extension command, skill or prompt-template invocation.
+          await entry.session.prompt(prompt, { expandPromptTemplates: false });
+        }
       } catch (e) {
         // A rejected prompt() is itself a failure shape the SDK exposes (e.g. its own "no
         // model selected"/"no API key available" preflight checks) — captured here rather
@@ -622,11 +803,12 @@ export class PiRunner implements AgentRunner {
         promptError = e;
       } finally {
         entry.sink = null;
+        entry.active = undefined;
       }
       return finishTurn(entry, promptError);
     });
     entry.chain = task.catch(() => undefined); // keep the queue alive after errors
-    return task;
+    return task.finally(() => this.unregister(pending));
   }
 
   private firstPrompt(ctx: AgentContext): string {
