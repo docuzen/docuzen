@@ -28,32 +28,27 @@
 // turn/improve rendering) stays main.ts-owned — see main.ts's header — reached via
 // `deps.renderPreviewText`.
 //
-// diffToHunks: openDiffPanel used to run its OWN `diffLines(before, after)` call and
-// render one pane-line per diff part. It now calls docd's `diffToHunks` (the same
-// hunk-extraction the backend uses to turn a full-rewrite proposal into displayable
-// edits) via the browser-safe `@ai-native-doc/docd/diff` subpath (added alongside
-// the existing `/anchor` subpath — diff.ts's only runtime import is the `diff` npm
-// package, already a direct apps/desktop dependency; its `EditHunk` import is
-// `import type`, erased at compile time, so no orchestrator/Node-only code enters
-// the Vite bundle). Hunks carry no position info (`{oldText, newText}` only), so
-// `buildDiffPaneLines` reconstructs pane lines by locating each hunk back in the
-// original `before`/`after` strings with a forward-scanning cursor (the same
-// "locate sequentially, cursor never rewinds" trick `renderProposal` below already
-// uses for inline hunks) and treating the gaps between hunks as context, shown in
-// both panes. Verified equivalent to the old per-diffLines-part rendering across 8
-// fixture categories in diff-panel-equivalence.test.ts, with ONE documented,
-// CSS-invisible delta (a pure line-reorder can merge two context divs the old code
-// kept separate) — see that test file for the full trace.
+// The diff panel's lines come straight from `diffLines(before, after)` (the `diff`
+// package docd's `diffToHunks` is built on): one pane line per diff part, positioned by
+// the diff itself. It briefly rebuilt them from `diffToHunks`' position-less hunks by
+// searching for each hunk's text, which put a deleted line that repeats an earlier one
+// (a duplicated line, a blank line) at the earlier copy — see
+// diff-panel-equivalence.test.ts.
+//
+// Every proposal belongs to the document it was shown for: approve/reject name that
+// document, and the follow-up reload (or card cleanup) only happens while it is still
+// the one on screen, so a tab switch during the round-trip can't reload — and discard
+// the unsaved edits of — another document.
 
 import type { Editor } from "@milkdown/kit/core";
 import { editorViewCtx } from "@milkdown/kit/core";
 import type { EditorView } from "@milkdown/kit/prose/view";
 import type { PluginKey } from "@milkdown/kit/prose/state";
-import { diffToHunks } from "@ai-native-doc/docd/diff";
+import { diffLines } from "diff";
 import type { EditHunk } from "@ai-native-doc/docd/protocol";
 import type { RpcEvent } from "./rpc.js";
 import { projectionOf, posRangeForOffsets } from "./anchor-map.js";
-import { projectionNeedlesForHunk } from "./proposal-locate.js";
+import { projectionNeedlesForHtmlHunk, projectionNeedlesForHunk } from "./proposal-locate.js";
 import { buildHtmlProjection, rangeForOffsets } from "./html-projection.js";
 import { baseHrefForDoc, type HtmlSurface } from "./html-surface.js";
 import { buildHtmlSnippetPreviewContext, type HtmlSnippetPreviewContext } from "./html-snippet-preview.js";
@@ -108,6 +103,8 @@ export interface ProposalsApi {
     located: number;
   }): HTMLElement;
   openDiffPanel(p: ProposalView): Promise<void>;
+  /** Close the full-rewrite panel (the active document changed: it showed the previous one's rewrite). */
+  closeDiffPanel(): void;
   /** Exposed only so main.ts's shared Escape-key handler can also close it (see file header). */
   diffPanel: HTMLDivElement;
 }
@@ -118,44 +115,58 @@ interface DiffPaneLine {
 }
 
 /**
- * Reconstruct the two diff panes' line entries from docd's `diffToHunks(before,
- * after)`. Hunks carry no position info, so each hunk's `oldText`/`newText` is
- * located back in `before`/`after` with a forward-scanning cursor (hunks are
- * always found in strictly increasing order, since they're built from
- * `before`/`after`'s own consecutive diff regions) — the gap since the last match
- * becomes a context line shown in BOTH panes. Exported (not just used internally)
- * so diff-panel-equivalence.test.ts can compare it directly against the old
- * `diffLines`-per-part algorithm on fixture texts. See this file's header for the
- * one known, CSS-invisible rendering delta (line reorders).
+ * The two diff panes' line entries: one per `diffLines(before, after)` part — removed
+ * parts on the left, added on the right, unchanged parts as context in both. Exported
+ * so diff-panel-equivalence.test.ts can check it on fixture texts.
  */
 export function buildDiffPaneLines(before: string, after: string): { before: DiffPaneLine[]; after: DiffPaneLine[] } {
-  const hunks = diffToHunks(before, after);
   const beforeLines: DiffPaneLine[] = [];
   const afterLines: DiffPaneLine[] = [];
-  let bCursor = 0;
-  let aCursor = 0;
-  for (const h of hunks) {
-    if (h.oldText) {
-      const at = before.indexOf(h.oldText, bCursor);
-      const start = at >= 0 ? at : bCursor;
-      if (start > bCursor) beforeLines.push({ cls: "diff-ctx", value: before.slice(bCursor, start) });
-      beforeLines.push({ cls: "diff-del", value: h.oldText });
-      bCursor = start + h.oldText.length;
-    }
-    if (h.newText) {
-      const at = after.indexOf(h.newText, aCursor);
-      const start = at >= 0 ? at : aCursor;
-      if (start > aCursor) afterLines.push({ cls: "diff-ctx", value: after.slice(aCursor, start) });
-      afterLines.push({ cls: "diff-add", value: h.newText });
-      aCursor = start + h.newText.length;
+  for (const part of diffLines(before, after)) {
+    if (part.removed) beforeLines.push({ cls: "diff-del", value: part.value });
+    else if (part.added) afterLines.push({ cls: "diff-add", value: part.value });
+    else {
+      beforeLines.push({ cls: "diff-ctx", value: part.value });
+      afterLines.push({ cls: "diff-ctx", value: part.value });
     }
   }
-  if (bCursor < before.length) beforeLines.push({ cls: "diff-ctx", value: before.slice(bCursor) });
-  if (aCursor < after.length) afterLines.push({ cls: "diff-ctx", value: after.slice(aCursor) });
   return { before: beforeLines, after: afterLines };
 }
 
+/** Inline (phrasing) elements a block-level review card must not be put inside. */
+const INLINE_TAGS = new Set([
+  "A", "ABBR", "B", "BDI", "BDO", "CITE", "CODE", "DATA", "DEL", "DFN", "EM", "FONT", "I", "INS",
+  "KBD", "LABEL", "MARK", "Q", "S", "SAMP", "SMALL", "SPAN", "STRONG", "SUB", "SUP", "TIME", "U", "VAR",
+]);
+
+/**
+ * Put an HTML review card at the end of `range`, but never inside a link or an
+ * annotation mark (their click handlers — open the link, open the annotation menu —
+ * would get the card's clicks) nor inside inline formatting: it goes right after the
+ * outermost such element instead.
+ */
+function insertCardAt(range: Range, card: HTMLElement): void {
+  const end = range.endContainer;
+  const start = end.nodeType === Node.ELEMENT_NODE ? (end as Element) : end.parentElement;
+  let after: Element | null = null;
+  for (let el = start?.closest("a, .had-mark") ?? null; el; el = el.parentElement?.closest("a, .had-mark") ?? null) after = el;
+  for (let el = after ?? start; el && INLINE_TAGS.has(el.tagName); el = el.parentElement) after = el;
+  if (after) {
+    after.after(card);
+    return;
+  }
+  range.collapse(false);
+  range.insertNode(card);
+}
+
 export function initProposals(deps: ProposalsDeps): ProposalsApi {
+  /** `docPath` is still the document on screen. */
+  const showing = (docPath: string | undefined): boolean => !!docPath && deps.getDocPath() === docPath;
+  /** After approving a proposal of `docPath`: show the applied change — if that document is still on screen. */
+  async function reloadIfShowing(docPath: string | undefined): Promise<void> {
+    if (showing(docPath)) await deps.reloadActiveDoc();
+  }
+
   /** Remove a proposal's inline diff decorations (strike + widget) from the editor. */
   function clearProposal(id: string): void {
     deps.getEditor()?.action((ctx) => {
@@ -177,6 +188,7 @@ export function initProposals(deps: ProposalsDeps): ProposalsApi {
     rationale: string;
     count?: number;
   }): HTMLElement {
+    const docPath = deps.getDocPath();
     const box = el("div", { className: "proposal-inline", contentEditable: "false" });
 
     const n = p.count ?? 1;
@@ -208,7 +220,7 @@ export function initProposals(deps: ProposalsDeps): ProposalsApi {
         approveProposal: (ids) => deps.api.approveProposal(ids),
         rejectProposal: (ids) => deps.api.rejectProposal(ids),
         log: deps.log,
-        guard: () => !!deps.getDocPath(),
+        guard: () => !!docPath,
         // Embedded in a contentEditable ProseMirror node — without this, the
         // browser's own mousedown/click handling would fight the editor for
         // focus/selection before our handler runs.
@@ -216,19 +228,18 @@ export function initProposals(deps: ProposalsDeps): ProposalsApi {
           e.preventDefault();
           e.stopPropagation();
         },
-        disableOnApprove: [approve],
-        disableOnReject: [reject],
+        // Both buttons disable together (proposalActions' default): one answer per proposal.
         onApproved: async () => {
-          clearProposal(p.id);
-          await deps.reloadActiveDoc(); // shows the applied change; pending re-render excludes it
+          if (showing(docPath)) clearProposal(p.id);
+          await reloadIfShowing(docPath); // shows the applied change; pending re-render excludes it
           deps.log("proposal approved — applied to the document");
         },
         onRejected: () => {
-          clearProposal(p.id);
+          if (showing(docPath)) clearProposal(p.id);
           deps.log("rejected — the agent will be told on your next message");
         },
       },
-      { threadId: p.threadId, proposalId: p.id },
+      { threadId: p.threadId, proposalId: p.id, docPath },
     );
 
     acts.appendChild(approve);
@@ -257,6 +268,7 @@ export function initProposals(deps: ProposalsDeps): ProposalsApi {
     edits: { oldText: string; newText: string }[];
     located: number;
   }): HTMLElement {
+    const docPath = deps.getDocPath();
     const box = el("div", { className: "proposal-inline proposal-anchor-fallback", contentEditable: "false" });
 
     const title = el("div", { className: "plabel", textContent: "Review proposal" });
@@ -299,20 +311,20 @@ export function initProposals(deps: ProposalsDeps): ProposalsApi {
         approveProposal: (ids) => deps.api.approveProposal(ids),
         rejectProposal: (ids) => deps.api.rejectProposal(ids),
         log: deps.log,
-        guard: () => !!deps.getDocPath(),
+        guard: () => !!docPath,
         onApproved: async () => {
           box.remove();
-          clearProposal(p.id);
-          await deps.reloadActiveDoc();
+          if (showing(docPath)) clearProposal(p.id);
+          await reloadIfShowing(docPath);
           deps.log("proposal approved — applied to the document");
         },
         onRejected: () => {
           box.remove();
-          clearProposal(p.id);
+          if (showing(docPath)) clearProposal(p.id);
           deps.log("rejected — the agent will be told on your next message");
         },
       },
-      { threadId: p.threadId, proposalId: p.id },
+      { threadId: p.threadId, proposalId: p.id, docPath },
     );
 
     acts.append(approve, reject);
@@ -378,8 +390,10 @@ export function initProposals(deps: ProposalsDeps): ProposalsApi {
             }
           }
         }
-        if (fallbackAt === view.state.doc.content.size && /^directive-\d+$/.test(p.threadId)) {
-          const directive = deps.findDirectiveOffsets(proj.text)[0];
+        const directiveN = /^directive-(\d+)$/.exec(p.threadId);
+        if (fallbackAt === view.state.doc.content.size && directiveN) {
+          // directive-N is the N-th `[[ … ]]` in document order (1-based).
+          const directive = deps.findDirectiveOffsets(proj.text)[Number(directiveN[1]) - 1];
           if (directive) {
             const range = posRangeForOffsets(proj, directive.start, directive.end);
             if (range) fallbackAt = range.to;
@@ -412,10 +426,13 @@ export function initProposals(deps: ProposalsDeps): ProposalsApi {
 
   /** Build the in-iframe proposal review card (old→new preview + Approve/Reject). */
   function buildHtmlProposalCard(doc: Document, p: ProposalView, located: number): HTMLElement {
+    const docPath = deps.getDocPath();
     const box = doc.createElement("div");
     box.setAttribute("data-had-overlay", ""); // stripped on serialize + skipped by projection
     box.setAttribute("data-had-proposal", p.id);
     box.contentEditable = "false";
+    // The card's own clicks are its own: never the document's link or mark handlers'.
+    box.addEventListener("click", (e) => e.stopPropagation());
     box.style.cssText =
       "display:block;margin:8px 0;border:1px solid #bfe6c8;background:#f3fbf5;border-radius:8px;" +
       "padding:8px 10px;font:13px/1.45 -apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;color:#15301f;";
@@ -429,10 +446,7 @@ export function initProposals(deps: ProposalsDeps): ProposalsApi {
     label.style.cssText = "font-weight:700;color:#1f7a37;margin-bottom:4px;";
     box.appendChild(label);
 
-    const previewContext = buildHtmlSnippetPreviewContext(
-      doc,
-      deps.getDocPath() ? baseHrefForDoc(deps.getDocPath()!) : undefined,
-    );
+    const previewContext = buildHtmlSnippetPreviewContext(doc, docPath ? baseHrefForDoc(docPath) : undefined);
     for (const e of p.edits.slice(0, 3)) {
       if (e.oldText) {
         const o = doc.createElement("div");
@@ -471,17 +485,17 @@ export function initProposals(deps: ProposalsDeps): ProposalsApi {
         approveProposal: (ids) => deps.api.approveProposal(ids),
         rejectProposal: (ids) => deps.api.rejectProposal(ids),
         log: deps.log,
-        guard: () => !!deps.getDocPath(),
+        guard: () => !!docPath,
         onApproved: async () => {
           deps.log("proposal approved — applied to the document");
-          await deps.reloadActiveDoc(); // re-renders the iframe from disk with the edit applied
+          await reloadIfShowing(docPath); // re-renders the iframe from disk with the edit applied
         },
         onRejected: () => {
-          clearHtmlProposal(p.id);
+          if (showing(docPath)) clearHtmlProposal(p.id);
           deps.log("rejected — the agent will be told on your next message");
         },
       },
-      { threadId: p.threadId, proposalId: p.id },
+      { threadId: p.threadId, proposalId: p.id, docPath },
     );
     acts.append(approve, reject);
     box.appendChild(acts);
@@ -503,7 +517,7 @@ export function initProposals(deps: ProposalsDeps): ProposalsApi {
     let located = 0;
     for (const edit of p.edits) {
       if (!edit.oldText) continue;
-      for (const needle of projectionNeedlesForHunk(edit.oldText)) {
+      for (const needle of projectionNeedlesForHtmlHunk(edit.oldText)) {
         const at = proj.text.indexOf(needle);
         if (at >= 0) {
           located++;
@@ -526,12 +540,8 @@ export function initProposals(deps: ProposalsDeps): ProposalsApi {
     }
     const card = buildHtmlProposalCard(doc, p, located);
     const range = anchorEnd > 0 ? rangeForOffsets(doc, proj, Math.max(0, anchorEnd - 1), anchorEnd) : null;
-    if (range) {
-      range.collapse(false);
-      range.insertNode(card);
-    } else {
-      doc.body.appendChild(card);
-    }
+    if (range) insertCardAt(range, card);
+    else doc.body.appendChild(card);
   }
 
   /**
@@ -542,12 +552,15 @@ export function initProposals(deps: ProposalsDeps): ProposalsApi {
    */
   // Editing mode: the sidecar applied an edit on its own. Several can land close together
   // (parallel directives, a batch of review findings), so the reload is coalesced.
+  // The reload is for the document the edit was applied to: if the user has switched
+  // away by the time it fires, it is dropped (that document is re-read when reopened).
   let appliedReload: ReturnType<typeof setTimeout> | null = null;
   function scheduleAppliedReload(): void {
+    const docPath = deps.getDocPath();
     if (appliedReload) clearTimeout(appliedReload);
     appliedReload = setTimeout(() => {
       appliedReload = null;
-      void deps.reloadActiveDoc();
+      if (showing(docPath)) void deps.reloadActiveDoc();
     }, 150);
   }
 
@@ -625,9 +638,11 @@ export function initProposals(deps: ProposalsDeps): ProposalsApi {
    * both. Approve applies on the backend (which uses fullText verbatim) and reloads;
    * Reject defers; Close leaves the proposal pending and re-openable.
    */
+  let diffGen = 0;
   async function openDiffPanel(p: ProposalView): Promise<void> {
     const docPath = deps.getDocPath();
     if (!docPath || p.fullText === undefined) return;
+    const gen = ++diffGen;
     let before: string;
     try {
       before = (await deps.api.openDoc({ docPath })).text;
@@ -635,6 +650,8 @@ export function initProposals(deps: ProposalsDeps): ProposalsApi {
       deps.log(`diff panel: could not load current doc — ${String(e)}`);
       return;
     }
+    // A newer panel was asked for, or the user switched documents while this one loaded.
+    if (gen !== diffGen || !showing(docPath)) return;
     const after = p.fullText;
 
     diffWhyEl.textContent = p.rationale; // agent text — textContent
@@ -658,7 +675,7 @@ export function initProposals(deps: ProposalsDeps): ProposalsApi {
         log: deps.log,
         onApproved: async () => {
           closeDiffPanel();
-          await deps.reloadActiveDoc();
+          await reloadIfShowing(docPath);
           deps.log("rewrite approved — applied to the document");
         },
         onRejected: () => {
@@ -681,6 +698,10 @@ export function initProposals(deps: ProposalsDeps): ProposalsApi {
     buildProposalAddOnly,
     buildProposalFallbackWidget,
     openDiffPanel,
+    closeDiffPanel: () => {
+      diffGen++; // a panel still loading must not open over the next document either
+      closeDiffPanel();
+    },
     diffPanel,
   };
 }

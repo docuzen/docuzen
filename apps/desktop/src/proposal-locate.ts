@@ -1,3 +1,5 @@
+import { buildHtmlProjection } from "./html-projection.js";
+
 /** Normalize line endings without changing intentional content. */
 function normalizeLineEndings(text: string): string {
   return text.replace(/\r\n?/g, "\n");
@@ -38,4 +40,26 @@ export function projectionNeedlesForHunk(oldText: string): string[] {
   const rendered = markdownHunkToProjectionText(oldText);
   const unescaped = markdownEscapesToProjectionText(oldText);
   return [...new Set([exact, exact.trim(), rendered, unescaped].filter((s) => s.length > 0))];
+}
+
+/**
+ * The text an HTML fragment renders as, in the HTML surface's projection form (tags
+ * dropped, entities decoded, a block boundary as one "\n"). Parsed in an inert document,
+ * so nothing in the fragment loads or runs.
+ */
+export function htmlFragmentProjectionText(html: string): string {
+  const doc = document.implementation.createHTMLDocument("");
+  doc.body.innerHTML = html;
+  return buildHtmlProjection(doc.body).text;
+}
+
+/**
+ * Candidates for locating an HTML proposal hunk in the iframe's projection. An HTML
+ * hunk's `oldText` is a slice of the file's source — `<p>Some <b>bold</b> text</p>` —
+ * while the projection holds the rendered text, so besides the plain-text candidates
+ * this tries the fragment's own rendered text.
+ */
+export function projectionNeedlesForHtmlHunk(oldText: string): string[] {
+  const rendered = /<[a-z!/]/i.test(oldText) ? htmlFragmentProjectionText(oldText) : "";
+  return [...new Set([...projectionNeedlesForHunk(oldText), rendered, rendered.trim()].filter((s) => s.length > 0))];
 }

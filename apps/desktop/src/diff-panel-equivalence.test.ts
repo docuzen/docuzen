@@ -3,25 +3,19 @@ import { diffLines } from "diff";
 import { buildDiffPaneLines } from "./proposals.js";
 
 //
-// openDiffPanel's hand-rolled `diffLines`-based pane construction is being replaced
-// by proposals.ts's `buildDiffPaneLines`, which computes hunks via docd's shared
-// `diffToHunks` (before: apps/desktop independently ran `diffLines` and appended one
-// pane-line per diff PART; now it runs the SAME hunk-extraction the backend uses for
-// proposal generation, then reconstructs pane lines by locating each hunk's
-// oldText/newText back in the original strings — see proposals.ts's header comment
-// for why hunks don't carry position info and reconstruction is required at all).
-//
-// This test locally reimplements the OLD per-diffLines-part algorithm (the exact
-// body `openDiffPanel` used to run inline, before it was deleted) so the two can be
-// compared directly on fixture texts, per the plan's "prove equivalence or report
-// the exact rendering delta" requirement.
+// The diff panel builds its two panes from `diffLines(before, after)`: one pane line per
+// diff part (removed → left, added → right, unchanged → both). For a while it instead
+// rebuilt them from docd's `diffToHunks`, whose hunks carry no positions, by searching
+// for each hunk's text — which struck out the first copy of a repeated line instead of
+// the deleted one (M29). These tests pin the per-part construction on fixture texts,
+// against a local reference implementation of it.
 
 interface PaneLine {
   cls: "diff-ctx" | "diff-del" | "diff-add";
   value: string;
 }
 
-/** The exact algorithm `openDiffPanel` ran before this task — one pane-line per diffLines part. */
+/** Reference: one pane-line per diffLines part. */
 function oldBuildDiffPaneLines(before: string, after: string): { before: PaneLine[]; after: PaneLine[] } {
   const beforeLines: PaneLine[] = [];
   const afterLines: PaneLine[] = [];
@@ -36,7 +30,7 @@ function oldBuildDiffPaneLines(before: string, after: string): { before: PaneLin
   return { before: beforeLines, after: afterLines };
 }
 
-describe("diff panel pane construction: diffLines (old) vs diffToHunks (new)", () => {
+describe("diff panel pane construction: one pane line per diffLines part", () => {
   it("matches exactly for equal-line runs (no changes)", () => {
     const before = "A\nB\nC\n";
     const after = "A\nB\nC\n";
@@ -85,42 +79,31 @@ describe("diff panel pane construction: diffLines (old) vs diffToHunks (new)", (
     expect(buildDiffPaneLines("", "")).toEqual(oldBuildDiffPaneLines("", ""));
   });
 
-  // --- the one documented delta (see proposals.ts header + task-5-report.md) ---
-  it("KNOWN DELTA: a pure line reorder merges two separate context divs into one on the receiving pane", () => {
-    // "B" moves from position 2 to the end. diffLines emits FOUR parts here — ctx"A\n",
-    // removed"B\n", ctx"C\n", added"B\n" — because the LCS alignment finds "C" as a
-    // common anchor BETWEEN the deletion and the (unrelated, from the after-text's
-    // point of view) insertion. The old part-by-part renderer therefore puts TWO
-    // separate diff-ctx divs on the after pane ("A\n" then "C\n", split by the
-    // deletion event that only the before pane cares about). diffToHunks correctly
-    // reports this as two independent hunks (a pure delete + a pure insert, since a
-    // context part closes any in-progress hunk) — but hunks carry no position info to
-    // tell the after-side reconstruction that "A\n" and "C\n" were ever non-adjacent,
-    // so buildDiffPaneLines merges them into ONE contiguous "A\nC\n" ctx div.
-    //
-    // This is a real DOM-structure difference (3 after-pane divs vs 2), not a bug to
-    // fix: the CSS's `.diffpane .diff-ctx` rule (styles.css) sets only `color`, no
-    // background/border/margin, so two adjacent block-level ctx divs render pixel-
-    // identical to one div holding the same concatenated text — verified against
-    // styles.css before accepting this delta rather than chasing full positional
-    // equivalence.
+  it("matches exactly for a pure line reorder (no merged context divs)", () => {
+    // "B" moves from position 2 to the end. diffLines emits four parts — ctx"A\n",
+    // removed"B\n", ctx"C\n", added"B\n" — and the after pane keeps the two context
+    // parts as two lines. (The hunk-reconstruction version merged them into one div.)
     const before = "A\nB\nC\n";
     const after = "A\nC\nB\n";
-    const oldResult = oldBuildDiffPaneLines(before, after);
-    const newResult = buildDiffPaneLines(before, after);
+    expect(buildDiffPaneLines(before, after)).toEqual(oldBuildDiffPaneLines(before, after));
+  });
 
-    expect(oldResult.after).toEqual([
-      { cls: "diff-ctx", value: "A\n" },
-      { cls: "diff-ctx", value: "C\n" },
-      { cls: "diff-add", value: "B\n" },
+  // M29: rebuilding the panes by searching for each hunk's text found the FIRST copy of
+  // a line that appears more than once, so the wrong line was struck out.
+  it("strikes the deleted copy of a repeated line, not the first copy", () => {
+    const panes = buildDiffPaneLines("A\nB\nA\n", "A\nB\n");
+    expect(panes.before).toEqual([
+      { cls: "diff-ctx", value: "A\nB\n" },
+      { cls: "diff-del", value: "A\n" },
     ]);
-    expect(newResult.after).toEqual([
-      { cls: "diff-ctx", value: "A\nC\n" },
-      { cls: "diff-add", value: "B\n" },
-    ]);
-    // Concatenated text (what actually renders) is identical either way.
-    expect(newResult.after.map((l) => l.value).join("")).toBe(oldResult.after.map((l) => l.value).join(""));
-    // The before pane (which the deletion actually touches) is unaffected.
-    expect(newResult.before).toEqual(oldResult.before);
+    expect(panes.after).toEqual([{ cls: "diff-ctx", value: "A\nB\n" }]);
+  });
+
+  it("strikes a deleted blank line where it was, not at the first blank line", () => {
+    const before = "# T\n\nintro\n\n\nend\n";
+    const after = "# T\n\nintro\n\nend\n";
+    expect(buildDiffPaneLines(before, after)).toEqual(oldBuildDiffPaneLines(before, after));
+    const del = buildDiffPaneLines(before, after).before.findIndex((l) => l.cls === "diff-del");
+    expect(buildDiffPaneLines(before, after).before.slice(0, del).map((l) => l.value).join("")).toContain("intro");
   });
 });
