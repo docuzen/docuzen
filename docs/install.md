@@ -211,6 +211,7 @@ Useful environment variables:
 | `LLM_PROVIDER` | sidecar | `litellm` | Provider key in `~/.pi/agent/models.json`. |
 | `LLM_MODEL` | sidecar/dev launcher | `gpt-5.5` | Model id under the provider. |
 | `DOCD_PORT` | dev launcher | `8137` | Fixed sidecar port passed to Vite. |
+| `DOCD_TOKEN` | sidecar | random per start | Launch token every WebSocket and `/image` request must carry. The app and the dev launcher set it; when unset, the sidecar makes one and prints `DOCD_TOKEN=<token>` before `DOCD_PORT=`. |
 | `DOCUZEN_AUTHOR` | sidecar | OS username | Author name for human comments/turns. |
 | `BRAVE_API_KEY` | web search | unset | Required only when Brave search is selected. |
 | `TAVILY_API_KEY` | web search | unset | Required only when Tavily search is selected. |
@@ -240,9 +241,11 @@ This uses the Tauri config:
 - `npx tsx watch packages/docd/src/server/main.ts --port ${DOCD_PORT:-8137}`
 - `npx vite` in `apps/desktop`
 
-It injects these frontend variables:
+It makes one launch token, gives it to the sidecar as `DOCD_TOKEN`, and injects
+these frontend variables:
 
 - `VITE_DOCD_PORT=${DOCD_PORT:-8137}`
+- `VITE_DOCD_TOKEN=<the same token>`
 - `VITE_DOC_PATH=apps/desktop/sample/plan-rate-limiting.md`
 
 When launched through the CLI, `DOCUZEN_DOC_PATH=<file>` overrides the sample
@@ -393,6 +396,9 @@ The frontend cannot reach the sidecar.
 - Start through `cd apps/desktop && npm run tauri dev`, not plain `npm run dev`.
 - If you changed `DOCD_PORT`, restart the full Tauri dev process so Vite receives
   the matching `VITE_DOCD_PORT`.
+- A sidecar started on its own (for example `npm run dev:server`) prints its own
+  `DOCD_TOKEN=`; a page opened without that token is refused. Open the page with
+  `?docdPort=<port>&docdToken=<token>`, or start both through `npm run dev:all`.
 - Make sure nothing else is using port `8137`, or run with another port:
 
 ```bash
