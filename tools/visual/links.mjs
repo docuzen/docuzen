@@ -9,7 +9,7 @@
 //   node tools/visual/links.mjs            # both engines
 //   ENGINE=webkit node tools/visual/links.mjs
 import { chromium, webkit } from "playwright";
-import { mkdtemp, readFile, writeFile, rm } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, symlink, writeFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { resolve, dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -26,7 +26,7 @@ const MD = `# Reading list
 | --- | --- |
 | [\`001_001\`](papers/001_001.pdf) | FunSearch |
 
-See the [plan](other%20plan.md) and jump to [the end](#the-end).
+See the [plan](other%20plan.md) and jump to [the end](#the-end). Also [the notes](notes.txt).
 
 ${filler.join("\n\n")}
 
@@ -39,7 +39,7 @@ const HTML = `<!doctype html>
 <body>
 <h1>Reading list</h1>
 <table><tr><td><a href="papers/001_001.pdf"><code>001_001</code></a></td><td>FunSearch</td></tr></table>
-<p>See the <a href="other%20plan.md">plan</a>.</p>
+<p>See the <a href="other%20plan.md">plan</a>. Also <a href="notes.txt">the notes</a>.</p>
 </body></html>
 `;
 
@@ -56,6 +56,11 @@ async function run(engineName, engine, kind, vitePort) {
   const source = kind === "md" ? MD : HTML;
   await writeFile(docPath, source);
   await writeFile(join(dir, "other plan.md"), "# The other plan\n\nHello.\n");
+  await mkdir(join(dir, "papers"));
+  await writeFile(join(dir, "papers", "001_001.pdf"), "%PDF-1.4\n");
+  // A link named like a text file that is really a symlink to a script (never run here).
+  await writeFile(join(dir, "run.command"), "#!/bin/sh\necho hi\n", { mode: 0o755 });
+  await symlink(join(dir, "run.command"), join(dir, "notes.txt"));
   const srv = await launchTree(repoRoot, { vitePort, docPath });
   const browser = await engine.launch();
   try {
@@ -92,6 +97,17 @@ async function run(engineName, engine, kind, vitePort) {
     await notice.waitFor({ state: "visible", timeout: 5_000 }).catch(() => {});
     check("editable: ⌘-click hands the file to the opener", (await noticeText()).includes("001_001.pdf"), await noticeText());
     if (shotDir) await page.screenshot({ path: join(shotDir, `links-${engineName}-${kind}.png`) });
+    await clearNotice();
+
+    // A symlink named notes.txt that points at a script is shown in Finder, never opened.
+    // (Outside the app there is no Finder either: the notice names the reveal, not an open.)
+    await root.locator("a", { hasText: "the notes" }).click({ modifiers: ["Meta"] });
+    await notice.waitFor({ state: "visible", timeout: 5_000 }).catch(() => {});
+    check(
+      "⌘-click on a document-named symlink to a script reveals the script instead of opening it",
+      /show run\.command in Finder|run\.command.*shown in Finder/.test(await noticeText()),
+      await noticeText(),
+    );
     await clearNotice();
 
     if (kind === "md") {

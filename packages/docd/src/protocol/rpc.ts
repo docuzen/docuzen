@@ -231,6 +231,11 @@ export interface RpcSchema {
     params: { docPath: string; name: string; dataBase64?: string; sourcePath?: string };
     result: { path: string; relPath: string; name: string };
   };
+  /** What a local path a document links to really is, symlinks resolved (doc-links.ts). */
+  inspectPath: {
+    params: { path: string };
+    result: { realPath: string | null; kind: "file" | "directory" | "other" | "missing" };
+  };
 }
 
 export type RpcMethod = keyof RpcSchema;

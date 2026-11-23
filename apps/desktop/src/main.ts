@@ -281,6 +281,7 @@ const docLinks = initDocLinks({
   openUrl: (url) => openUrl(url),
   openPath: (path) => openPath(path),
   revealPath: (path) => revealItemInDir(path),
+  inspectPath: (path) => api.inspectPath({ path }),
   openInTab: (path) => shell.openInTab(path),
   notify: showDocNotice,
   log,
