@@ -130,22 +130,6 @@ export function buildVersionPickerModel(
 
   for (const siblings of children.values()) siblings.sort(byCreated);
 
-  const threadLane = new Map<string, number>();
-  let nextLane = 0;
-  const assignLane = (thread: VersionPickerThreadNode, ancestors = new Set<string>()): void => {
-    if (threadLane.has(thread.id) || ancestors.has(thread.id)) return;
-    threadLane.set(thread.id, nextLane++);
-    const nextAncestors = new Set(ancestors);
-    nextAncestors.add(thread.id);
-    for (const child of children.get(thread.id) ?? []) assignLane(child, nextAncestors);
-  };
-
-  const roots = threads
-    .filter((thread) => !thread.parent || !threadsById.has(thread.parent) || thread.parent === thread.id)
-    .sort(byCreated);
-  for (const root of roots) assignLane(root);
-  for (const thread of [...threads].sort(byCreated)) assignLane(thread);
-
   const branchTargetsByVersion = new Map<string, VersionPickerThreadNode[]>();
   for (const thread of threads) {
     if (!thread.baseVersion) continue;
@@ -166,6 +150,33 @@ export function buildVersionPickerModel(
     if (target?.parent) return threadsById.get(target.parent);
     return branchTargetsByVersion.get(version.id)?.[0];
   };
+
+  // Only threads that own a row get a lane (a branch edge always ends on its own thread's
+  // rows, so that covers branches too). A document's other discussions — often dozens of
+  // review comments that never saved a version — would otherwise each widen the graph.
+  const withRows = new Set<string>();
+  for (const version of versions) {
+    const context = contextFor(version);
+    if (context) withRows.add(context.id);
+  }
+
+  const threadLane = new Map<string, number>();
+  const visited = new Set<string>();
+  let nextLane = 0;
+  const assignLane = (thread: VersionPickerThreadNode, ancestors = new Set<string>()): void => {
+    if (visited.has(thread.id) || ancestors.has(thread.id)) return;
+    visited.add(thread.id);
+    if (withRows.has(thread.id)) threadLane.set(thread.id, nextLane++);
+    const nextAncestors = new Set(ancestors);
+    nextAncestors.add(thread.id);
+    for (const child of children.get(thread.id) ?? []) assignLane(child, nextAncestors);
+  };
+
+  const roots = threads
+    .filter((thread) => !thread.parent || !threadsById.has(thread.parent) || thread.parent === thread.id)
+    .sort(byCreated);
+  for (const root of roots) assignLane(root);
+  for (const thread of [...threads].sort(byCreated)) assignLane(thread);
 
   const branchTargetFor = (thread: VersionPickerThreadNode): VersionPickerBranchTarget => {
     return {

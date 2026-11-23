@@ -172,4 +172,66 @@ describe("version picker graph model", () => {
       ]),
     );
   });
+
+  it("gives lanes only to threads that have a row, however many discussions the document has", () => {
+    const comments = Array.from({ length: 30 }, (_, i) => ({
+      id: `c${String(i + 1).padStart(4, "0")}`,
+      title: `Comment ${i + 1}`,
+      turnCount: 1,
+      status: "open",
+      createdAt: `2026-06-01T00:00:${String(i).padStart(2, "0")}.000Z`,
+    }));
+    const model = buildVersionPickerModel(
+      [
+        { id: "v0001", cause: "manual-save", timestamp: "2026-06-01T10:00:00.000Z" },
+        { id: "v0002", cause: "agent-edit", thread: "c0020", timestamp: "2026-06-01T10:01:00.000Z" },
+        { id: "v0003", cause: "manual-save", timestamp: "2026-06-01T10:02:00.000Z" },
+      ],
+      comments,
+    );
+
+    expect(model.graphRows.every((row) => row.laneCount <= 2)).toBe(true);
+    expect(model.graphRows.find((row) => row.id === "v0002")?.lane).toBe(0);
+  });
+
+  it("keeps a lane for a branch thread that has its own rows", () => {
+    const model = buildVersionPickerModel(
+      [
+        { id: "v0001", cause: "manual-save", timestamp: "2026-06-01T10:00:00.000Z" },
+        { id: "v0002", cause: "turn-base", thread: "c0001", timestamp: "2026-06-01T10:01:00.000Z" },
+        { id: "v0003", cause: "agent-edit", thread: "c0009", timestamp: "2026-06-01T10:02:00.000Z" },
+      ],
+      [
+        { id: "c0001", title: "Root", turnCount: 2, status: "open", createdAt: "2026-06-01T00:00:00.000Z" },
+        ...Array.from({ length: 6 }, (_, i) => ({
+          id: `c000${i + 2}`,
+          title: `Unrelated ${i}`,
+          turnCount: 1,
+          status: "open",
+          createdAt: `2026-06-01T00:01:0${i}.000Z`,
+        })),
+        {
+          id: "c0009",
+          parent: "c0001",
+          branchFromTurn: 1,
+          baseVersion: "v0002",
+          baseDoc: "at-turn",
+          title: "Branch",
+          turnCount: 1,
+          status: "open",
+          createdAt: "2026-06-02T00:00:00.000Z",
+        },
+      ],
+    );
+
+    expect(model.graphRows.map((row) => [row.id, row.lane])).toEqual([
+      ["v0003", 1],
+      ["v0002", 0],
+      ["v0001", 0],
+    ]);
+    expect(model.graphRows[0].laneCount).toBe(2);
+    expect(model.graphRows.find((row) => row.id === "v0002")?.graphCells).toEqual(
+      expect.arrayContaining([expect.objectContaining({ lane: 0, hasNode: true, branchToLanes: [1] })]),
+    );
+  });
 });
