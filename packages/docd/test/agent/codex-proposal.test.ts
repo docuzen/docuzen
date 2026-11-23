@@ -120,6 +120,32 @@ describe("extractCodexProposal", () => {
     expect(result.reply).toBe("Proposed an edit.");
   });
 
+  it("keeps a proposal whose edited text itself contains a ```json fence", () => {
+    // Editing a Markdown doc's JSON example: the hunk text carries its own ```json fence,
+    // escaped inside the JSON string. Only the line-anchored outer fence opens the block.
+    const edit = {
+      rationale: "Fix the example",
+      hunks: [
+        {
+          oldText: '```json\n{"retries": "3"}\n```',
+          newText: '```json\n{"retries": 3}\n```',
+        },
+      ],
+    };
+    const reply = "Fixed the config example.\n```json\n" + JSON.stringify(edit) + "\n```";
+    const result = extractCodexProposal(reply);
+    expect(result.proposal).toEqual(edit);
+    expect(result.reply).toBe("Fixed the config example.");
+
+    const pretty = "Fixed it.\n\n```json\n" + JSON.stringify(edit, null, 2) + "\n```\n";
+    expect(extractCodexProposal(pretty)).toEqual({ reply: "Fixed it.", proposal: edit });
+  });
+
+  it("does not treat a ```json fence that is not at the start of a line as the block opener", () => {
+    const reply = 'Use a fence like ```json {"a":1}```';
+    expect(extractCodexProposal(reply)).toEqual({ reply });
+  });
+
   it("tolerates trailing whitespace/newlines after the closing fence", () => {
     const reply =
       'Done.\n```json\n{"rationale":"r","hunks":[{"oldText":"a","newText":"b"}]}\n```\n\n  ';

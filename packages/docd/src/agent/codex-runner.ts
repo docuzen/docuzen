@@ -37,11 +37,16 @@ export interface CodexRunnerConfig {
   model?: string;
   modelsPath?: string;
   timeoutMs?: number;
+  /** How long a cancelled or timed-out codex gets after SIGTERM before it is SIGKILLed. */
+  killGraceMs?: number;
 }
+
+const DEFAULT_KILL_GRACE_MS = 5_000;
 
 interface LiveProcess {
   child: ChildProcessWithoutNullStreams;
-  reject: (err: Error) => void;
+  /** Stop the child and reject its run with `err`. */
+  cancel: (err: Error) => void;
 }
 
 interface CodexLaunchConfig {
@@ -163,9 +168,7 @@ export class CodexRunner implements AgentRunner {
 
   async cancel(cancelKey: string): Promise<void> {
     const live = this.live.get(cancelKey);
-    if (!live) return;
-    live.child.kill("SIGTERM");
-    live.reject(new Error("Codex run cancelled"));
+    live?.cancel(new Error("Codex run cancelled"));
   }
 
   hasSession(): boolean {
@@ -178,17 +181,17 @@ export class CodexRunner implements AgentRunner {
   ): Promise<{ reply: string; proposal?: ProposedEdit }> {
     const command = this.cfg.command ?? process.env.CODEX_BIN ?? "codex";
     const workDir = ctx.scopeDir ?? process.cwd();
-    const tempDir = await mkdtemp(join(tmpdir(), "docuzen-codex-"));
-    const outputPath = join(tempDir, "last-message.txt");
+    // Resolve the launch config first: it can throw, and nothing needs cleaning up yet.
     const launch = await this.codexLaunchConfig(ctx);
-    const args = codexExecArgs({
-      workDir,
-      outputPath,
-      model: launch.model,
-      configOverrides: launch.configOverrides,
-    });
-
+    const tempDir = await mkdtemp(join(tmpdir(), "docuzen-codex-"));
     try {
+      const outputPath = join(tempDir, "last-message.txt");
+      const args = codexExecArgs({
+        workDir,
+        outputPath,
+        model: launch.model,
+        configOverrides: launch.configOverrides,
+      });
       const { stdout, streamedToken } = await this.spawnCodex(
         command,
         args,
@@ -250,23 +253,37 @@ export class CodexRunner implements AgentRunner {
       // `parser.stop()` is a second, independent guard inside the parser so a stray
       // in-flight `push()` call can't emit either.
       let settled = false;
+      let timer: NodeJS.Timeout | null = null;
+      let killTimer: NodeJS.Timeout | null = null;
       const settle = (fn: () => void): void => {
         if (settled) return;
         settled = true;
         parser.stop();
+        if (timer) clearTimeout(timer);
+        // A retry may already have registered a new child under the same key.
+        if (cancelKey && this.live.get(cancelKey)?.child === child) this.live.delete(cancelKey);
         fn();
       };
-      const timer =
-        this.cfg.timeoutMs && this.cfg.timeoutMs > 0
-          ? setTimeout(() => {
-              child.kill("SIGTERM");
-              settle(() => reject(new Error(`Codex timed out after ${this.cfg.timeoutMs}ms`)));
-            }, this.cfg.timeoutMs)
-          : null;
+      // SIGTERM first; a child that ignores it is SIGKILLed after the grace period.
+      const terminate = (): void => {
+        child.kill("SIGTERM");
+        if (killTimer) return;
+        killTimer = setTimeout(() => child.kill("SIGKILL"), this.cfg.killGraceMs ?? DEFAULT_KILL_GRACE_MS);
+        killTimer.unref();
+      };
+      if (this.cfg.timeoutMs && this.cfg.timeoutMs > 0) {
+        timer = setTimeout(() => {
+          terminate();
+          settle(() => reject(new Error(`Codex timed out after ${this.cfg.timeoutMs}ms`)));
+        }, this.cfg.timeoutMs);
+      }
       if (cancelKey) {
         this.live.set(cancelKey, {
           child,
-          reject: (err) => settle(() => reject(err)),
+          cancel: (err) => {
+            terminate();
+            settle(() => reject(err));
+          },
         });
       }
 
@@ -275,11 +292,14 @@ export class CodexRunner implements AgentRunner {
         chunks.push(chunk);
         parser.push(chunk);
       });
-      child.stderr.on("data", (chunk: Buffer) => errors.push(chunk));
+      child.stderr.on("data", (chunk: Buffer) => {
+        if (!settled) errors.push(chunk);
+      });
       child.on("error", (err) => settle(() => reject(err)));
+      child.on("exit", () => {
+        if (killTimer) clearTimeout(killTimer);
+      });
       child.on("close", (code, signal) => {
-        if (timer) clearTimeout(timer);
-        if (cancelKey) this.live.delete(cancelKey);
         if (settled) return; // already cancelled/timed-out/errored — resolving now would race a rejected caller
         parser.end();
         const stdout = Buffer.concat(chunks).toString("utf8");
@@ -290,6 +310,10 @@ export class CodexRunner implements AgentRunner {
         });
       });
 
+      // codex can exit before reading the whole prompt (bad config, auth error, a
+      // cancel), and the rest of the write then fails with EPIPE. Its exit status, reported
+      // on close, says what went wrong; unhandled, the write error would crash docd.
+      child.stdin.on("error", () => {});
       child.stdin.end(prompt);
     });
   }
@@ -619,6 +643,11 @@ export function extractCodexText(stdout: string): string {
  * right-trimmed) string handed to it — see extractCodexProposal. */
 const TRAILING_JSON_FENCE = /^```json[ \t]*\r?\n([\s\S]*?)\r?\n?```[ \t]*$/;
 
+/** A line that opens a ```json fence. A ```json inside the block's JSON (an edit to a doc
+ * with its own json example) is in a string, where newlines are escaped, so it never
+ * starts a line. */
+const JSON_FENCE_OPENING = /^[ \t]*(```json[ \t]*)\r?$/gm;
+
 /**
  * Parser half of the structured-edit contract in buildCodexPrompt (PROPOSAL_CONTRACT):
  * pulls a TRAILING fenced ```json block out of a Codex reply and turns it into a
@@ -626,8 +655,8 @@ const TRAILING_JSON_FENCE = /^```json[ \t]*\r?\n([\s\S]*?)\r?\n?```[ \t]*$/;
  *
  * Only a block anchored at the very end of the reply (after trimming trailing
  * whitespace) is considered — an earlier ```json block (e.g. a code sample in the
- * agent's prose) is left untouched as ordinary reply text; only the LAST one is
- * ever a candidate. On any failure (no trailing block, invalid JSON, JSON that
+ * agent's prose) is left untouched as ordinary reply text; only the LAST opening
+ * fence at the start of a line is ever a candidate. On any failure (no trailing block, invalid JSON, JSON that
  * matches neither the contract shape nor the legacy flat shape) this returns the
  * original reply completely unchanged and no proposal — never throws.
  *
@@ -637,7 +666,8 @@ const TRAILING_JSON_FENCE = /^```json[ \t]*\r?\n([\s\S]*?)\r?\n?```[ \t]*$/;
  */
 export function extractCodexProposal(reply: string): { reply: string; proposal?: ProposedEdit } {
   const trimmed = reply.trimEnd();
-  const idx = trimmed.lastIndexOf("```json");
+  let idx = -1;
+  for (const m of trimmed.matchAll(JSON_FENCE_OPENING)) idx = m.index + m[0].indexOf(m[1]);
   if (idx === -1) return { reply };
 
   const match = trimmed.slice(idx).match(TRAILING_JSON_FENCE);
