@@ -1,4 +1,4 @@
-import { readFile, writeFile } from "node:fs/promises";
+import { readFile } from "node:fs/promises";
 import { createHash } from "node:crypto";
 import type { EditHunk, ProposedEdit, TokenSink } from "../agent/types.js";
 import { validateHtml } from "../agent/html-validation.js";
@@ -9,10 +9,11 @@ import {
   readAnnotations,
   readSettings,
   updateAnnotation,
+  updatePendingProposal,
   updateProposal,
   type Proposal,
 } from "../had/index.js";
-import { withFileLock } from "../had/io.js";
+import { withDocLock, writeDocument } from "../had/io.js";
 import { documentBody, splitDocument } from "../had/frontmatter.js";
 import { createAnchor, resolveAnchor } from "../anchor/index.js";
 import { diffToHunks } from "./diff.js";
@@ -182,7 +183,8 @@ export class ProposalService {
    * Approve a pending proposal: apply it to the doc, then mark approved. Rewrite mode
    * writes the exact kept body; hunk mode splices each oldText→newText; a single-span
    * proposal (newText only) replaces its annotation's resolved anchor. Frontmatter is
-   * preserved byte for byte. Applies to one document are serialized.
+   * preserved byte for byte. Runs under the document's lock, shared with saving,
+   * restoring and rejecting, so nothing writes the document between this read and write.
    */
   approve(
     docPath: string,
@@ -190,8 +192,8 @@ export class ProposalService {
     proposalId: string,
     opts: { allowDrift?: boolean } = {},
   ): Promise<void> {
-    // Read-check-write on the user's document must not interleave with another apply.
-    return withFileLock(`${docPath}#apply`, () => this.approveLocked(docPath, threadId, proposalId, opts));
+    // Read-check-write on the user's document must not interleave with another writer.
+    return withDocLock(docPath, () => this.approveLocked(docPath, threadId, proposalId, opts));
   }
 
   private async approveLocked(
@@ -263,7 +265,7 @@ export class ProposalService {
       docPath,
       threadId,
       async () => {
-        await writeFile(docPath, head + newBody, "utf8");
+        await writeDocument(docPath, head + newBody);
       },
       { before: raw },
     );
@@ -275,17 +277,19 @@ export class ProposalService {
    * but stays undelivered, so its feedback is queued to ride along with the user's NEXT
    * reply (see rejectFeedbackPrefix), not pushed to the agent immediately.
    */
-  async reject(docPath: string, threadId: string, proposalId: string): Promise<void> {
-    const p = (await listProposals(docPath, threadId)).find((x) => x.id === proposalId);
-    if (!p) throw new Error(`proposal not found: ${proposalId}`);
-    // Same idempotency guard as approve (see its comment): without it, a stray reject on
-    // an already-APPROVED proposal would silently flip its status to "rejected" even
-    // though the edit is already applied to the doc — corrupting the record (and
-    // rejectFeedbackPrefix would later tell the agent an applied edit was rejected).
-    if (p.status !== "pending") {
-      throw new Error(`proposal already ${p.status}`);
-    }
-    await updateProposal(docPath, proposalId, { status: "rejected" });
+  reject(docPath: string, threadId: string, proposalId: string): Promise<void> {
+    // Under the document's lock, like approve: a reject that lands while an approve of the
+    // same proposal is mid-apply waits for it, then finds it approved.
+    return withDocLock(docPath, async () => {
+      const p = (await listProposals(docPath, threadId)).find((x) => x.id === proposalId);
+      if (!p) throw new Error(`proposal not found: ${proposalId}`);
+      // Same idempotency guard as approve (see its comment): without it, a stray reject on
+      // an already-APPROVED proposal would silently flip its status to "rejected" even
+      // though the edit is already applied to the doc — corrupting the record (and
+      // rejectFeedbackPrefix would later tell the agent an applied edit was rejected).
+      // Checked again in the same locked step as the write.
+      await updatePendingProposal(docPath, proposalId, { status: "rejected" });
+    });
   }
 
   /**
@@ -331,34 +335,37 @@ export class ProposalService {
 
   /**
    * Apply a single-span proposal: resolve its owning annotation's anchor in the CURRENT
-   * doc (fuzzy-tolerant, NOT literal `oldText` matching like the hunk path), splice in
-   * the replacement text, snapshot, and re-anchor the annotation as resolved.
+   * doc body (fuzzy-tolerant, NOT literal `oldText` matching like the hunk path), splice
+   * in the replacement text, snapshot, and re-anchor the annotation as resolved.
+   * Annotations are anchored in the body (the editor never sees frontmatter), so the
+   * anchor is resolved, spliced and re-created there; the frontmatter is kept as is.
    */
   private async applySpan(docPath: string, annotationId: string, newText: string): Promise<void> {
     if (isHtmlDoc(docPath)) {
       throw new Error("HTML proposals must be persisted and approved through approveProposal as structured hunks");
     }
     const before = await readFile(docPath, "utf8");
+    const { head, body } = splitDocument(before, docPath);
     const ann = (await readAnnotations(docPath)).annotations.find((a) => a.id === annotationId);
     if (!ann) throw new Error(`annotation not found: ${annotationId}`);
-    const range = resolveAnchor(before, ann.anchor);
+    const range = resolveAnchor(body, ann.anchor);
     if (!range) {
       throw new Error(`cannot apply: anchor for ${annotationId} no longer resolves`);
     }
 
-    const after = before.slice(0, range.start) + newText + before.slice(range.end);
+    const newBody = body.slice(0, range.start) + newText + body.slice(range.end);
+    const after = head + newBody;
     await withEditSnapshot(
       this.deps,
       docPath,
       annotationId,
       async () => {
-        await writeFile(docPath, after, "utf8");
+        await writeDocument(docPath, after);
       },
       { before, after },
     );
 
-    const newStart = after.indexOf(newText, range.start);
-    const newAnchor = createAnchor(after, newStart, newStart + newText.length);
+    const newAnchor = createAnchor(newBody, range.start, range.start + newText.length);
     await updateAnnotation(docPath, annotationId, {
       anchor: newAnchor,
       status: "resolved",

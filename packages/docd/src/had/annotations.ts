@@ -42,19 +42,27 @@ export async function removeAnnotation(docPath: string, id: string): Promise<voi
     if (next.length === f.annotations.length) return { result: undefined };
     // Remember the high-water mark before the id disappears from the list (files written
     // before lastSeq existed don't carry one), so the deleted id is never handed out again.
-    const lastSeq = Number(/^c(\d+)$/.exec(nextAnnotationId(f.annotations, f.lastSeq))![1]) - 1;
-    return { next: { ...f, annotations: next, lastSeq }, result: undefined };
+    return { next: { ...f, annotations: next, lastSeq: highestAnnotationSeq(f) }, result: undefined };
   });
 }
 
-/** Next sequential annotation id ("c0001", "c0002", …) given the existing ones. */
-export function nextAnnotationId(existing: Annotation[], lastSeq = 0): string {
+function highestSeq(existing: Annotation[], lastSeq = 0): number {
   let max = lastSeq;
   for (const a of existing) {
     const m = /^c(\d+)$/.exec(a.id);
     if (m) max = Math.max(max, Number(m[1]));
   }
-  return `c${String(max + 1).padStart(4, "0")}`;
+  return max;
+}
+
+/** The highest "cNNNN" sequence number a file has ever allocated (its lastSeq or any id in it). */
+export function highestAnnotationSeq(f: AnnotationsFile): number {
+  return highestSeq(f.annotations, f.lastSeq ?? 0);
+}
+
+/** Next sequential annotation id ("c0001", "c0002", …) given the existing ones. */
+export function nextAnnotationId(existing: Annotation[], lastSeq = 0): string {
+  return `c${String(highestSeq(existing, lastSeq) + 1).padStart(4, "0")}`;
 }
 
 /**
