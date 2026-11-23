@@ -2,10 +2,11 @@
 // review state, in `<doc>.had/assets/`, and the document links them by a path relative to
 // its own directory — so the file stays a plain markdown/HTML file any other tool can read,
 // and an exported `.hadz` (which packs the whole `.had` folder) carries the images along.
-import { mkdir, readFile, stat, writeFile } from "node:fs/promises";
-import { basename, dirname, extname, isAbsolute, join, relative, sep } from "node:path";
-import { hadPaths } from "./paths.js";
-import { withFileLock } from "./io.js";
+import { constants } from "node:fs";
+import { mkdir, open, readFile, realpath } from "node:fs/promises";
+import { basename, dirname, extname, isAbsolute, relative, sep } from "node:path";
+import { childPath, hadPaths } from "./paths.js";
+import { withDocLock, withFileLock, writeDocument, writeFileAtomic } from "./io.js";
 import { isHtmlDoc } from "./doc-format.js";
 import { ensureDocuzenHidden } from "./hide.js";
 
@@ -64,6 +65,27 @@ export function docRelativeLink(docPath: string, target: string): string {
 }
 
 /**
+ * The bytes of the image file at `path` (absolute). It must be a regular file — never a
+ * FIFO or device a read would hang on — whose real name, after following any links, has
+ * an image extension: an image-named link to `~/.pi/agent/models.json` is not an image.
+ * Checked on the opened file itself, so it cannot be swapped between check and read.
+ */
+async function readImageFile(path: string): Promise<Buffer> {
+  const real = await realpath(path);
+  if (!imageMimeType(real)) throw new Error(`not an image file: ${path}`);
+  // Non-blocking: opening a FIFO for reading must not wait for a writer.
+  const file = await open(real, constants.O_RDONLY | constants.O_NONBLOCK | constants.O_NOFOLLOW);
+  try {
+    const info = await file.stat();
+    if (!info.isFile()) throw new Error(`not an image file: ${path}`);
+    if (info.size > MAX_IMAGE_BYTES) throw new Error("image is too large (limit 50 MB)");
+    return await file.readFile();
+  } finally {
+    await file.close();
+  }
+}
+
+/**
  * Store an image in the document's `.had/assets/` folder. Dropping the same bytes under
  * the same name twice reuses the file; a different image with a taken name gets a
  * numbered one (`shot-2.png`), so an existing link never changes what it shows.
@@ -74,9 +96,7 @@ export async function saveImage(docPath: string, input: SaveImageInput): Promise
   let bytes: Buffer;
   if (input.sourcePath !== undefined) {
     if (!isAbsolute(input.sourcePath)) throw new Error("sourcePath must be absolute");
-    const info = await stat(input.sourcePath);
-    if (info.size > MAX_IMAGE_BYTES) throw new Error("image is too large (limit 50 MB)");
-    bytes = await readFile(input.sourcePath);
+    bytes = await readImageFile(input.sourcePath);
   } else if (input.dataBase64 !== undefined) {
     bytes = Buffer.from(input.dataBase64, "base64");
   } else {
@@ -92,10 +112,11 @@ export async function saveImage(docPath: string, input: SaveImageInput): Promise
     await mkdir(dir, { recursive: true });
     for (let n = 1; ; n++) {
       const name = `${stem}${n === 1 ? "" : `-${n}`}${ext}`;
-      const path = join(dir, name);
+      const path = childPath(dir, name);
       const existing = await readFile(path).catch(() => null);
       if (existing && !existing.equals(bytes)) continue; // taken by a different image
-      if (!existing) await writeFile(path, bytes);
+      // Atomic: a crash mid-write must not leave a truncated image the doc links to.
+      if (!existing) await writeFileAtomic(path, bytes);
       return { path, relPath: docRelativeLink(docPath, path), name };
     }
   });
@@ -105,9 +126,7 @@ export async function saveImage(docPath: string, input: SaveImageInput): Promise
 export async function readImage(path: string): Promise<{ mime: string; dataBase64: string }> {
   const mime = imageMimeType(path);
   if (!isAbsolute(path) || !mime) throw new Error("not an image path");
-  const info = await stat(path);
-  if (info.size > MAX_IMAGE_BYTES) throw new Error("image is too large (limit 50 MB)");
-  return { mime, dataBase64: (await readFile(path)).toString("base64") };
+  return { mime, dataBase64: (await readImageFile(path)).toString("base64") };
 }
 
 function titleFromPath(docPath: string): string {
@@ -148,6 +167,6 @@ export async function createDoc(docPath: string): Promise<{ docPath: string }> {
   if (!isAbsolute(docPath)) throw new Error("docPath must be absolute");
   if (!/\.(md|markdown|html|htm)$/i.test(docPath)) throw new Error("a new document must be .md or .html");
   await mkdir(dirname(docPath), { recursive: true });
-  await writeFile(docPath, newDocContent(docPath), "utf8");
+  await withDocLock(docPath, () => writeDocument(docPath, newDocContent(docPath)));
   return { docPath };
 }

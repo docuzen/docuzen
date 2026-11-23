@@ -12,14 +12,15 @@ let cachedConfigured: string | undefined; // undefined = not queried yet this pr
 
 function gitExcludesFromConfig(): string {
   if (cachedConfigured !== undefined) return cachedConfigured;
-  // Prefer the user's GLOBAL setting (the design's "global ignore"); fall back
-  // to merged config (honors a system-level setting) — never a repo-local one
-  // that would silently leave .docuzen/ visible in every other repo.
+  // Prefer the user's GLOBAL setting (the design's "global ignore"); fall back to
+  // the SYSTEM one — never a repo-local one (which a merged lookup would read from
+  // whatever repo the sidecar's working directory is in), as that would silently
+  // leave .docuzen/ visible in every other repo.
   const global = spawnSync("git", ["config", "--global", "--get", "core.excludesFile"], { encoding: "utf8" });
   let v = global.status === 0 ? global.stdout.trim() : "";
   if (!v) {
-    const merged = spawnSync("git", ["config", "--get", "core.excludesFile"], { encoding: "utf8" });
-    v = merged.status === 0 ? merged.stdout.trim() : "";
+    const system = spawnSync("git", ["config", "--system", "--get", "core.excludesFile"], { encoding: "utf8" });
+    v = system.status === 0 ? system.stdout.trim() : "";
   }
   cachedConfigured = v;
   return v;

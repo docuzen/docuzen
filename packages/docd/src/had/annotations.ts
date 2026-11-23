@@ -118,8 +118,11 @@ export async function createAnnotation(
 
 /** Remove an annotation and its thread/session files. No-op on missing files. */
 export async function deleteAnnotation(docPath: string, id: string): Promise<void> {
-  await removeAnnotation(docPath, id);
+  // Build (and so check) the file paths before changing anything.
   const paths = hadPaths(docPath);
-  await rm(paths.threadFile(id), { force: true });
-  await rm(paths.sessionFile(id), { force: true });
+  const threadFile = paths.threadFile(id);
+  const sessionFile = paths.sessionFile(id);
+  await removeAnnotation(docPath, id);
+  await rm(threadFile, { force: true });
+  await rm(sessionFile, { force: true });
 }

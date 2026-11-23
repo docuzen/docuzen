@@ -141,7 +141,7 @@ describe("RpcHandler", () => {
       {
         id: "d1",
         method: "discuss",
-        params: { docPath, threadId: "t1", annotationId: "c0001", stance: "none", comment: "Why?" },
+        params: { docPath, threadId: "c0001", annotationId: "c0001", stance: "none", comment: "Why?" },
       },
       (f) => frames.push(f),
     );
@@ -506,15 +506,15 @@ describe("RpcHandler", () => {
     // turn (as a killed sidecar would leave it), seeded directly rather than through the
     // handler (the handler's runner always completes synchronously).
     await initThread(docPath, {
-      id: "stuck1",
+      id: "c0009",
       anchorExact: "x",
       stance: "none",
       status: "running",
-      piSession: "sessions/stuck1.session.jsonl",
+      piSession: "sessions/c0009.session.jsonl",
     });
-    await appendTurn(docPath, "stuck1", { role: "you", timestamp: "t1", body: "q" });
+    await appendTurn(docPath, "c0009", { role: "you", timestamp: "t1", body: "q" });
     const seedDb = new TaskDB(hadPaths(docPath).stateDb);
-    seedDb.upsert({ threadId: "stuck1", status: "running", piSessionId: "fake-1" });
+    seedDb.upsert({ threadId: "c0009", status: "running", piSessionId: "fake-1" });
     seedDb.close();
 
     await handler.handle({ id: "od1", method: "openDoc", params: { docPath } });
@@ -523,7 +523,7 @@ describe("RpcHandler", () => {
     const tasks = res.ok
       ? (res.result as { threadId: string; status: string; errorText?: string | null }[])
       : [];
-    const stuck = tasks.find((t) => t.threadId === "stuck1");
+    const stuck = tasks.find((t) => t.threadId === "c0009");
     expect(stuck?.status).toBe("error");
     expect(stuck?.errorText).toBe("interrupted — sidecar restarted");
   });
