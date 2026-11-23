@@ -139,4 +139,9 @@ export interface AgentRunner {
   cancel?(cancelKey: string): Promise<void>;
   /** Whether the runner still holds this live session; false after a restart. Optional. */
   hasSession?(sessionId: string): boolean;
+  /**
+   * The orchestrator will never use this session again (an earlier model's session in a
+   * Panel, which the thread does not keep), so the runner may free it. Optional.
+   */
+  release?(sessionId: string): void;
 }

@@ -762,6 +762,11 @@ export class PiRunner implements AgentRunner {
     if (!runs.size) this.runsByKey.delete(key);
   }
 
+  /** The orchestrator is done with this session (see AgentRunner.release). */
+  release(sessionId: string): void {
+    this.drop(sessionId);
+  }
+
   /** Forget a session and release what pi holds for it. */
   private drop(sessionId: string): void {
     const entry = this.sessions.get(sessionId);

@@ -197,6 +197,28 @@ describe("Orchestrator.panel", () => {
     expect(thread.turns[2].body).toBe("answer from B");
   });
 
+  it("releases each earlier model's session and keeps the last one for the thread", async () => {
+    await seedComment();
+    const fake = new FakePiRunner([{ reply: "A" }, { reply: "B" }, { reply: "C" }]);
+    const started: string[] = [];
+    const released: string[] = [];
+    const runner: AgentRunner = {
+      start: async (ctx, tok) => {
+        const r = await fake.start(ctx, tok);
+        started.push(r.sessionId);
+        return r;
+      },
+      send: (sid, msg, tok) => fake.send(sid, msg, tok),
+      release: (sid) => void released.push(sid),
+    };
+    const orch = new Orchestrator({ runner, db, now: () => "t" });
+    await orch.panel(docPath, { threadId: "c0001", annotationId: "c0001", stance: "none", comment: "q" },
+      ["p/m1", "p/m2", "p/m3"]);
+    expect(started).toHaveLength(3);
+    expect(db.get("c0001")?.piSessionId).toBe(started[2]);
+    expect(released).toEqual(started.slice(0, 2));
+  });
+
   it("tags streamed tokens with the producing model", async () => {
     await seedComment();
     const runner = new FakePiRunner([{ reply: "A1" }, { reply: "B1" }]);
