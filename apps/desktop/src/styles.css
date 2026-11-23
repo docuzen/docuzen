@@ -1779,6 +1779,23 @@ textarea {
   overflow: hidden;
 }
 .htmlhost[hidden] { display: none; }
+/* The frame fills the sheet below the optional "scripts are blocked" bar. */
+.htmlhost:not([hidden]) { display: flex; flex-direction: column; }
+.htmlhost > .htmlframe { flex: 1 1 auto; }
+.htmlscripts {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px 10px;
+  padding: 6px 12px;
+  border-bottom: 1px solid var(--line);
+  background: var(--amber-soft);
+  color: var(--ink);
+  font-size: 0.82rem;
+}
+.htmlscripts[hidden] { display: none; }
+.htmlscripts .hint { flex-basis: 100%; color: var(--ink-soft); font-size: 0.76rem; }
+.htmlscripts button { padding: 2px 10px; font-size: 0.78rem; }
 .htmlframe {
   display: block;
   width: 100%;

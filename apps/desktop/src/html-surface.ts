@@ -1,6 +1,7 @@
 // Faithful HTML editing/annotation surface. Unlike the markdown path (which runs
-// through Milkdown/ProseMirror), HTML is rendered in an iframe so arbitrary CSS and
-// scripts render exactly as authored. The iframe body is contenteditable for true
+// through Milkdown/ProseMirror), HTML is rendered in an iframe so arbitrary CSS renders
+// exactly as authored. The document's own scripts are blocked unless the user chooses to
+// run them for that document (see SCRIPTS_BLOCKED_META). The iframe body is contenteditable for true
 // WYSIWYG editing, and the document is serialized back to HTML on save — no lossy
 // markdown round-trip. Annotation overlays (Phase 2) live inside the iframe and are
 // stripped on serialization so they never leak into the saved file.
@@ -17,6 +18,121 @@ export interface HtmlSurfaceCallbacks {
 
 /** Marker attributes for elements we inject so serialization can strip them. */
 const BASE_ATTR = "data-had-base";
+
+/**
+ * Put first in every document whose scripts are blocked. The frame keeps `allow-scripts
+ * allow-same-origin`, because the app reads, annotates and edits the document through
+ * listeners it attaches from this window, and WebKit delivers no events at all to those in a
+ * frame sandboxed without `allow-scripts`. This policy instead stops the document's own code:
+ * <script> (head, body, SVG), inline handlers, `javascript:` URLs, nested srcdoc frames (they
+ * inherit it), plugins and form submissions. A policy can only be tightened later in the
+ * document, never loosened, and the serializer drops it (data-had-overlay).
+ */
+const SCRIPTS_BLOCKED_META =
+  `<meta data-had-overlay http-equiv="Content-Security-Policy" content="script-src 'none'; object-src 'none'; form-action 'none'">`;
+
+/** Skip whitespace, comments (ended the way the HTML tokenizer ends them: `<!-->`, `<!--->`,
+ * `-->`, `--!>`) and processing instructions from `i`; -1 when the rest is an unclosed one. */
+function skipInert(html: string, i: number): number {
+  for (;;) {
+    while (i < html.length && /\s/.test(html[i])) i++;
+    if (html.startsWith("<!--", i)) {
+      const j = i + 4;
+      if (html[j] === ">") i = j + 1;
+      else if (html.startsWith("->", j)) i = j + 2;
+      else {
+        const ends = [html.indexOf("-->", j), html.indexOf("--!>", j)].filter((k) => k >= 0);
+        if (!ends.length) return -1;
+        const k = Math.min(...ends);
+        i = k + (html.startsWith("-->", k) ? 3 : 4);
+      }
+    } else if (html.startsWith("<?", i)) {
+      const k = html.indexOf(">", i);
+      if (k < 0) return -1;
+      i = k + 1;
+    } else return i;
+  }
+}
+
+/**
+ * The start tag `name` at `i` (`<html …>`, `<head …>`): where it ends, provided it carries no
+ * inline handler. Quoted attribute values may hold `>`, as the tokenizer allows.
+ */
+function benignStartTag(html: string, i: number, name: string): number {
+  const open = new RegExp(`^<${name}(?=[\\s/>])`, "i");
+  if (!open.test(html.slice(i, i + name.length + 2))) return -1;
+  let j = i + name.length + 1;
+  for (;;) {
+    while (j < html.length && /[\s/]/.test(html[j])) j++;
+    if (j >= html.length) return -1;
+    if (html[j] === ">") return j + 1;
+    const attr = /^[^\s/>=]+/.exec(html.slice(j))?.[0] ?? html[j];
+    if (/^on/i.test(attr)) return -1;
+    j += attr.length;
+    while (j < html.length && /\s/.test(html[j])) j++;
+    if (html[j] !== "=") continue;
+    j++;
+    while (j < html.length && /\s/.test(html[j])) j++;
+    const q = html[j];
+    if (q === '"' || q === "'") {
+      const k = html.indexOf(q, j + 1);
+      if (k < 0) return -1;
+      j = k + 1;
+    } else while (j < html.length && !/[\s>]/.test(html[j])) j++;
+  }
+}
+
+/**
+ * Where the policy must go: ahead of anything that can run code. It may follow only what
+ * cannot: a BOM, whitespace, comments, processing instructions, the doctype (which must stay
+ * first, or the page switches to quirks mode), and `<html>`/`<head>` start tags without inline
+ * handlers, so that it lands as the head's first child and the document's own head is kept.
+ * Anything else, and the policy goes in front of it.
+ */
+function scriptPolicyOffset(html: string): number {
+  let i = skipInert(html, html.charCodeAt(0) === 0xfeff ? 1 : 0);
+  if (i < 0) return 0;
+  if (/^<!doctype/i.test(html.slice(i, i + 9))) {
+    const k = html.indexOf(">", i);
+    if (k < 0) return 0;
+    i = k + 1;
+  } else return 0; // no doctype: first, before anything (the page is in quirks mode anyway)
+  for (const name of ["html", "head"]) {
+    const at = skipInert(html, i);
+    if (at < 0) return i;
+    const end = benignStartTag(html, at, name);
+    if (end < 0) return i;
+    i = end;
+  }
+  return i;
+}
+
+/** `html` with its scripts blocked (SCRIPTS_BLOCKED_META placed ahead of all its markup). */
+export function withScriptsBlocked(html: string): string {
+  const at = scriptPolicyOffset(html);
+  return html.slice(0, at) + SCRIPTS_BLOCKED_META + html.slice(at);
+}
+
+/** Whether a document has code of its own: script elements, inline handlers, javascript: links. */
+export function documentHasScripts(doc: Document): boolean {
+  if (doc.querySelector('script, a[href^="javascript:" i], area[href^="javascript:" i], iframe[srcdoc]')) return true;
+  for (const el of Array.from(doc.querySelectorAll("*"))) {
+    for (const a of Array.from(el.attributes)) if (/^on/i.test(a.name)) return true;
+  }
+  return false;
+}
+
+/**
+ * Documents whose scripts the user chose to run, by path. Held for this app session only:
+ * never written to the document, its .had state or a .hadz bundle, so a shared document can
+ * never arrive already trusted.
+ */
+const scriptsAllowed = new Set<string>();
+
+/** Whether the user chose to run `key`'s scripts this session. */
+export function scriptsAllowedFor(key: string): boolean {
+  return scriptsAllowed.has(key);
+}
 /**
  * On a document's own element, the authored values of the attributes docuzen set on it (a
  * JSON map, `null` = the author had none), so serialization puts back exactly what was there.
@@ -130,6 +246,11 @@ export class HtmlSurface {
   private edited = false;
   /** Whether the iframe holds a page (so `unload` has something to stop). */
   private hasPage = false;
+  /** The current load's source, so "Run scripts" can load it again with scripts on. */
+  private lastHtml = "";
+  private lastBase: string | undefined;
+  /** "Scripts in this document are blocked" bar above the frame. */
+  private notice: HTMLElement | null = null;
 
   constructor(
     private host: HTMLElement,
@@ -138,10 +259,14 @@ export class HtmlSurface {
 
   private ensureIframe(): HTMLIFrameElement {
     if (this.iframe) return this.iframe;
+    this.notice = this.buildNotice();
+    this.host.appendChild(this.notice);
     const f = document.createElement("iframe");
     f.className = "htmlframe";
-    // allow-scripts: run the doc's scripts (user decision D2). allow-same-origin:
-    // required so we can read/edit/serialize contentDocument and host annotations.
+    // allow-same-origin: required so we can read/edit/serialize contentDocument and host
+    // annotations. allow-scripts: WebKit delivers no events to the app's own listeners in a
+    // frame without it; the document's scripts are stopped by SCRIPTS_BLOCKED_META instead,
+    // and run only for a document the user chose to run them for (the D2 behaviour, now opt-in).
     // allow-popups-to-escape-sandbox keeps user-initiated target=_blank/window.open
     // flows from inheriting a sandbox that makes them appear to do nothing.
     f.setAttribute(
@@ -172,6 +297,10 @@ export class HtmlSurface {
     const seq = this.resetLoad();
     this.loadedKey = key;
     this.hasPage = true;
+    this.lastHtml = html;
+    this.lastBase = baseHref;
+    const runScripts = key !== undefined && scriptsAllowed.has(key);
+    this.showNotice(false);
     // A late `load` from the document the frame held before (its initial about:blank, or the
     // previous page) must not be taken for this one.
     const previous = f.contentDocument;
@@ -200,14 +329,52 @@ export class HtmlSurface {
       doc.addEventListener("selectionchange", () => {
         if (seq === this.loadSeq) this.cb.onSelection?.();
       });
+      this.showNotice(!runScripts && documentHasScripts(doc));
       this.cb.onReady?.();
     };
-    f.srcdoc = baseHref ? withBaseHref(html, baseHref) : html;
+    const source = runScripts ? html : withScriptsBlocked(html);
+    f.srcdoc = baseHref ? withBaseHref(source, baseHref) : source;
+  }
+
+  /**
+   * Run the current document's scripts: remember the choice for its path (this session only)
+   * and load it again without the blocking policy. Edits typed so far are carried over.
+   */
+  runScripts(): void {
+    const key = this.loadedKey;
+    if (key === undefined) return;
+    scriptsAllowed.add(key);
+    const wasEdited = this.edited;
+    const html = wasEdited && this.doc ? serializeDocument(this.doc) : this.lastHtml;
+    this.load(html, this.lastBase, key);
+    this.edited = wasEdited;
+  }
+
+  private buildNotice(): HTMLElement {
+    const bar = document.createElement("div");
+    bar.className = "htmlscripts";
+    bar.hidden = true;
+    const text = document.createElement("span");
+    text.textContent = "This document's scripts are blocked.";
+    const warn = document.createElement("span");
+    warn.className = "hint";
+    warn.textContent = "Scripts can read and change files on this Mac. Run them only for documents you trust.";
+    const run = document.createElement("button");
+    run.type = "button";
+    run.textContent = "Run scripts";
+    run.addEventListener("click", () => this.runScripts());
+    bar.append(text, run, warn);
+    return bar;
+  }
+
+  private showNotice(on: boolean): void {
+    if (this.notice) this.notice.hidden = !on;
   }
 
   /** Empty the iframe so a closed or hidden document stops running (scripts, timers, media). */
   unload(): void {
     this.resetLoad();
+    this.showNotice(false);
     const f = this.iframe;
     if (!f || !this.hasPage) return;
     this.hasPage = false;
