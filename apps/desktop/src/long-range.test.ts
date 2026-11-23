@@ -2,7 +2,7 @@
 import { describe, expect, it } from "vitest";
 import { serializeDocument } from "./html-surface.js";
 import { unwrapAnno } from "./html-projection.js";
-import { RANGE_ATTR, RANGE_FOCUS_ATTR, clearRangeBlocks, focusRangeBlocks, isLongRange, markRangeBlocks } from "./long-range.js";
+import { RANGE_ATTR, RANGE_FOCUS_ATTR, blocksInRange, clearRangeBlocks, focusRangeBlocks, isLongRange, markRangeBlocks } from "./long-range.js";
 
 function docWith(body: string): Document {
   const d = document.implementation.createHTMLDocument("t");
@@ -48,5 +48,44 @@ describe("long comment ranges", () => {
     expect(d.querySelector('style[data-had-range-style="c0002"]')).toBeNull();
     clearRangeBlocks(d, "c0001");
     expect(d.querySelectorAll(`[${RANGE_ATTR}]`).length).toBe(0);
+  });
+});
+
+describe("the blocks a comment covers", () => {
+  /** A range over the text of `doc`'s body from the first match of `from` to the end of the first match of `to`. */
+  function rangeOver(from: string, to: string): Range {
+    const texts: Text[] = [];
+    const walker = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT);
+    for (let n = walker.nextNode(); n; n = walker.nextNode()) texts.push(n as Text);
+    const start = texts.find((t) => t.data.includes(from))!;
+    const end = texts.find((t) => t.data.includes(to))!;
+    const r = document.createRange();
+    r.setStart(start, start.data.indexOf(from));
+    r.setEnd(end, end.data.indexOf(to) + to.length);
+    return r;
+  }
+
+  it("a short paragraph with links, code and emphasis is one block, and its inline elements get no bar", () => {
+    document.body.innerHTML = "<p id=\"p\">Run <code>make</code>, then <strong>check</strong> the <a href=\"#x\">log</a> and <em>stop</em>.</p>";
+    const blocks = blocksInRange(rangeOver("Run", "stop"));
+    expect(blocks.map((b) => b.id)).toEqual(["p"]);
+    expect(isLongRange(40, blocks.length)).toBe(false);
+  });
+
+  it("a very long single paragraph with a line break is that paragraph, so its bar is drawn", () => {
+    const long = "word ".repeat(200);
+    document.body.innerHTML = `<p id="p">${long}<br>${long}<img src="a.png"> <b>end</b></p>`;
+    expect(blocksInRange(rangeOver("word", "end")).map((b) => b.id)).toEqual(["p"]);
+  });
+
+  it("a passage over several paragraphs is each of those paragraphs, not their inline children", () => {
+    document.body.innerHTML = '<div><p id="a">One <b>bold</b></p><p id="b">Two <i>it</i> <code>c</code></p><p id="c">Three</p><p id="d">Four</p></div>';
+    expect(blocksInRange(rangeOver("One", "Three")).map((b) => b.id)).toEqual(["a", "b", "c"]);
+  });
+
+  it("inside one list item, the item is the block", () => {
+    document.body.innerHTML = '<ul><li id="i1">first <b>a</b> <i>b</i> <code>c</code> end</li><li id="i2">second</li></ul>';
+    expect(blocksInRange(rangeOver("first", "end")).map((b) => b.id)).toEqual(["i1"]);
+    expect(blocksInRange(rangeOver("first", "second")).map((b) => b.id)).toEqual(["i1", "i2"]);
   });
 });

@@ -2,6 +2,7 @@
 // tinted block by block: that paints the page. It is marked by a thin bar in the margin
 // beside the blocks it covers. This module holds the rule, the bar's CSS (shared with the
 // HTML iframe, which does not load styles.css) and the HTML-document side of marking blocks.
+import { isBlockElement } from "./html-blocks.js";
 
 /** Blocks covered from which a comment gets the margin bar instead of a fill. */
 export const LONG_RANGE_BLOCKS = 3;
@@ -36,15 +37,26 @@ export function opaqueBackground(el: Element | null): string {
   return "#fff";
 }
 
-/** Child elements of `range`'s common ancestor that the range touches — its "blocks". */
+/**
+ * The blocks `range` covers: the block-level children of the nearest block around it that
+ * the range touches, or that one block when the range stays inside it. Inline elements
+ * (links, code, emphasis, line breaks) are never blocks: they neither count towards a long
+ * passage nor get a bar.
+ */
 export function blocksInRange(range: Range): Element[] {
-  let c: Node | null = range.startContainer;
-  while (c && !c.contains(range.endContainer)) c = c.parentNode;
-  if (!c) return [];
-  if (c.nodeType !== 1) return c.parentElement ? [c.parentElement] : [];
-  return [...(c as Element).children].filter(
-    (el) => !el.hasAttribute("data-had-overlay") && range.intersectsNode(el) && (el.textContent ?? "").trim() !== "",
+  const c = range.commonAncestorContainer;
+  const body = c.ownerDocument?.body;
+  let block: Element | null = c.nodeType === 1 ? (c as Element) : c.parentElement;
+  while (block && block !== body && !isBlockElement(block) && block.parentElement) block = block.parentElement;
+  if (!block) return [];
+  const children = [...block.children].filter(
+    (el) =>
+      isBlockElement(el) &&
+      !el.hasAttribute("data-had-overlay") &&
+      range.intersectsNode(el) &&
+      (el.textContent ?? "").trim() !== "",
   );
+  return children.length ? children : [block];
 }
 
 const styleSel = (id: string): string => `style[data-had-range-style="${CSS.escape(id)}"]`;
