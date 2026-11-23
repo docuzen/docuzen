@@ -25,14 +25,15 @@ async function readCurrentAnnotationsRaw(docPath: string): Promise<string> {
 }
 
 /**
- * Read the annotations captured at a given version as a raw string. Returns ""
- * for versions snapshotted before annotation-versioning (no per-version file).
+ * Read the annotations captured at a given version as a raw string: "" when the document
+ * had no annotations file at that point, `undefined` for versions snapshotted before
+ * annotation-versioning (no per-version file).
  */
 export async function readVersionAnnotations(
   docPath: string,
   id: string,
-): Promise<string> {
-  return (await readFileIfExists(hadPaths(docPath).versionAnnotationsFile(id))) ?? "";
+): Promise<string | undefined> {
+  return readFileIfExists(hadPaths(docPath).versionAnnotationsFile(id));
 }
 
 export async function snapshot(
@@ -54,7 +55,7 @@ export async function snapshot(
   if (
     latest &&
     (await readVersion(docPath, latest.id)) === content &&
-    (await readVersionAnnotations(docPath, latest.id)) === annotations
+    ((await readVersionAnnotations(docPath, latest.id)) ?? "") === annotations
   ) {
     return latest;
   }

@@ -137,3 +137,26 @@ describe("review-state store under concurrent writers", () => {
     expect(thread.frontmatter.status).toBe("responded");
   });
 });
+
+describe("file modes (M22)", () => {
+  it("a new file written with a mode gets exactly that mode", async () => {
+    const path = join(dir, "fresh", "models.json");
+    await writeFileAtomic(path, '{"k":"secret"}', { mode: 0o600 });
+    expect((await stat(path)).mode & 0o777).toBe(0o600);
+  });
+
+  it("a given mode also tightens a file that was too open", async () => {
+    const path = join(dir, "models.json");
+    await writeFile(path, "{}");
+    await chmod(path, 0o644);
+    await writeFileAtomic(path, '{"k":"secret"}', { mode: 0o600 });
+    expect((await stat(path)).mode & 0o777).toBe(0o600);
+  });
+
+  it("saveModels creates models.json readable by the owner only", async () => {
+    const { saveModels } = await import("../../src/agent/model-registry.js");
+    const path = join(dir, "agent", "models.json");
+    await saveModels(path, [{ provider: "p", modelId: "m", name: "M", apiKey: "sk-secret" } as never]);
+    expect((await stat(path)).mode & 0o777).toBe(0o600);
+  });
+});

@@ -199,3 +199,119 @@ describe("restoreVersion", () => {
     expect(after.annotations.map((a) => a.id)).toContain("c0001"); // untouched
   });
 });
+
+describe("restoreVersion and annotations (H16, H17)", () => {
+  const comment = (id: string) => ({
+    id,
+    type: "comment" as const,
+    anchor: { exact: "Plan", prefix: "", suffix: "" },
+    status: "open" as const,
+    thread: `threads/${id}.md`,
+    session: `sessions/${id}.session.jsonl`,
+    createdAt: "t0",
+  });
+
+  it("restoring a version saved before any annotation existed clears the later ones", async () => {
+    await writeFile(docPath, "# Plan\n", "utf8");
+    const v1 = await saveDoc(docPath, "# Plan\n", "t1"); // no annotations.json yet
+    await addAnnotation(docPath, comment("c0001"));
+    await saveDoc(docPath, "# Plan\n\nMore.\n", "t2");
+
+    await restoreVersion(docPath, v1.version, "t3");
+    expect((await readAnnotations(docPath)).annotations).toEqual([]);
+  });
+
+  it("a restore never lowers lastSeq, so new comments never reuse an id", async () => {
+    const { createAnnotation } = await import("../../src/had/annotations.js");
+    await writeFile(docPath, "# Plan\n", "utf8");
+    await createAnnotation(docPath, { kind: "comment", anchor: comment("x").anchor }, { now: "t0" }); // c0001
+    const v1 = await saveDoc(docPath, "# Plan\n", "t1");
+    await createAnnotation(docPath, { kind: "comment", anchor: comment("x").anchor }, { now: "t1" }); // c0002
+    await saveDoc(docPath, "# Plan\n\nMore.\n", "t2");
+
+    await restoreVersion(docPath, v1.version, "t3");
+    expect((await readAnnotations(docPath)).annotations.map((a) => a.id)).toEqual(["c0001"]);
+    const next = await createAnnotation(docPath, { kind: "comment", anchor: comment("x").anchor }, { now: "t4" });
+    expect(next.id).toBe("c0003");
+  });
+});
+
+describe("writes to the document (H18)", () => {
+  it("saveDoc, restoreVersion and the proposal service share one per-document lock", async () => {
+    const { withDocLock } = await import("../../src/had/io.js");
+    await writeFile(docPath, "# Plan\n", "utf8");
+    const v1 = await saveDoc(docPath, "# Plan\n", "t1");
+
+    let release!: () => void;
+    const held = withDocLock(docPath, () => new Promise<void>((r) => (release = r)));
+    const save = saveDoc(docPath, "# Saved while locked\n", "t2");
+    await new Promise((r) => setTimeout(r, 30));
+    expect(await readFile(docPath, "utf8")).toBe("# Plan\n"); // waited for the holder
+    release();
+    await held;
+    await save;
+    expect(await readFile(docPath, "utf8")).toBe("# Saved while locked\n");
+
+    const held2 = withDocLock(docPath, () => new Promise<void>((r) => (release = r)));
+    const restore = restoreVersion(docPath, v1.version, "t3");
+    await new Promise((r) => setTimeout(r, 30));
+    expect(await readFile(docPath, "utf8")).toBe("# Saved while locked\n");
+    release();
+    await held2;
+    await restore;
+    expect(await readFile(docPath, "utf8")).toBe("# Plan\n");
+  });
+
+  it("replaces the document atomically and keeps its mode", async () => {
+    const { chmod, readdir, stat } = await import("node:fs/promises");
+    await writeFile(docPath, "# Plan\n", "utf8");
+    await chmod(docPath, 0o640);
+    const inode = (await stat(docPath)).ino;
+    await saveDoc(docPath, "# Edited\n", "t1");
+    const after = await stat(docPath);
+    expect(after.mode & 0o777).toBe(0o640);
+    expect(after.ino).not.toBe(inode); // a new file renamed into place, not truncated in place
+    expect((await readdir(dir)).filter((n) => n.endsWith(".tmp"))).toEqual([]);
+  });
+
+  it("a read-only document is refused, not replaced", async () => {
+    const { chmod } = await import("node:fs/promises");
+    await writeFile(docPath, "# Plan\n", "utf8");
+    await chmod(docPath, 0o444);
+    await expect(saveDoc(docPath, "# Edited\n", "t1")).rejects.toThrow(/EACCES|permission/i);
+    expect(await readFile(docPath, "utf8")).toBe("# Plan\n");
+  });
+
+  it("a writable document in a folder that refuses new files is still saved (in place)", async () => {
+    const { chmod } = await import("node:fs/promises");
+    const locked = join(dir, "locked");
+    await mkdir(locked);
+    const doc = join(locked, "plan.md");
+    await writeFile(doc, "# Plan\n", "utf8");
+    await openDoc(doc); // review state lives in locked/.docuzen, created while writable
+    await chmod(locked, 0o555);
+    try {
+      await saveDoc(doc, "# Edited\n", "t1");
+      expect(await readFile(doc, "utf8")).toBe("# Edited\n");
+    } finally {
+      await chmod(locked, 0o755);
+    }
+  });
+
+  it("writes through a symlinked document to its target, leaving the link in place", async () => {
+    const { lstat, symlink } = await import("node:fs/promises");
+    const target = join(dir, "real", "plan.md");
+    await mkdir(join(dir, "real"));
+    await writeFile(target, "# Plan\n", "utf8");
+    await symlink(join("real", "plan.md"), docPath);
+    await saveDoc(docPath, "# Through the link\n", "t1");
+    expect((await lstat(docPath)).isSymbolicLink()).toBe(true);
+    expect(await readFile(target, "utf8")).toBe("# Through the link\n");
+
+    const v = await saveDoc(docPath, "# Second\n", "t2");
+    await restoreVersion(docPath, (await listVersions(docPath))[0].id, "t3");
+    expect(v.saved).toBe(true);
+    expect((await lstat(docPath)).isSymbolicLink()).toBe(true);
+    expect(await readFile(target, "utf8")).toBe("# Through the link\n");
+  });
+});

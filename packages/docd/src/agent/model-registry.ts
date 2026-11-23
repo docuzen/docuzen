@@ -124,5 +124,5 @@ async function saveModelsUnlocked(path: string, models: ModelConfig[]): Promise<
     });
   }
 
-  await writeJsonFile(path, { providers });
+  await writeJsonFile(path, { providers }, { mode: 0o600 }); // holds API keys: owner-only
 }

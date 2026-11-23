@@ -95,3 +95,22 @@ export async function updateProposal(
     return { next: f, result: undefined };
   });
 }
+
+/**
+ * Patch a proposal only while it is still pending, as one locked step on the proposals
+ * file: a proposal that was approved or rejected in the meantime is left alone and the
+ * call throws `proposal already <status>`.
+ */
+export async function updatePendingProposal(
+  docPath: string,
+  id: string,
+  patch: Partial<Omit<Proposal, "id">>,
+): Promise<void> {
+  await updateJsonFile(hadPaths(docPath).proposals, empty, (f) => {
+    const idx = f.proposals.findIndex((p) => p.id === id);
+    if (idx === -1) throw new Error(`proposal not found: ${id}`);
+    if (f.proposals[idx].status !== "pending") throw new Error(`proposal already ${f.proposals[idx].status}`);
+    f.proposals[idx] = { ...f.proposals[idx], ...patch };
+    return { next: f, result: undefined };
+  });
+}
