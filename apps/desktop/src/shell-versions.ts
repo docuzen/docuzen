@@ -2,6 +2,8 @@
 // "Edit from here"), and the picker Save/Export use to choose between the working copy
 // and any saved revision, drawn as a branch graph. Split out of shell.ts; loading a
 // version into a tab is the tab owner's job, reached through `deps.onEditFromVersion`.
+// Both modals belong to the document they were opened for: they read it by path, and the
+// shell closes them (closeVersionModals) when another document becomes active.
 import type { ShellDeps } from "./shell.js";
 import { wireModal, reportError } from "./ui.js";
 import {
@@ -11,18 +13,54 @@ import {
   type VersionPickerVersion,
 } from "./version-picker-tree.js";
 
-export interface VersionsDeps extends Pick<ShellDeps, "api" | "getThreadNodes" | "log" | "refreshThreadTree" | "stripFrontmatter" | "truncTitle"> {
-  hasActiveDoc: () => boolean;
-  /** Replace the active tab's working copy with a version's body (not yet on disk). */
-  onEditFromVersion: (versionId: string, body: string) => Promise<void>;
+export interface VersionsDeps extends Pick<ShellDeps, "api" | "getThreadNodes" | "log" | "refreshThreadTree" | "truncTitle"> {
+  /** The active document's path, or undefined when none is open. */
+  activeDocPath: () => string | undefined;
+  /** Replace `docPath`'s working copy with a version's body (not yet on disk) if it is still the active document. */
+  onEditFromVersion: (versionId: string, body: string, docPath: string) => Promise<void>;
 }
 
 export interface VersionsApi {
   openVersionPreview: (versionId: string) => Promise<void>;
-  /** Resolves to "current", a version id, or null when cancelled. */
-  openVersionPicker: (confirmLabel: string) => Promise<string | null>;
+  /**
+   * Resolves to "current", a version id, or null when cancelled — including when the picker is
+   * opened again or closed by closeVersionModals. `currentCaption` describes what choosing the
+   * working copy does (default: "unsaved editor contents").
+   */
+  openVersionPicker: (confirmLabel: string, currentCaption?: string) => Promise<string | null>;
+  /** Cancel the picker and hide the preview (the active document changed). */
+  closeVersionModals: () => void;
   /** Exposed so main.ts's shared Escape-key handler can also close it. */
   versionModal: HTMLDivElement;
+}
+
+/**
+ * A version file's body without its leading YAML frontmatter. A leading `---` line starts
+ * frontmatter only when a closing `---` line follows and the lines between have the shape of a
+ * YAML mapping (the rule the sidecar uses: it must parse to a mapping); otherwise the `---` is
+ * the document's own horizontal rule and nothing is removed. CRLF line ends are accepted. The
+ * mapping check is by shape (a top-level `key:` line first; then keys, indented lines, list
+ * items, comments, blank lines) rather than a full YAML parse, which the app has no parser for.
+ */
+export function stripFrontmatter(text: string): string {
+  const open = /^---[ \t]*\r?\n/.exec(text);
+  if (!open) return text;
+  const lines = text.slice(open[0].length).split(/(?<=\n)/);
+  let consumed = open[0].length;
+  let sawKey = false;
+  for (const line of lines) {
+    consumed += line.length;
+    const content = line.replace(/\r?\n$/, "");
+    if (/^---[ \t]*$/.test(content)) return sawKey ? text.slice(consumed) : text;
+    if (content.trim() === "" || /^[ \t]*#/.test(content)) continue;
+    if (/^(?:"[^"]*"|'[^']*'|[^\s#'"\-?:,[\]{}&*!|>%@`][^:#]*?|-[^\s:][^:#]*?)[ \t]*:(?:[ \t]|$)/.test(content)) {
+      sawKey = true;
+      continue;
+    }
+    if (sawKey && /^(?:[ \t]+\S|-(?:[ \t]|$))/.test(content)) continue; // a value's continuation or list item
+    return text; // not a YAML mapping: the leading --- is a horizontal rule
+  }
+  return text; // no closing ---
 }
 
 export function initVersions(deps: VersionsDeps): VersionsApi {
@@ -36,26 +74,33 @@ export function initVersions(deps: VersionsDeps): VersionsApi {
   });
   wireModal(versionModal); // click backdrop to close
 
+  /** Bumped by every preview request and by closeVersionModals: only the latest request may show. */
+  let previewSeq = 0;
+
   /**
-   * Open the read-only version-preview modal for `versionId`. Fetches the full
-   * version file via `readVersion`, strips its frontmatter, and shows the body in a
+   * Open the read-only version-preview modal for `versionId` of the active document. Fetches
+   * the full version file via `readVersion`, strips its frontmatter, and shows the body in a
    * `<pre>` (via textContent — no innerHTML of version data). The footer's
-   * "✎ Edit from here" loads that body into the current editor (revert-then-edit).
+   * "✎ Edit from here" loads that body into that document's tab (revert-then-edit).
    */
   async function openVersionPreview(versionId: string): Promise<void> {
-    if (!deps.hasActiveDoc()) return;
+    const docPath = deps.activeDocPath();
+    if (!docPath) return;
+    const seq = ++previewSeq;
     try {
-      const { content } = await deps.api.readVersion({ versionId });
-      const body = deps.stripFrontmatter(content);
+      const { content } = await deps.api.readVersion({ docPath, versionId });
+      // A newer preview was asked for, or the document changed, while this one loaded.
+      if (seq !== previewSeq || deps.activeDocPath() !== docPath) return;
+      const body = stripFrontmatter(content);
       versionModalTitle.textContent = `📄 Document @ ${versionId}`;
       versionModalBody.textContent = body; // read-only, textContent (no XSS)
       versionEditBtn.onclick = () => {
         versionModal.hidden = true;
-        void deps.onEditFromVersion(versionId, body);
+        void deps.onEditFromVersion(versionId, body, docPath);
       };
       versionModal.hidden = false;
     } catch (e) {
-      deps.log(`preview ${versionId} failed: ${String(e)}`);
+      if (seq === previewSeq) deps.log(`preview ${versionId} failed: ${String(e)}`);
     }
   }
 
@@ -203,14 +248,14 @@ export function initVersions(deps: VersionsDeps): VersionsApi {
     section.appendChild(shell);
   }
 
-  function renderVersionPicker(versions: VersionPickerVersion[]): void {
+  function renderVersionPicker(versions: VersionPickerVersion[], currentCaption: string): void {
     versionPickerList.replaceChildren();
 
     const current = pickerSection("Current");
     const currentRow = document.createElement("label");
     currentRow.className = "vpick-row vpick-current";
     currentRow.appendChild(pickerRadio("current", true));
-    appendVersionCopy(currentRow, { id: "Current working copy", cause: "unsaved editor contents" });
+    appendVersionCopy(currentRow, { id: "Current working copy", cause: currentCaption });
     current.appendChild(currentRow);
     versionPickerList.appendChild(current);
 
@@ -225,17 +270,26 @@ export function initVersions(deps: VersionsDeps): VersionsApi {
     }
   }
 
-  async function openVersionPicker(confirmLabel: string): Promise<string | null> {
-    if (!deps.hasActiveDoc()) return null;
+  /** Bumped by every open and close: a slower, older open never renders over a newer one. */
+  let pickerSeq = 0;
+
+  async function openVersionPicker(confirmLabel: string, currentCaption = "unsaved editor contents"): Promise<string | null> {
+    const docPath = deps.activeDocPath();
+    if (!docPath) return null;
+    closeVersionPicker(null); // a picker already open (⌘S twice, ⌘S then ⇧⌘E): its caller gets "cancelled"
+    const seq = ++pickerSeq;
+    const stale = () => seq !== pickerSeq || deps.activeDocPath() !== docPath;
     let versions: VersionPickerVersion[] = [];
     try {
-      versions = await deps.api.listVersions({});
+      versions = await deps.api.listVersions({ docPath });
     } catch (e) {
-      reportError("versions", e, deps.log);
+      if (!stale()) reportError("versions", e, deps.log);
       return null;
     }
-    await deps.refreshThreadTree();
-    renderVersionPicker(versions);
+    if (stale()) return null;
+    await deps.refreshThreadTree(); // the thread tree is the active document's: same document checked below
+    if (stale()) return null;
+    renderVersionPicker(versions, currentCaption);
     versionPickerConfirm.textContent = confirmLabel;
     versionPickerModal.hidden = false;
     return new Promise((resolve) => {
@@ -243,10 +297,17 @@ export function initVersions(deps: VersionsDeps): VersionsApi {
     });
   }
   function closeVersionPicker(result: string | null): void {
+    pickerSeq++;
     versionPickerModal.hidden = true;
     const r = versionPickerResolve;
     versionPickerResolve = null;
     r?.(result);
+  }
+
+  function closeVersionModals(): void {
+    closeVersionPicker(null);
+    previewSeq++;
+    versionModal.hidden = true;
   }
   versionPickerConfirm.addEventListener("click", () => {
     const sel =
@@ -261,5 +322,5 @@ export function initVersions(deps: VersionsDeps): VersionsApi {
     if (e.target === versionPickerModal) closeVersionPicker(null);
   });
 
-  return { openVersionPreview, openVersionPicker, versionModal };
+  return { openVersionPreview, openVersionPicker, closeVersionModals, versionModal };
 }

@@ -36,6 +36,17 @@ describe("desktop tab session restore", () => {
     );
   });
 
+  it("drains files opened from Finder right after the restore, before the empty state, default doc and badge", () => {
+    // main.ts runs at import, so its boot order is pinned on source; the drain's own gating
+    // (no-op until this boot drain) is behavioural in tab-content.test.ts.
+    const initSource = sourceBetween(mainSource, "async function init(): Promise<void>", "void init();");
+    const drainAt = initSource.indexOf("await shell.drainExternalOpens({ boot: true });");
+    expect(drainAt).toBeGreaterThan(initSource.indexOf("await shell.restoreTabSession()"));
+    expect(drainAt).toBeLessThan(initSource.indexOf("if (shell.getTabCount() === 0 && initialDocPath)"));
+    expect(drainAt).toBeLessThan(initSource.indexOf("shell.showEmptyState()"));
+    expect(drainAt).toBeLessThan(initSource.indexOf("await shell.refreshHarnessBadge()"));
+  });
+
   it("persists session state when tabs open, activate, close, or the window unloads", () => {
     const openSource = sourceBetween(
       shellSource,
@@ -49,7 +60,7 @@ describe("desktop tab session restore", () => {
     );
     const activateSource = sourceBetween(
       shellSource,
-      "async function activateTab(idx: number): Promise<void>",
+      "async function activateTab(",
       "/** Read the per-doc default model key",
     );
 

@@ -169,7 +169,7 @@ describe("harness/model badge", () => {
 
     const activateTabSource = sourceBetween(
       shellSource,
-      "async function activateTab(idx: number): Promise<void> {",
+      "async function activateTab(",
       "/** Read the per-doc default model key",
     );
     expect(activateTabSource).not.toContain("refreshHarnessBadge");

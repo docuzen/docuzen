@@ -20,7 +20,6 @@
 // turn, reads shell.ts's `getDocPath`/`getFormat` — see shell.ts's header).
 
 import type { Editor } from "@milkdown/kit/core";
-import { getMarkdown } from "@milkdown/kit/utils";
 import { HtmlSurface, baseHrefForDoc } from "./html-surface.js";
 import {
   buildHtmlSnippetPreviewContext,
@@ -217,36 +216,6 @@ function truncTitle(s: string, max = 34): string {
   return s.length > max ? s.slice(0, max) + "…" : s;
 }
 
-/**
- * Strip the leading `---\nhad: …\n---\n` frontmatter so we show the doc body only. Only
- * caller is shell.ts's version preview (via deps.stripFrontmatter) — stays main.ts-owned.
- */
-function stripFrontmatter(s: string): string {
-  return s.replace(/^---\n[\s\S]*?\n---\n/, "");
-}
-
-/**
- * Persist the current editor content to disk so document-wide agent passes — which read
- * the file on the backend — see the user's latest text, including just-typed [[ … ]]
- * directives. Dedupes to no new version when nothing changed. Needs `editorRef`/
- * `htmlSurface` (bootstrap-owned instances), so it stays here rather than moving into
- * shell.ts with the rest of the tabs domain; chat.ts's review/directives actions
- * reach it via deps.syncDocToDisk, and it clears the active tab's dirty flag through
- * shell.ts's `clearActiveTabDirty`.
- */
-async function syncDocToDisk(): Promise<void> {
-  if (!activeDocPath()) return;
-  const text =
-    activeFormat() === "html" ? htmlSurface?.getHtml() ?? "" : editorRef?.action(getMarkdown()) ?? shell.getCurrentMarkdown();
-  if (!text) return;
-  try {
-    await api.saveDoc({ text });
-    shell.clearActiveTabDirty();
-  } catch (e) {
-    reportError("autosave", e, log);
-  }
-}
-
 // --- chat pane: discussion threads, review pass, inline directives, agents panel,
 // comment cards. See chat.ts's file header. Constructed first — its forward
 // references to shell/proposals/surface are resolved once those are built below
@@ -261,7 +230,9 @@ const chat = initChat({
   rawPreviewText,
   routeProposal: (e) => proposals.routeProposal(e),
   reloadActiveDoc: () => shell.reloadActiveDoc(),
-  syncDocToDisk,
+  // Save what the user sees before a document-wide pass reads the file (shell.ts owns which
+  // text that is: the editor/iframe of the active tab, never a half-loaded page).
+  syncDocToDisk: () => shell.syncActiveDocToDisk(),
   clearAnnotationUndo: () => htmlSurfaceApi.clearAnnotationUndo(),
   setDirectivesWorking: (on) => setDirectivesWorking(on),
   openVersionPreview: (versionId) => shell.openVersionPreview(versionId),
@@ -342,7 +313,6 @@ const shell = initShell({
   getThreadNodes: chat.getThreadNodes,
   refreshThreadTree: chat.refreshThreadTree,
   truncTitle,
-  stripFrontmatter,
   notifySessionActive: sessionStore.setActive,
   annoKey,
   proposalKey,
@@ -450,31 +420,15 @@ document.addEventListener("keydown", (e) => {
   if (e.key === "Escape" && !proposals.diffPanel.hidden) proposals.diffPanel.hidden = true;
 });
 
-/**
- * The milkdown markdownUpdated listener body. Lives in main.ts (not editor.ts)
- * because it reaches into tabs state (shell.ts-owned) and calls back into
- * surface.ts's search refresh — main.ts is the composition root that wires both,
- * so this cross-module call is threaded through here rather than either leaf.
- */
-function onEditorMarkdownUpdated(md: string, prev: string): void {
-  // Ignore Milkdown updates while an HTML tab is active (its content lives in
-  // the iframe, not Milkdown) so we never overwrite the raw HTML with markdown.
-  if (activeFormat() === "html") return;
-  shell.setActiveTabMarkdown(md); // preserve edits per tab (no-op with no active tab)
-  if (md !== prev) {
-    htmlSurfaceApi.clearAnnotationUndo(); // a real text edit takes over the undo chord
-    log(`edited (${md.length} chars)`);
-    if (searchApi.searchIsOpen() && searchApi.searchState.query.trim()) searchApi.refreshMarkdownSearch(false, false);
-  }
-}
-
 // --- init: mount the editor, then open the initial doc as the first tab ---
 async function init(): Promise<void> {
   const editorApi = await initEditor({
     rootEl: editorEl,
     log,
     getFormat: activeFormat,
-    onMarkdownUpdated: onEditorMarkdownUpdated,
+    // The milkdown markdownUpdated listener: shell.ts owns the tabs it writes to, and drops a
+    // late report about text the editor no longer shows.
+    onMarkdownUpdated: (md, prev) => shell.onEditorMarkdownUpdated(md, prev),
     resolveImageSrc: docImages.resolve,
     readImage: docImages.read,
     openLink: docLinks.open,
@@ -507,11 +461,14 @@ async function init(): Promise<void> {
   log("editor mounted ✅ — select text → swatch / 💬");
   await chat.refreshThreadModels(); // populate the per-thread model pickers' cache
   await shell.restoreTabSession();
+  // Files opened from Finder (cold launch, or while the session restored) open after the
+  // restored tabs, so they end up focused, and before the empty state / default doc / badge,
+  // which then describe the document actually shown.
+  await shell.drainExternalOpens({ boot: true });
   if (shell.getTabCount() === 0 && initialDocPath) await shell.openInTab(initialDocPath);
   else if (shell.getTabCount() === 0) shell.showEmptyState();
   await shell.refreshHarnessBadge(); // boot refresh — see shell.ts's harness-badge section for the full trigger contract
-  void maybeShowFirstRun(client, log);
-  void shell.drainExternalOpens();
+  void maybeShowFirstRun(client, log, { onConfigured: () => void shell.refreshHarnessBadge() });
 }
 
 void init();
