@@ -773,6 +773,8 @@ dependencies = [
 name = "docuzen"
 version = "0.2.7"
 dependencies = [
+ "getrandom 0.3.4",
+ "libc",
  "tauri",
  "tauri-build",
  "tauri-plugin-dialog",
