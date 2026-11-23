@@ -194,6 +194,9 @@ function directivePosRanges(state: EditorState): PosRange[] {
  * id ranges, for the click-jump plugin's annotation lookup. Filters to `from < to`
  * (inline decorations) so the comment badge's widget decoration — which shares the
  * same `spec.id` but always has `from === to` — never shadows the marked text itself.
+ * A long comment's margin bars (see RangeBlockSpec) carry no `spec.id`: a bar spans its
+ * whole block, past the comment's own text, so it must not take clicks meant for other
+ * marks or directives in that block.
  */
 function annotationRanges(state: EditorState): AnnotationRange[] {
   const set = annoKey.getState(state) as DecorationSet | undefined;
@@ -432,6 +435,22 @@ export interface EditorApi {
   setDirectivesWorking(on: boolean): void;
 }
 
+/**
+ * Spec of a long comment's margin-bar decoration on one top-level block. One per block,
+ * listing every long comment covering it: ProseMirror keeps only the last value of an
+ * attribute (other than class/style) when node decorations overlap, so per-comment bars
+ * on a shared block would hide all but one of them from `data-had-range`.
+ */
+interface RangeBlockSpec {
+  rangeIds: string[];
+  style: string;
+}
+function rangeBlockDeco(from: number, to: number, ids: string[], style: string): Decoration {
+  const spec: RangeBlockSpec = { rangeIds: ids, style };
+  return Decoration.node(from, to, { [RANGE_ATTR]: ids.join(" "), style }, spec);
+}
+const isRangeBlock = (spec: Partial<RangeBlockSpec> | undefined): spec is RangeBlockSpec => Array.isArray(spec?.rangeIds);
+
 export async function initEditor(deps: EditorDeps): Promise<EditorApi> {
   const annotationPlugin = $prose(
     () =>
@@ -451,7 +470,16 @@ export async function initEditor(deps: EditorDeps): Promise<EditorApi> {
                 undefined,
                 (spec: { id?: string }) => spec?.id === id,
               );
-              return set.remove(found);
+              set = set.remove(found);
+              // Margin bars may list other comments too: take this one off, keep the rest.
+              const bars = set.find(undefined, undefined, (spec) => isRangeBlock(spec) && spec.rangeIds.includes(id));
+              if (!bars.length) return set;
+              const kept = bars.flatMap((d) => {
+                const spec = d.spec as RangeBlockSpec;
+                const rest = spec.rangeIds.filter((x) => x !== id);
+                return rest.length ? [rangeBlockDeco(d.from, d.to, rest, spec.style)] : [];
+              });
+              return set.remove(bars).add(tr.doc, kept);
             }
             const add = meta as AddMeta | undefined;
             if (add) {
@@ -493,6 +521,18 @@ export async function initEditor(deps: EditorDeps): Promise<EditorApi> {
                 });
                 const long = isLongRange(add.to - add.from, covered.length);
                 const rangeBg = long ? opaqueBackground(document.querySelector(".editor .ProseMirror")) : "";
+                const rangeStyle = `--had-range-color:${color.edge};--had-range-bg:${rangeBg}`;
+                const bars: Decoration[] = [];
+                if (long) {
+                  for (const b of covered) {
+                    const prev = set
+                      .find(b.from, b.to, (spec) => isRangeBlock(spec))
+                      .filter((d) => d.from === b.from && d.to === b.to);
+                    const ids = [...new Set([...prev.flatMap((d) => (d.spec as RangeBlockSpec).rangeIds), add.id])];
+                    set = set.remove(prev);
+                    bars.push(rangeBlockDeco(b.from, b.to, ids, rangeStyle));
+                  }
+                }
                 const mathBlocks: { from: number; to: number }[] = [];
                 if (!long) {
                   tr.doc.descendants((node, pos) => {
@@ -516,14 +556,7 @@ export async function initEditor(deps: EditorDeps): Promise<EditorApi> {
                     { id: add.id },
                   ),
                   ...(long
-                    ? covered.map((b) =>
-                        Decoration.node(
-                          b.from,
-                          b.to,
-                          { [RANGE_ATTR]: add.id, style: `--had-range-color:${color.edge};--had-range-bg:${rangeBg}` },
-                          { id: add.id },
-                        ),
-                      )
+                    ? bars
                     : mathBlocks.map((b) =>
                         Decoration.node(
                           b.from,
