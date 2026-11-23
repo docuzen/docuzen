@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { assembleProjection } from "./anchor-map.js";
+import { assembleProjection, posRangeForOffsets } from "./anchor-map.js";
 
 // assembleProjection turns the editor's text-node list (text + ProseMirror pos)
 // into the flat projection HAD anchors live over. The load-bearing rule: text
@@ -47,5 +47,36 @@ describe("assembleProjection", () => {
 
   it("returns an empty projection for no text nodes", () => {
     expect(assembleProjection([])).toEqual({ text: "", posOfOffset: [] });
+  });
+});
+
+describe("posRangeForOffsets", () => {
+  // <p>abc</p><p>def</p>: text at positions 1..4 and 6..9; the "\n" between them stands
+  // for the block boundary and sits at 4, the end of the first block's text.
+  const proj = assembleProjection([
+    { text: "abc", pos: 1 },
+    { text: "def", pos: 6 },
+  ]);
+
+  it("maps a range to the positions of its first and last characters", () => {
+    expect(posRangeForOffsets(proj, 0, 3)).toEqual({ from: 1, to: 4 });
+    expect(posRangeForOffsets(proj, 4, 7)).toEqual({ from: 6, to: 9 });
+  });
+
+  it("ends a range that runs onto a block boundary inside that block, not past its closing token", () => {
+    // A whole-paragraph (triple-click) selection, or a proposal hunk ending in "\n".
+    expect(posRangeForOffsets(proj, 0, 4)).toEqual({ from: 1, to: 4 });
+  });
+
+  it("keeps a hard break's newline inside the range (the break is a real one-position node)", () => {
+    const withBreak = assembleProjection([
+      { text: "ab", pos: 1 },
+      { text: "cd", pos: 4 }, // a hard break at 3
+    ]);
+    expect(posRangeForOffsets(withBreak, 0, 3)).toEqual({ from: 1, to: 4 });
+  });
+
+  it("is null when the range holds no text (just a block boundary)", () => {
+    expect(posRangeForOffsets(proj, 3, 4)).toBeNull();
   });
 });
