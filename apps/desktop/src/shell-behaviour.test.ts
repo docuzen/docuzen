@@ -21,6 +21,7 @@ vi.mock("@tauri-apps/api/window", () => ({ getCurrentWindow: () => ({ setTitle: 
 
 import * as dialog from "@tauri-apps/plugin-dialog";
 import { initShell, newDocPath, type ShellDeps } from "./shell.js";
+import { stripFrontmatter } from "./shell-versions.js";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const bodyHtml = /<body[^>]*>([\s\S]*)<\/body>/.exec(readFileSync(resolve(here, "..", "index.html"), "utf8"))![1];
@@ -56,6 +57,7 @@ function setup(opts: { settings?: Record<string, unknown>; versions?: unknown[] 
     readVersion: vi.fn(async ({ versionId }: { versionId: string }) => ({ content: `---\ntitle: x\n---\nbody of ${versionId}\n` })),
     saveDoc: vi.fn(async () => ({ saved: true, version: "v0009" })),
     restoreVersion: vi.fn(async () => ({ restored: true, version: "v0001" })),
+    exportHadz: vi.fn(async (p: { outPath: string }) => ({ path: p.outPath })),
   };
   const log: string[] = [];
   const editorActions: unknown[] = [];
@@ -306,7 +308,7 @@ describe("Save and versions", () => {
   it("Save asks which version to keep; choosing the working copy saves the editor's text", async () => {
     const { shell, api, log } = setup({ versions });
     await shell.openInTab("/d/a.md");
-    shell.setActiveTabMarkdown("# edited in the editor\n");
+    shell.onEditorMarkdownUpdated("# edited in the editor\n", "# doc on disk\n"); // the editor reports an edit
     menu.fire("save");
     await settle();
 
@@ -316,7 +318,7 @@ describe("Save and versions", () => {
 
     $<HTMLButtonElement>("#versionPickerConfirm").click();
     await settle();
-    expect(api.saveDoc).toHaveBeenCalledWith({ text: "# edited in the editor\n" });
+    expect(api.saveDoc).toHaveBeenCalledWith({ docPath: "/d/a.md", text: "# edited in the editor\n" });
     expect(api.restoreVersion).not.toHaveBeenCalled();
     expect($("#versionPickerModal").hidden).toBe(true);
     expect(log.join("\n")).toContain("saved");
@@ -327,13 +329,13 @@ describe("Save and versions", () => {
     await shell.openInTab("/d/a.md");
     menu.fire("save");
     await settle();
-    shell.setActiveTabMarkdown("# unsaved edits\n");
+    shell.onEditorMarkdownUpdated("# unsaved edits\n", "# doc on disk\n");
     const opensBefore = api.openDoc.mock.calls.length;
     all<HTMLInputElement>('#versionPickerList input[name="vpick"]').find((i) => i.value === "v0001")!.checked = true;
     $<HTMLButtonElement>("#versionPickerConfirm").click();
     await settle();
 
-    expect(api.restoreVersion).toHaveBeenCalledWith({ versionId: "v0001" });
+    expect(api.restoreVersion).toHaveBeenCalledWith({ docPath: "/d/a.md", versionId: "v0001" });
     expect(api.saveDoc).not.toHaveBeenCalled();
     expect(api.openDoc.mock.calls.length).toBeGreaterThan(opensBefore); // re-read from disk
     expect(shell.getCurrentMarkdown()).toBe("# doc on disk\n");
@@ -363,5 +365,288 @@ describe("Save and versions", () => {
     expect(shell.versionModal.hidden).toBe(true);
     expect(shell.getCurrentMarkdown()).toBe("body of v0002\n");
     expect(api.saveDoc).not.toHaveBeenCalled(); // working copy only — disk changes on Save
+  });
+});
+
+/** A promise the test settles by hand, to hold an RPC in flight. */
+function deferred<T>() {
+  let resolve!: (v: T) => void;
+  let reject!: (e: unknown) => void;
+  const promise = new Promise<T>((res, rej) => {
+    resolve = res;
+    reject = rej;
+  });
+  return { promise, resolve, reject };
+}
+
+describe("Settings belong to the document they were opened for", () => {
+  it("a failed settings load does not show the form (it would hold the previous document's values)", async () => {
+    const { shell, api } = setup({ settings: { instructions: "rules for A" } });
+    await shell.openInTab("/d/a.md");
+    menu.fire("settings");
+    await settle();
+    $<HTMLButtonElement>("#settingsClose").click();
+    await shell.openInTab("/d/b.md");
+    api.getSettings.mockRejectedValueOnce(new Error("sidecar busy"));
+    menu.fire("settings");
+    await settle();
+    expect($("#settingsModal").hidden).toBe(true);
+    change("#setScope", "repo");
+    await settle();
+    expect(api.setSettings).not.toHaveBeenCalled();
+  });
+
+  it("reads and saves the settings of its own document, by path", async () => {
+    const { shell, api } = setup();
+    await shell.openInTab("/d/a.md");
+    menu.fire("settings");
+    await settle();
+    expect(api.getSettings).toHaveBeenLastCalledWith({ docPath: "/d/a.md" });
+    change("#setScope", "repo");
+    await settle();
+    expect(api.setSettings.mock.calls[0][0]).toMatchObject({ docPath: "/d/a.md", settings: { scope: "repo" } });
+  });
+
+  it("switching tabs closes Settings; a later change cannot save the first document's values onto the second", async () => {
+    const { shell, api } = setup();
+    await shell.openInTab("/d/a.md");
+    menu.fire("settings");
+    await settle();
+    expect($("#settingsModal").hidden).toBe(false);
+    await shell.openInTab("/d/b.md");
+    expect($("#settingsModal").hidden).toBe(true);
+    change("#setAgentEdit", "direct");
+    await settle();
+    expect(api.setSettings).not.toHaveBeenCalled();
+  });
+
+  it("a switch while Settings is still loading does not open it over the new document", async () => {
+    const { shell, api } = setup();
+    await shell.openInTab("/d/a.md");
+    const slow = deferred<Record<string, unknown>>();
+    api.getSettings.mockImplementationOnce(() => slow.promise);
+    menu.fire("settings");
+    await settle();
+    await shell.openInTab("/d/b.md");
+    slow.resolve({ scope: "repo" });
+    await settle();
+    expect($("#settingsModal").hidden).toBe(true);
+  });
+
+  it("instructions typed before a keyboard tab switch are saved to the document they were typed for", async () => {
+    const { shell, api } = setup();
+    await shell.openInTab("/d/a.md");
+    menu.fire("settings");
+    await settle();
+    const box = $<HTMLTextAreaElement>("#setInstructions");
+    box.focus();
+    box.value = "cite sources";
+    await shell.openInTab("/d/b.md"); // ⌘O: no blur happens first
+    await settle();
+    expect(api.setSettings).toHaveBeenCalledTimes(1);
+    expect(api.setSettings.mock.calls[0][0]).toMatchObject({ docPath: "/d/a.md", settings: { instructions: "cite sources" } });
+  });
+});
+
+describe("model manager: editing a model's key", () => {
+  async function openManager() {
+    const ctx = setup();
+    await ctx.shell.openInTab("/d/a.md");
+    menu.fire("settings");
+    await settle();
+    return ctx;
+  }
+  const fill = (id: string, v: string) => void ($<HTMLInputElement>(id).value = v);
+
+  it("changing a model's id or provider replaces its row instead of adding a second one", async () => {
+    const { api } = await openManager();
+    all<HTMLButtonElement>("#modelList .modelrow button")[0].click(); // Edit "litellm/opus"
+    fill("#mfModelId", "opus-4");
+    $<HTMLButtonElement>("#mfSave").click();
+    await settle();
+    expect(api.saveModels.mock.calls[0][0].models.map((m) => m.key)).toEqual(["litellm/opus-4"]);
+    expect(all("#modelList .modelrow")).toHaveLength(1);
+
+    all<HTMLButtonElement>("#modelList .modelrow button")[0].click();
+    fill("#mfProvider", "openrouter");
+    $<HTMLButtonElement>("#mfSave").click();
+    await settle();
+    expect(api.saveModels.mock.calls[1][0].models.map((m) => m.key)).toEqual(["openrouter/opus-4"]);
+  });
+
+  it("renaming a model onto another model's key is refused rather than silently dropping that model", async () => {
+    const { api, log } = await openManager();
+    $<HTMLButtonElement>("#modelAddBtn").click();
+    fill("#mfName", "Haiku");
+    fill("#mfProvider", "litellm");
+    fill("#mfModelId", "haiku");
+    $<HTMLButtonElement>("#mfSave").click();
+    await settle();
+    all<HTMLButtonElement>("#modelList .modelrow button")[2].click(); // Edit Haiku
+    fill("#mfModelId", "opus");
+    $<HTMLButtonElement>("#mfSave").click();
+    await settle();
+    expect(api.saveModels).toHaveBeenCalledTimes(1);
+    expect(log.join("\n")).toContain("litellm/opus already exists");
+    expect($("#modelForm").hidden).toBe(false);
+  });
+});
+
+describe("Save, Export and the version modals stay with their document", () => {
+  const versions = [{ id: "v0001", timestamp: "2026-01-01T00:00:00Z", cause: "manual-save" }];
+
+  it("switching tabs while the Save picker is open cancels the save", async () => {
+    const { shell, api, log } = setup({ versions });
+    await shell.openInTab("/d/a.md");
+    await shell.openInTab("/d/b.md");
+    await shell.activateTab(0);
+    menu.fire("save");
+    await settle();
+    expect($("#versionPickerModal").hidden).toBe(false);
+    await shell.activateTab(1);
+    await settle();
+    expect($("#versionPickerModal").hidden).toBe(true);
+    $<HTMLButtonElement>("#versionPickerConfirm").click();
+    await settle();
+    expect(api.saveDoc).not.toHaveBeenCalled();
+    expect(log.join("\n")).toContain("save canceled");
+  });
+
+  it("closing the last tab while the Export picker is open cancels the export instead of failing", async () => {
+    const { shell, api, log } = setup({ versions });
+    await shell.openInTab("/d/a.md");
+    const errors: unknown[] = [];
+    const onError = (e: PromiseRejectionEvent) => errors.push(e.reason);
+    window.addEventListener("unhandledrejection", onError);
+    menu.fire("export");
+    await settle();
+    await shell.closeTab(0);
+    $<HTMLButtonElement>("#versionPickerConfirm").click();
+    await settle();
+    window.removeEventListener("unhandledrejection", onError);
+    expect(errors).toEqual([]);
+    expect(api.exportHadz).not.toHaveBeenCalled();
+    expect(log.join("\n")).toContain("export canceled");
+  });
+
+  it("the picker lists the versions of the document it was opened for", async () => {
+    const { shell, api } = setup({ versions });
+    await shell.openInTab("/d/a.md");
+    menu.fire("save");
+    await settle();
+    expect(api.listVersions).toHaveBeenLastCalledWith({ docPath: "/d/a.md" });
+  });
+
+  it("a picker whose versions arrive after a switch never opens over the other document", async () => {
+    const { shell, api } = setup({ versions });
+    await shell.openInTab("/d/a.md");
+    const slow = deferred<unknown[]>();
+    api.listVersions.mockImplementationOnce(() => slow.promise);
+    menu.fire("save");
+    await settle();
+    await shell.openInTab("/d/b.md");
+    slow.resolve(versions);
+    await settle();
+    expect($("#versionPickerModal").hidden).toBe(true);
+  });
+
+  it("Edit from here cannot put one document's version into another", async () => {
+    const { shell, api } = setup({ versions });
+    await shell.openInTab("/d/a.md");
+    await shell.openInTab("/d/b.md");
+    await shell.activateTab(0);
+    await shell.openVersionPreview("v0001");
+    expect(shell.versionModal.hidden).toBe(false);
+    expect(api.readVersion).toHaveBeenLastCalledWith({ docPath: "/d/a.md", versionId: "v0001" });
+    await shell.activateTab(1);
+    expect(shell.versionModal.hidden).toBe(true); // the preview closes with its document
+    $<HTMLButtonElement>("#versionEditBtn").click(); // even a stale click
+    await settle();
+    expect(shell.getDocPath()).toBe("/d/b.md");
+    expect(shell.getCurrentMarkdown()).toBe("# doc on disk\n");
+  });
+
+  it("a slow preview that finishes after a newer one does not replace it", async () => {
+    const { shell, api } = setup({ versions });
+    await shell.openInTab("/d/a.md");
+    const slow = deferred<{ content: string }>();
+    api.readVersion.mockImplementationOnce(() => slow.promise);
+    const first = shell.openVersionPreview("v0001");
+    await shell.openVersionPreview("v0002");
+    slow.resolve({ content: "body of v0001\n" });
+    await first;
+    expect($("#versionModalBody").textContent).toBe("body of v0002\n");
+  });
+
+  it("opening the picker again (⌘S twice, or ⌘S then ⇧⌘E) cancels the first request instead of leaving it hanging", async () => {
+    const { shell, api, log } = setup({ versions });
+    await shell.openInTab("/d/a.md");
+    vi.mocked(dialog.save).mockResolvedValueOnce("/out/a.hadz");
+    menu.fire("save");
+    await settle();
+    menu.fire("export");
+    await settle();
+    expect(log.join("\n")).toContain("save canceled");
+    $<HTMLButtonElement>("#versionPickerConfirm").click();
+    await settle();
+    expect(api.exportHadz).toHaveBeenCalledTimes(1);
+    expect(api.saveDoc).toHaveBeenCalledTimes(1); // the export's own save of the working copy, not the cancelled Save
+  });
+});
+
+describe("Export", () => {
+  const versions = [{ id: "v0001", timestamp: "2026-01-01T00:00:00Z", cause: "manual-save" }];
+
+  it("exporting the current working copy saves the editor's text first, so the bundle holds it", async () => {
+    const { shell, api } = setup({ versions });
+    await shell.openInTab("/d/a.md");
+    shell.onEditorMarkdownUpdated("# unsaved edits\n", "# doc on disk\n");
+    vi.mocked(dialog.save).mockResolvedValueOnce("/out/a.hadz");
+    menu.fire("export");
+    await settle();
+    expect($("#versionPickerList .vpick-current").textContent).toContain("saved, then exported");
+    $<HTMLButtonElement>("#versionPickerConfirm").click();
+    await settle();
+    expect(api.saveDoc).toHaveBeenCalledWith({ docPath: "/d/a.md", text: "# unsaved edits\n" });
+    expect(api.exportHadz).toHaveBeenCalledWith({ docPath: "/d/a.md", outPath: "/out/a.hadz" });
+    expect(api.saveDoc.mock.invocationCallOrder[0]).toBeLessThan(api.exportHadz.mock.invocationCallOrder[0]);
+  });
+
+  it("exporting a saved version leaves the document on disk alone", async () => {
+    const { shell, api } = setup({ versions });
+    await shell.openInTab("/d/a.md");
+    vi.mocked(dialog.save).mockResolvedValueOnce("/out/a.hadz");
+    menu.fire("export");
+    await settle();
+    all<HTMLInputElement>('#versionPickerList input[name="vpick"]').find((i) => i.value === "v0001")!.checked = true;
+    $<HTMLButtonElement>("#versionPickerConfirm").click();
+    await settle();
+    expect(api.saveDoc).not.toHaveBeenCalled();
+    expect(api.exportHadz).toHaveBeenCalledWith({ docPath: "/d/a.md", outPath: "/out/a.hadz", versionId: "v0001" });
+  });
+});
+
+describe("version frontmatter", () => {
+  it("strips a leading YAML mapping between --- lines, LF or CRLF", () => {
+    expect(stripFrontmatter("---\nhad:\n  version: 1\ntags:\n- a\n---\n# Body\n")).toBe("# Body\n");
+    expect(stripFrontmatter("---\r\ntitle: x\r\n# a comment\r\n\r\nauthor: \"me\"\r\n---\r\nBody\r\n")).toBe("Body\r\n");
+    expect(stripFrontmatter("---\ntitle: only\n---")).toBe("");
+  });
+
+  it("keeps a document that starts with a horizontal rule", () => {
+    const hr = "---\n\nIntro paragraph.\n\n---\n\nMore text.\n";
+    expect(stripFrontmatter(hr)).toBe(hr);
+    expect(stripFrontmatter("---\n- a list\n---\nx")).toBe("---\n- a list\n---\nx"); // a sequence, not a mapping
+    expect(stripFrontmatter("---\ntitle: x\nno closing line\n")).toBe("---\ntitle: x\nno closing line\n");
+    expect(stripFrontmatter("---\n---\nx")).toBe("---\n---\nx"); // empty: not a mapping
+    expect(stripFrontmatter("# Title\n---\na: b\n---\n")).toBe("# Title\n---\na: b\n---\n");
+  });
+
+  it("the preview of a version that starts with a horizontal rule shows all of it", async () => {
+    const { shell, api } = setup();
+    await shell.openInTab("/d/a.md");
+    api.readVersion.mockResolvedValueOnce({ content: "---\n\nIntro.\n\n---\n\nRest.\n" });
+    await shell.openVersionPreview("v0003");
+    expect($("#versionModalBody").textContent).toBe("---\n\nIntro.\n\n---\n\nRest.\n");
   });
 });

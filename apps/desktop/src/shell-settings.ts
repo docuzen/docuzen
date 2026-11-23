@@ -1,18 +1,22 @@
 // The Settings modal (per-document harness, tool scope, edit mode, default model,
 // standing instructions, web search), the model manager inside it (pi's models.json,
 // keys write-only), and the topbar harness/model badge that summarises the result.
-// Split out of shell.ts; it knows nothing about tabs beyond "is a document open".
+// Split out of shell.ts; it knows nothing about tabs beyond "which document is active". The
+// modal belongs to the document it was opened for: it reads and saves that document's
+// settings by path, and the shell closes it when another document becomes active.
 import type { AgentHarness, HadSettings, ModelConfig } from "@ai-native-doc/docd/protocol";
 import type { ShellDeps } from "./shell.js";
 import { confirmAction, el, wireModal, reportError } from "./ui.js";
 
 export interface SettingsDeps extends Pick<ShellDeps, "api" | "log" | "modelName" | "refreshThreadModels" | "setDefaultModelKey"> {
-  /** Settings are per document: the modal and saves are no-ops without one. */
-  hasActiveDoc: () => boolean;
+  /** Settings are per document: the active one's path, or undefined (the modal and saves are no-ops). */
+  activeDocPath: () => string | undefined;
 }
 
 export interface SettingsApi {
   openSettings: () => Promise<void>;
+  /** Close the modal and let go of its document (the shell calls this when the active document changes). */
+  closeSettings: () => void;
   /** Refresh the topbar harness/model badge from the live RPCs. */
   refreshHarnessBadge: () => Promise<void>;
 }
@@ -198,8 +202,12 @@ export function initSettings(deps: SettingsDeps): SettingsApi {
     syncHarnessManagedControls();
   }
 
+  /** The key of the row the form is editing (Edit mode), or undefined when adding. */
+  let editingKey: string | undefined;
+
   /** Show the add/edit form. `existing` → Edit mode (key left blank = keep); omitted → empty Add. */
   function showModelForm(existing?: ModelConfig): void {
+    editingKey = existing?.key;
     mfNameEl.value = existing?.name ?? "";
     mfProviderEl.value = existing?.provider ?? (setHarnessEl.value === "codex" ? "docuzen" : "");
     mfModelIdEl.value = existing?.modelId ?? "";
@@ -210,6 +218,7 @@ export function initSettings(deps: SettingsDeps): SettingsApi {
   }
   function hideModelForm(): void {
     modelFormEl.hidden = true;
+    editingKey = undefined;
   }
 
   async function saveModelFromForm(): Promise<void> {
@@ -227,9 +236,14 @@ export function initSettings(deps: SettingsDeps): SettingsApi {
       reasoningEffort: mfReasoningEl.value as ModelConfig["reasoningEffort"],
       ...(apiKey ? { apiKey } : {}),
     };
-    // Merge: replace the same-key entry (Edit) or append (Add). Unchanged rows are
-    // sent WITHOUT apiKey so saveModels preserves their stored keys.
-    const idx = configuredModels.findIndex((m) => m.key === edited.key);
+    // Merge: replace the edited row (found by the key it had when the form opened, so changing
+    // its provider or model id renames it instead of adding a second row) or the same-key
+    // entry, else append (Add). Unchanged rows are sent WITHOUT apiKey so saveModels
+    // preserves their stored keys.
+    if (editingKey !== undefined && edited.key !== editingKey && configuredModels.some((m) => m.key === edited.key)) {
+      return void deps.log(`model: ${edited.key} already exists — edit that row instead`);
+    }
+    const idx = configuredModels.findIndex((m) => m.key === (editingKey ?? edited.key));
     const models =
       idx >= 0
         ? configuredModels.map((m, i) => (i === idx ? edited : withoutKey(m)))
@@ -263,32 +277,59 @@ export function initSettings(deps: SettingsDeps): SettingsApi {
   mfSaveBtn.addEventListener("click", () => void saveModelFromForm());
   mfCancelBtn.addEventListener("click", () => hideModelForm());
 
+  /** The document the open modal shows and saves; undefined while it is closed or loading. */
+  let settingsDocPath: string | undefined;
+  /** Bumped by every open and close, so a slow open cannot show the modal after either. */
+  let openSeq = 0;
+
   async function openSettings(): Promise<void> {
-    if (!deps.hasActiveDoc()) return void deps.log("settings: open a document first");
-    hideModelForm();
+    const docPath = deps.activeDocPath();
+    if (!docPath) return void deps.log("settings: open a document first");
+    closeSettings();
+    const seq = ++openSeq;
+    // A load the user has moved on from (another document, or Settings closed) stops here.
+    const stale = () => seq !== openSeq || deps.activeDocPath() !== docPath;
     try {
-      const s = await deps.api.getSettings({});
+      const s = await deps.api.getSettings({ docPath });
+      if (stale()) return;
       setScopeEl.value = s.scope ?? "folder";
       await refreshHarnesses(s.harness ?? "pi");
+      if (stale()) return;
       setAgentEditEl.value = s.agentEdit ?? "propose";
       setInstructionsEl.value = s.instructions ?? "";
       setWebSearchEl.checked = s.webSearch?.enabled !== false;
       setWebProviderEl.value = s.webSearch?.provider ?? "ddg";
       await refreshModels();
+      if (stale()) return;
       setDefaultModelEl.value = s.model ?? "";
       syncHarnessManagedControls();
     } catch (e) {
-      reportError("settings load", e, deps.log);
+      // Never show the form without this document's values: it would hold the last
+      // document's, and the first change would save them onto this one.
+      return void reportError("settings load", e, deps.log);
     }
+    settingsDocPath = docPath;
     settingsModal.hidden = false;
   }
+
+  function closeSettings(): void {
+    // Instructions save on blur; a keyboard tab switch closes the modal without one, so save
+    // what was typed now, to the document it was typed for.
+    if (settingsDocPath && document.activeElement === setInstructionsEl) void saveSettings();
+    openSeq++;
+    settingsDocPath = undefined;
+    settingsModal.hidden = true;
+    hideModelForm();
+  }
+
   // Settings opens from the native File menu (⌘,) — see the menu-action listener.
   async function saveSettings(): Promise<void> {
-    if (!deps.hasActiveDoc()) return;
+    const docPath = settingsDocPath;
+    if (!docPath) return;
     const harness = selectedHarnessInfo();
     const harnessManagedModels = !!harness && harness.id !== "pi" && harness.id !== "codex";
     const model = harnessManagedModels ? undefined : setDefaultModelEl.value || undefined;
-    deps.setDefaultModelKey(model ?? ""); // thread pickers default to the new per-doc model
+    if (deps.activeDocPath() === docPath) deps.setDefaultModelKey(model ?? ""); // thread pickers default to the new per-doc model
     const instructions = setInstructionsEl.value.trim() || undefined;
     const webSearch = {
       enabled: setWebSearchEl.checked,
@@ -296,6 +337,7 @@ export function initSettings(deps: SettingsDeps): SettingsApi {
     };
     try {
       await deps.api.setSettings({
+        docPath,
         settings: {
           scope: setScopeEl.value as HadSettings["scope"],
           harness: (setHarnessEl.value || "pi") as HadSettings["harness"],
@@ -322,9 +364,7 @@ export function initSettings(deps: SettingsDeps): SettingsApi {
   setInstructionsEl.addEventListener("blur", () => void saveSettings());
   setWebSearchEl.addEventListener("change", () => void saveSettings());
   setWebProviderEl.addEventListener("change", () => void saveSettings());
-  document.querySelector("#settingsClose")!.addEventListener("click", () => {
-    settingsModal.hidden = true;
-  });
+  document.querySelector("#settingsClose")!.addEventListener("click", () => closeSettings());
   wireModal(settingsModal); // click backdrop to close
 
   // --- topbar: harness/model badge (Phase 11 T1) ---
@@ -379,9 +419,10 @@ export function initSettings(deps: SettingsDeps): SettingsApi {
   async function refreshHarnessBadge(): Promise<void> {
     const list = await loadHarnesses();
     let settings: HadSettings | undefined;
-    if (deps.hasActiveDoc()) {
+    const docPath = deps.activeDocPath();
+    if (docPath) {
       try {
-        settings = await deps.api.getSettings({});
+        settings = await deps.api.getSettings({ docPath });
       } catch (e) {
         reportError("badge settings load", e, deps.log);
       }
@@ -390,5 +431,5 @@ export function initSettings(deps: SettingsDeps): SettingsApi {
     renderHarnessBadge(list.find((h) => h.id === harnessId) ?? list[0], settings);
   }
 
-  return { openSettings, refreshHarnessBadge };
+  return { openSettings, closeSettings, refreshHarnessBadge };
 }
