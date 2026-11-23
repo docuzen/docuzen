@@ -2,7 +2,7 @@
 // live under the document's .docuzen/ store; this file holds machine-wide defaults).
 // Reading is total: a missing or malformed file is "unconfigured", so the
 // sidecar can never crash-loop on user-edited config.
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import { parse, stringify } from "smol-toml";
@@ -44,12 +44,39 @@ export function readAppConfig(): AppConfig {
   }
 }
 
+/** The file as it stands, or {} when it is missing or not valid TOML. */
+function readRawConfig(path: string): Record<string, unknown> {
+  try {
+    return parse(readFileSync(path, "utf8")) as Record<string, unknown>;
+  } catch {
+    return {};
+  }
+}
+
+/** Set (or with `undefined`, remove) one key of a table, dropping the table once empty. */
+function setKey(doc: Record<string, unknown>, table: string, key: string, value: unknown): void {
+  const current = doc[table];
+  const t: Record<string, unknown> =
+    current && typeof current === "object" && !Array.isArray(current) ? { ...(current as Record<string, unknown>) } : {};
+  if (value === undefined) delete t[key];
+  else t[key] = value;
+  if (Object.keys(t).length) doc[table] = t;
+  else delete doc[table];
+}
+
+/**
+ * Write the settings docuzen manages onto the existing file: sections and keys it does
+ * not know about (the user's own) are kept. Comments are not, since the TOML library
+ * does not round-trip them.
+ */
 export function writeAppConfig(config: AppConfig): void {
   const path = appConfigPath();
   mkdirSync(dirname(path), { recursive: true });
-  const doc: Record<string, unknown> = {};
-  if (config.harness) doc.harness = config.harness;
-  if (config.pi) doc.pi = config.pi;
-  if (config.codex) doc.codex = config.codex;
-  writeFileSync(path, stringify(doc) + "\n", "utf8");
+  const doc = readRawConfig(path);
+  setKey(doc, "harness", "default", config.harness?.default);
+  setKey(doc, "pi", "model", config.pi?.model);
+  setKey(doc, "codex", "command", config.codex?.command);
+  const tmp = `${path}.${process.pid}.tmp`;
+  writeFileSync(tmp, stringify(doc) + "\n", "utf8");
+  renameSync(tmp, path);
 }

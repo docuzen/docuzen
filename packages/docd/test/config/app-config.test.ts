@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, test } from "vitest";
-import { chmodSync, mkdtempSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { parse } from "smol-toml";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { appConfigPath, readAppConfig, writeAppConfig } from "../../src/config/app-config.js";
@@ -30,6 +31,19 @@ describe("app config", () => {
     const cfg = readAppConfig();
     expect(cfg.harness).toEqual({ default: "pi" });
     expect(cfg.pi).toEqual({ model: "litellm/gpt-5.5" });
+  });
+
+  test("keeps sections and keys it does not manage", () => {
+    writeFileSync(
+      appConfigPath(),
+      '[harness]\ndefault = "pi"\n\n[pi]\nmodel = "a/b"\nthinking = "high"\n\n[codex]\ncommand = "/bin/codex"\n\n[mine]\nkey = "kept"\n',
+    );
+    writeAppConfig({ harness: { default: "codex" }, pi: { model: "c/d" } });
+    const raw = parse(readFileSync(appConfigPath(), "utf8")) as Record<string, Record<string, unknown>>;
+    expect(raw.harness).toEqual({ default: "codex" });
+    expect(raw.pi).toEqual({ model: "c/d", thinking: "high" });
+    expect(raw.codex).toBeUndefined();
+    expect(raw.mine).toEqual({ key: "kept" });
   });
 
   test("codex harness roundtrip", () => {
