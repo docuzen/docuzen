@@ -1,5 +1,5 @@
 import { describe, expect, test } from "vitest";
-import { mkdtempSync, mkdirSync, writeFileSync } from "node:fs";
+import { mkdtempSync, mkdirSync, realpathSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { resolveHadDir } from "../../src/had/resolve.js";
@@ -39,8 +39,19 @@ describe("resolveHadDir", () => {
     expect(resolveHadDir(doc)).toBe(join(dir, ".docuzen", "loose.md.had"));
   });
 
-  test("a relative path does not hang and falls back to its dir", () => {
-    expect(resolveHadDir("a/b.md")).toBe(join("a", ".docuzen", "b.md.had"));
+  test("a relative path is taken against the working directory and finds the repo above it", () => {
+    const root = realpathSync(tmp());
+    mkdirSync(join(root, ".git"));
+    mkdirSync(join(root, "docs"));
+    writeFileSync(join(root, "docs", "plan.md"), "# plan\n");
+    const cwd = process.cwd();
+    try {
+      process.chdir(join(root, "docs"));
+      expect(resolveHadDir("plan.md")).toBe(join(root, ".docuzen", "docs", "plan.md.had"));
+      expect(resolveHadDir("./plan.md")).toBe(resolveHadDir(join(root, "docs", "plan.md")));
+    } finally {
+      process.chdir(cwd);
+    }
   });
 
   test("path with spaces", () => {

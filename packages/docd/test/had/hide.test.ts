@@ -46,3 +46,42 @@ describe("ensureDocuzenHidden", () => {
     expect(readFileSync(p, "utf8")).toBe(".docuzen/\n");
   });
 });
+
+describe("which excludes file it falls back to (L9)", () => {
+  test("with no global setting it uses the system one, never the current repo's local config", async () => {
+    const { vi } = await import("vitest");
+    const { execFileSync } = await import("node:child_process");
+    const root = mkdtempSync(join(tmpdir(), "hide-l9-"));
+    const repo = join(root, "repo");
+    mkdirSync(repo);
+    execFileSync("git", ["init", "-q", repo]);
+    const local = join(root, "local-ignore");
+    execFileSync("git", ["-C", repo, "config", "core.excludesFile", local]);
+    const globalCfg = join(root, "global.gitconfig");
+    writeFileSync(globalCfg, "");
+    const systemCfg = join(root, "system.gitconfig");
+    const system = join(root, "system-ignore");
+    writeFileSync(systemCfg, `[core]\n\texcludesFile = ${system}\n`);
+
+    const saved = { ...process.env };
+    const cwd = process.cwd();
+    try {
+      delete process.env.DOCUZEN_GIT_EXCLUDES_FILE;
+      process.env.GIT_CONFIG_GLOBAL = globalCfg;
+      process.env.GIT_CONFIG_SYSTEM = systemCfg;
+      delete process.env.GIT_CONFIG_NOSYSTEM;
+      process.chdir(repo);
+      vi.resetModules();
+      const fresh = await import("../../src/had/hide.js");
+      fresh.ensureDocuzenHidden();
+      expect(existsSync(local)).toBe(false);
+      expect(readFileSync(system, "utf8")).toContain(".docuzen/");
+    } finally {
+      process.chdir(cwd);
+      for (const k of ["GIT_CONFIG_GLOBAL", "GIT_CONFIG_SYSTEM", "GIT_CONFIG_NOSYSTEM", "DOCUZEN_GIT_EXCLUDES_FILE"]) {
+        if (saved[k] === undefined) delete process.env[k];
+        else process.env[k] = saved[k];
+      }
+    }
+  });
+});

@@ -146,7 +146,19 @@ export class RpcHandler {
       listVersions: (p) => listVersions(p.docPath),
       readVersion: async (p) => ({ content: await readVersion(p.docPath, p.versionId) }),
       exportHadz: (p) => exportHadz(p.docPath, { versionId: p.versionId, outPath: p.outPath }),
-      importHadz: (p) => importHadz(p.hadzPath, p.destDir),
+      // The import replaces the target's review folder, state.db included: close any open
+      // task database in it first, so the next request opens the imported one instead of
+      // reading (and writing) the deleted file through a stale handle.
+      importHadz: (p) =>
+        importHadz(p.hadzPath, p.destDir, {
+          releaseHadDir: (hadDir) => {
+            for (const [docPath, r] of this.docs) {
+              if (hadPaths(docPath).dir !== hadDir) continue;
+              r.db.close();
+              this.docs.delete(docPath);
+            }
+          },
+        }),
       createDoc: (p) => createDoc(p.docPath),
       readImage: (p) => readImage(p.path),
       saveImage: (p) => saveImage(p.docPath, { name: p.name, dataBase64: p.dataBase64, sourcePath: p.sourcePath }),

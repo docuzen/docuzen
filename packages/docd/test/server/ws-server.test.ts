@@ -89,7 +89,7 @@ describe("ws-server", () => {
           JSON.stringify({
             id: "d",
             method: "discuss",
-            params: { docPath, threadId: "t1", annotationId: "c0001", stance: "none", comment: "Why?" },
+            params: { docPath, threadId: "c0001", annotationId: "c0001", stance: "none", comment: "Why?" },
           }),
         ),
       );
