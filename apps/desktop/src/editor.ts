@@ -40,11 +40,13 @@ import { nord } from "@milkdown/theme-nord";
 import { resolveAnchor } from "@ai-native-doc/docd/anchor";
 import "@milkdown/kit/prose/view/style/prosemirror.css";
 import "@milkdown/theme-nord/style.css";
+import "katex/dist/katex.min.css";
 import { projectionOf, buildProjection, posRangeForOffsets } from "./anchor-map.js";
 import { openMermaidLightbox } from "./mermaid-lightbox.js";
 import { annotationIdAtPos, directiveOrdinalAtPos, type AnnotationRange, type PosRange } from "./click-jump.js";
 import type { Annotation } from "@ai-native-doc/docd/protocol";
 import { makeImageView, safeImageSchema } from "./doc-images.js";
+import { createMathCodeBlockView, mathPlugins } from "./doc-math.js";
 import { RANGE_ATTR, isLongRange, opaqueBackground } from "./long-range.js";
 
 // --- annotation decorations (overlay; auto-map through edits) ---
@@ -118,12 +120,17 @@ const searchPlugin = $prose(
             const { ranges, activeIndex } = meta as SearchDecorationMeta;
             return DecorationSet.create(
               tr.doc,
-              ranges.map((r) =>
-                Decoration.inline(r.from, r.to, {
+              ranges.map((r) => {
+                const attrs = {
                   class: `had-search-match${r.index === activeIndex ? " active" : ""}`,
                   "data-search-index": String(r.index),
-                }),
-              ),
+                };
+                const target = tr.doc.nodeAt(r.from);
+                if (target?.type.name === "math_block" && r.to === r.from + target.nodeSize) {
+                  return Decoration.node(r.from, r.to, attrs);
+                }
+                return Decoration.inline(r.from, r.to, attrs);
+              }),
             );
           }
           return set.map(tr.mapping, tr.doc);
@@ -255,8 +262,12 @@ function addMermaidExpandButton(container: HTMLElement): void {
  * editing and markdown round-trip are untouched. A malformed mermaid block shows
  * its raw source in a `.mermaid-error` box — it never throws or breaks the editor.
  */
-const mermaidView = $view(codeBlockSchema.node, () => (initialNode) => {
-  // Non-mermaid code blocks: standard editable view (pre>code with contentDOM).
+const mermaidView = $view(codeBlockSchema.node, () => (initialNode, view, getPos) => {
+  // Fenced ```math blocks render via KaTeX in display mode (GitHub Markdown convention).
+  if (initialNode.attrs.language === "math") {
+    return createMathCodeBlockView(initialNode, view, getPos);
+  }
+  // Non-mermaid/non-math code blocks: standard editable view (pre>code with contentDOM).
   // Returning a contentDOM keeps ProseMirror in charge of editing + serialization.
   if (initialNode.attrs.language !== "mermaid") {
     const pre = document.createElement("pre");
@@ -267,7 +278,10 @@ const mermaidView = $view(codeBlockSchema.node, () => (initialNode) => {
     return {
       dom: pre,
       contentDOM: code,
-      update: (updated) => updated.type.name === "code_block" && updated.attrs.language !== "mermaid",
+      update: (updated) =>
+        updated.type.name === "code_block" &&
+        updated.attrs.language !== "mermaid" &&
+        updated.attrs.language !== "math",
     };
   }
 
@@ -465,6 +479,15 @@ export async function initEditor(deps: EditorDeps): Promise<EditorApi> {
                 });
                 const long = isLongRange(add.to - add.from, covered.length);
                 const rangeBg = long ? opaqueBackground(document.querySelector(".editor .ProseMirror")) : "";
+                const mathBlocks: { from: number; to: number }[] = [];
+                if (!long) {
+                  tr.doc.descendants((node, pos) => {
+                    if (node.type.name === "math_block" && pos < add.to && pos + node.nodeSize > add.from) {
+                      mathBlocks.push({ from: pos, to: pos + node.nodeSize });
+                    }
+                    return true;
+                  });
+                }
                 set = set.add(tr.doc, [
                   Decoration.inline(
                     add.from,
@@ -487,10 +510,28 @@ export async function initEditor(deps: EditorDeps): Promise<EditorApi> {
                           { id: add.id },
                         ),
                       )
-                    : []),
+                    : mathBlocks.map((b) =>
+                        Decoration.node(
+                          b.from,
+                          b.to,
+                          {
+                            class: "had-mark had-comment",
+                            "data-anno": add.id,
+                            style: `background:${color.bg}40;box-shadow:0 0 0 1px ${color.edge}33`,
+                          },
+                          { id: add.id },
+                        ),
+                      )),
                   badge,
                 ]);
               } else {
+                const mathBlocks: { from: number; to: number }[] = [];
+                tr.doc.descendants((node, pos) => {
+                  if (node.type.name === "math_block" && pos < add.to && pos + node.nodeSize > add.from) {
+                    mathBlocks.push({ from: pos, to: pos + node.nodeSize });
+                  }
+                  return true;
+                });
                 set = set.add(tr.doc, [
                   Decoration.inline(
                     add.from,
@@ -501,6 +542,18 @@ export async function initEditor(deps: EditorDeps): Promise<EditorApi> {
                       style: `background:${add.color.bg};box-shadow:0 0 0 1px ${add.color.edge}66,inset 0 -3px 0 ${add.color.edge}`,
                     },
                     { id: add.id },
+                  ),
+                  ...mathBlocks.map((b) =>
+                    Decoration.node(
+                      b.from,
+                      b.to,
+                      {
+                        class: "had-mark had-highlight",
+                        "data-anno": add.id,
+                        style: `background:${add.color.bg};box-shadow:0 0 0 1px ${add.color.edge}66,inset 0 -3px 0 ${add.color.edge}`,
+                      },
+                      { id: add.id },
+                    ),
                   ),
                 ]);
               }
@@ -672,6 +725,7 @@ export async function initEditor(deps: EditorDeps): Promise<EditorApi> {
     .use(directivePlugin)
     .use(clickJumpPlugin)
     .use(mermaidView)
+    .use(mathPlugins)
     .use(safeImageSchema)
     .use(makeImageView(deps.resolveImageSrc, deps.readImage))
     .create();
