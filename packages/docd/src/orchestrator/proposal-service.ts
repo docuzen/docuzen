@@ -1,6 +1,5 @@
 import { readFile, writeFile } from "node:fs/promises";
 import { createHash } from "node:crypto";
-import matter from "gray-matter";
 import type { EditHunk, ProposedEdit, TokenSink } from "../agent/types.js";
 import { validateHtml } from "../agent/html-validation.js";
 import {
@@ -14,6 +13,7 @@ import {
   type Proposal,
 } from "../had/index.js";
 import { withFileLock } from "../had/io.js";
+import { documentBody, splitDocument } from "../had/frontmatter.js";
 import { createAnchor, resolveAnchor } from "../anchor/index.js";
 import { diffToHunks } from "./diff.js";
 import { withEditSnapshot } from "./edit-snapshot.js";
@@ -24,9 +24,7 @@ function bodyHash(body: string): string {
 }
 
 /** The document body the agent sees and edits: frontmatter-stripped markdown, or raw HTML. */
-export function documentBody(raw: string, docPath: string): string {
-  return isHtmlDoc(docPath) ? raw : matter(raw).content;
-}
+export { documentBody };
 
 function containsHtmlTag(text: string): boolean {
   return /<\/?[A-Za-z][^>]*>/.test(text);
@@ -184,7 +182,7 @@ export class ProposalService {
    * Approve a pending proposal: apply it to the doc, then mark approved. Rewrite mode
    * writes the exact kept body; hunk mode splices each oldText→newText; a single-span
    * proposal (newText only) replaces its annotation's resolved anchor. Frontmatter is
-   * preserved. Applies to one document are serialized.
+   * preserved byte for byte. Applies to one document are serialized.
    */
   approve(
     docPath: string,
@@ -230,8 +228,7 @@ export class ProposalService {
     }
     const raw = await readFile(docPath, "utf8");
     const htmlDoc = isHtmlDoc(docPath);
-    const parsed = htmlDoc ? null : matter(raw);
-    const body = htmlDoc ? raw : parsed!.content;
+    const { head, body } = splitDocument(raw, docPath);
     // Staleness compare-and-swap: if the body drifted since the proposal was made, refuse
     // rather than clobber the intervening edits (a full rewrite would overwrite the whole
     // body; hunks would apply against text the agent never saw). Legacy proposals have no
@@ -266,7 +263,7 @@ export class ProposalService {
       docPath,
       threadId,
       async () => {
-        await writeFile(docPath, htmlDoc ? newBody : matter.stringify(newBody, parsed!.data), "utf8");
+        await writeFile(docPath, head + newBody, "utf8");
       },
       { before: raw },
     );

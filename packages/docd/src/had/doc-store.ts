@@ -1,9 +1,9 @@
 import { readFile, writeFile } from "node:fs/promises";
 import { basename } from "node:path";
-import matter from "gray-matter";
 import { hadPaths } from "./paths.js";
 import { withFileLock, writeFileAtomic } from "./io.js";
 import { isHtmlDoc } from "./doc-format.js";
+import { documentBody, replaceBody } from "./frontmatter.js";
 import { ensureDocuzenHidden } from "./hide.js";
 import { readManifest, writeManifest, initManifest, contentHash } from "./manifest.js";
 import { readAnnotations } from "./annotations.js";
@@ -33,7 +33,7 @@ export async function openDoc(docPath: string): Promise<OpenDocResult> {
   const raw = await readFile(docPath, "utf8");
   // For markdown, strip frontmatter (it's metadata, not editor content);
   // for HTML, return it raw (the webview converts it for display).
-  const text = isHtml ? raw : matter(raw).content;
+  const text = documentBody(raw, docPath);
   const format = isHtml ? "html" : "markdown";
   const annotations = (await readAnnotations(docPath)).annotations;
   const withBodies = await Promise.all(
@@ -65,16 +65,9 @@ export async function saveDoc(
   text: string,
   now: string,
 ): Promise<{ saved: boolean; version: string }> {
-  // HTML is written verbatim (no YAML frontmatter); markdown preserves any
-  // frontmatter the user put there themselves.
-  let full: string;
-  if (isHtmlDoc(docPath)) {
-    full = text;
-  } else {
-    const raw = await readFile(docPath, "utf8");
-    const data = matter(raw).data;
-    full = matter.stringify(text, data);
-  }
+  // HTML is written verbatim (no YAML frontmatter); markdown keeps whatever precedes
+  // the body on disk (frontmatter the user put there themselves, a BOM) byte for byte.
+  const full = isHtmlDoc(docPath) ? text : replaceBody(await readFile(docPath, "utf8"), docPath, text);
   await writeFile(docPath, full, "utf8");
   await writeManifest(docPath, {
     version: 1,

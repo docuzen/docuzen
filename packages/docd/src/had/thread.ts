@@ -1,5 +1,4 @@
 import { readFile } from "node:fs/promises";
-import matter from "gray-matter";
 import type {
   ThreadFile,
   ThreadFrontmatter,
@@ -8,6 +7,7 @@ import type {
 } from "./types.js";
 import { hadPaths } from "./paths.js";
 import { withFileLock, writeFileAtomic } from "./io.js";
+import { splitFrontmatter, stringifyFrontmatter } from "./frontmatter.js";
 
 // Turn header. The optional trailing " ::vNNNN" tag records the doc version active
 // at this turn; it's digits-only so it can't collide with the colons in an ISO timestamp.
@@ -21,13 +21,23 @@ function headerFor(turn: ThreadTurn): string {
   return `## ${turn.role}${metaPart} — ${turn.timestamp}${versionPart}`;
 }
 
-/** Split a turn's accumulated lines into its persisted reasoning + reply body. */
+// Reasoning is stored inside an HTML comment, so it must never contain the comment's
+// closing "-->". Every "--" + backslashes + ">" gains one backslash on the way out and
+// loses it on the way back, which is reversible for any text.
+const escapeThinking = (s: string): string => s.replace(/--(\\*)>/g, "--$1\\>");
+const unescapeThinking = (s: string): string => s.replace(/--(\\*)\\>/g, "--$1>");
+
+/**
+ * Split a turn's accumulated lines into its persisted reasoning + reply body. Reasoning
+ * is only ever written as the turn's first block, so a `<!--think` line anywhere else is
+ * part of the reply.
+ */
 function extractThinking(lines: string[]): { thinking?: string; body: string } {
-  const start = lines.findIndex((l) => l.trimStart().startsWith(THINK_OPEN));
-  if (start === -1) return { body: lines.join("\n") };
+  const start = lines.findIndex((l) => l.trim() !== "");
+  if (start === -1 || lines[start].trim() !== THINK_OPEN) return { body: lines.join("\n") };
   let end = start + 1;
   while (end < lines.length && lines[end].trim() !== THINK_CLOSE) end++;
-  const thinking = lines.slice(start + 1, end).join("\n").trim();
+  const thinking = unescapeThinking(lines.slice(start + 1, end).join("\n").trim());
   const body = [...lines.slice(0, start), ...lines.slice(end + 1)].join("\n");
   return { thinking, body };
 }
@@ -36,7 +46,7 @@ export function serializeThread(t: ThreadFile): string {
   const body = t.turns
     .map((turn) => {
       const think = turn.thinking
-        ? `${THINK_OPEN}\n${turn.thinking.trim()}\n${THINK_CLOSE}\n\n`
+        ? `${THINK_OPEN}\n${escapeThinking(turn.thinking.trim())}\n${THINK_CLOSE}\n\n`
         : "";
       return `${headerFor(turn)}\n\n${think}${turn.body.trim()}\n`;
     })
@@ -55,12 +65,12 @@ export function serializeThread(t: ThreadFile): string {
   if (fm.branchFromTurn !== undefined) data.branchFromTurn = fm.branchFromTurn;
   if (fm.baseVersion !== undefined) data.baseVersion = fm.baseVersion;
   if (fm.baseDoc !== undefined) data.baseDoc = fm.baseDoc;
-  return matter.stringify(body, data);
+  return stringifyFrontmatter(data, body);
 }
 
 export function parseThread(text: string): ThreadFile {
-  const parsed = matter(text);
-  const fm = parsed.data as Record<string, unknown>;
+  const parsed = splitFrontmatter(text);
+  const fm = parsed.data;
   const frontmatter: ThreadFrontmatter = {
     id: fm.id as string,
     anchorExact: fm.anchorExact as string,
@@ -76,7 +86,7 @@ export function parseThread(text: string): ThreadFile {
   if (fm.baseDoc !== undefined) frontmatter.baseDoc = fm.baseDoc as "latest" | "at-turn";
 
   const turns: ThreadTurn[] = [];
-  const lines = parsed.content.split("\n");
+  const lines = parsed.body.split("\n");
   let current: ThreadTurn | null = null;
   let buf: string[] = [];
   const flush = () => {

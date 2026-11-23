@@ -1,6 +1,7 @@
 export * from "./types.js";
 export * from "./paths.js";
 export * from "./doc-format.js";
+export * from "./frontmatter.js";
 export * from "./manifest.js";
 export * from "./annotations.js";
 export * from "./proposals.js";
