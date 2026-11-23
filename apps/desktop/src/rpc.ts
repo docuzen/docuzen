@@ -34,6 +34,21 @@ export function docdPort(): number {
   return env ? Number(env) : DEFAULT_PORT;
 }
 
+/**
+ * The launch secret docd requires on every connection (see docd's server/access.ts).
+ * Resolved like docdPort(): injected by the Rust shell next to `__DOCD_PORT__` in the
+ * packaged app, else a `?docdToken=` query parameter (tools/parity, tools/visual), else
+ * `VITE_DOCD_TOKEN` (scripts/dev.mjs). Empty when none is set: docd then refuses us.
+ */
+export function docdToken(): string {
+  const injected = (globalThis as { __DOCD_TOKEN__?: string }).__DOCD_TOKEN__;
+  if (typeof injected === "string" && injected) return injected;
+  const search = (globalThis as { location?: { search?: string } }).location?.search ?? "";
+  const q = new URLSearchParams(search).get("docdToken");
+  if (q) return q;
+  return (import.meta as { env?: Record<string, string> }).env?.VITE_DOCD_TOKEN ?? "";
+}
+
 interface Pending {
   resolve: (v: unknown) => void;
   reject: (e: Error) => void;
@@ -84,7 +99,10 @@ export function connect(
   onStatus?: (s: string) => void,
   wsFactory: WebSocketFactory = (url) => new WebSocket(url),
 ): DocdClient {
-  const url = `ws://127.0.0.1:${docdPort()}`;
+  // Read once: the token is fixed for the app's lifetime, so reconnects (to a respawned
+  // sidecar on the same port) present the same one.
+  const token = docdToken();
+  const url = `ws://127.0.0.1:${docdPort()}${token ? `/?token=${encodeURIComponent(token)}` : ""}`;
   const pending = new Map<string, Pending>();
   const queue = new Map<string, Queued>();
   let counter = 0;

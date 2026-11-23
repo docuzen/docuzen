@@ -54,6 +54,20 @@ afterEach(async () => {
 });
 
 describe("RpcHandler", () => {
+  it("answers anything that is not a request object with an error, and never throws", async () => {
+    for (const frame of [null, undefined, 42, "openDoc", true, [], [{ id: "x", method: "openDoc" }], {}, { method: 7 }]) {
+      const res = await handler.handle(frame);
+      expect(res, JSON.stringify(frame)).toMatchObject({ id: "", ok: false });
+    }
+    expect(await handler.handle({ id: "bad-params", method: "openDoc", params: "x" })).toMatchObject({
+      id: "bad-params",
+      ok: false,
+      error: "invalid request: params must be an object",
+    });
+    // A request without params is read as `{}`.
+    expect(await handler.handle({ id: "h", method: "listHarnesses" })).toMatchObject({ id: "h", ok: true });
+  });
+
   it("echoes the request id and reports ok on success", async () => {
     const res = await handler.handle({
       id: "r1",

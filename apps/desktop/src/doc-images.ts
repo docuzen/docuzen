@@ -18,6 +18,7 @@ import { imageSchema } from "@milkdown/kit/preset/commonmark";
 import { $view } from "@milkdown/kit/utils";
 import type { EditorView } from "@milkdown/kit/prose/view";
 import { IMG_SRC_ATTR, type HtmlSurface } from "./html-surface.js";
+import { docdToken } from "./rpc.js";
 
 export { IMG_SRC_ATTR, restoreHtmlImages } from "./html-surface.js";
 
@@ -71,12 +72,22 @@ export function localImagePath(docPath: string, src: string): string | null {
   return normalizePath(path.startsWith("/") ? path : `${dirOf(docPath)}/${path}`);
 }
 
+/**
+ * The sidecar's `GET /image` URL for an absolute image path. Carries the launch token, which
+ * docd requires; it only ever lives in the live DOM (the saved document keeps the authored src).
+ */
+export function sidecarImageUrl(path: string, port: number): string {
+  const token = docdToken();
+  const auth = token ? `&token=${encodeURIComponent(token)}` : "";
+  return `http://127.0.0.1:${port}/image?path=${encodeURIComponent(path)}${auth}`;
+}
+
 /** URL the webview should load for an image `src` written in the document at `docPath`. */
 export function resolveImageSrc(docPath: string | undefined, src: string, port: number): string {
   if (!docPath) return src;
   const path = localImagePath(docPath, src);
   if (!path || !IMAGE_EXT_RE.test(path)) return src;
-  return `http://127.0.0.1:${port}/image?path=${encodeURIComponent(path)}`;
+  return sidecarImageUrl(path, port);
 }
 
 const SERVED_RE = /^http:\/\/127\.0\.0\.1:\d+\/image\?path=([^&#]+)/;
