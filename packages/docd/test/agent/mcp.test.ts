@@ -44,6 +44,25 @@ describe("document toolchain resolver", () => {
     }
   });
 
+  it("hands the npx launcher its proxy settings and nothing else from docd's environment", () => {
+    const names = ["HTTPS_PROXY", "https_proxy", "HTTP_PROXY", "http_proxy", "NO_PROXY", "no_proxy"];
+    const saved = Object.fromEntries(
+      [...names, "NODE_EXTRA_CA_CERTS", "OPENAI_API_KEY"].map((n) => [n, process.env[n]]),
+    );
+    for (const name of Object.keys(saved)) delete process.env[name];
+    process.env.HTTPS_PROXY = "http://proxy.test:3128";
+    process.env.OPENAI_API_KEY = "sk-must-not-leak";
+    try {
+      const server = resolveMcpToolchain("markdown-editor", opts).servers[DOC_FILES_SERVER];
+      expect(server.env).toEqual({ HTTPS_PROXY: "http://proxy.test:3128" });
+    } finally {
+      for (const [name, value] of Object.entries(saved)) {
+        if (value === undefined) delete process.env[name];
+        else process.env[name] = value;
+      }
+    }
+  });
+
   it("leaves unknown and future toolchains without MCP servers until implemented", () => {
     expect(resolveMcpToolchain(undefined, opts).servers).toEqual({});
     expect(resolveMcpToolchain("pptx", opts).servers).toEqual({});

@@ -28,15 +28,17 @@ export interface McpCallResult {
   isError?: boolean;
 }
 
+/** A live connection to one MCP server. `signal` (the agent turn's Stop) cancels a request. */
 export interface McpConnection {
-  listTools?(): Promise<McpToolInfo[]>;
-  callTool(name: string, args: Record<string, unknown>): Promise<McpCallResult>;
+  listTools?(signal?: AbortSignal): Promise<McpToolInfo[]>;
+  callTool(name: string, args: Record<string, unknown>, signal?: AbortSignal): Promise<McpCallResult>;
   close(): Promise<void>;
 }
 
 export type McpConnector = (
   serverName: string,
   server: PiMcpServerConfig,
+  signal?: AbortSignal,
 ) => Promise<McpConnection>;
 
 export interface McpProxyOptions {
@@ -184,17 +186,45 @@ function formatToolList(serverName: string, tools: McpToolInfo[]): string {
     .join("\n");
 }
 
+/** `p`, or a rejection as soon as `signal` aborts (whatever `p` is still waiting on). */
+function untilAborted<T>(p: Promise<T>, signal?: AbortSignal): Promise<T> {
+  if (!signal) return p;
+  return new Promise<T>((resolve, reject) => {
+    const onAbort = () => reject(new Error("Operation aborted"));
+    if (signal.aborted) return onAbort();
+    signal.addEventListener("abort", onAbort, { once: true });
+    p.then(resolve, reject).finally(() => signal.removeEventListener("abort", onAbort));
+  });
+}
+
+/**
+ * Run `fn` on a fresh connection to `server` and close it afterwards. A Stop (`signal`)
+ * settles the call at once and closes the connection, which ends a stdio server's process
+ * — the server may never answer a stuck request, so its cancellation can't be relied on.
+ */
 async function withConnection<T>(
   connector: McpConnector,
   serverName: string,
   server: PiMcpServerConfig,
   fn: (connection: McpConnection) => Promise<T>,
+  signal?: AbortSignal,
 ): Promise<T> {
-  const connection = await connector(serverName, server);
+  if (signal?.aborted) throw new Error("Operation aborted");
+  const connecting = connector(serverName, server, signal);
+  let connection: McpConnection;
   try {
-    return await fn(connection);
+    connection = await untilAborted(connecting, signal);
+  } catch (error) {
+    connecting.then((late) => late.close()).catch(() => {}); // connected after the Stop
+    throw error;
+  }
+  const close = () => connection.close().catch(() => {});
+  signal?.addEventListener("abort", close, { once: true });
+  try {
+    return await untilAborted(fn(connection), signal);
   } finally {
-    await connection.close().catch(() => {});
+    signal?.removeEventListener("abort", close);
+    await close();
   }
 }
 
@@ -202,18 +232,26 @@ async function listAllowlistedTools(
   connector: McpConnector,
   serverName: string,
   server: PiMcpServerConfig,
+  signal?: AbortSignal,
 ): Promise<McpToolInfo[]> {
   const allowed = toolAllowlist(server);
   if (!allowed.size) return [];
 
   try {
-    return await withConnection(connector, serverName, server, async (connection) => {
-      const liveTools = connection.listTools ? await connection.listTools() : [];
-      if (!liveTools.length) return [...allowed].map((name) => ({ name }));
-      const liveByName = new Map(liveTools.map((tool) => [tool.name, tool]));
-      return [...allowed].map((name) => liveByName.get(name) ?? { name });
-    });
+    return await withConnection(
+      connector,
+      serverName,
+      server,
+      async (connection) => {
+        const liveTools = connection.listTools ? await connection.listTools(signal) : [];
+        if (!liveTools.length) return [...allowed].map((name) => ({ name }));
+        const liveByName = new Map(liveTools.map((tool) => [tool.name, tool]));
+        return [...allowed].map((name) => liveByName.get(name) ?? { name });
+      },
+      signal,
+    );
   } catch (error) {
+    if (signal?.aborted) throw error;
     const message = error instanceof Error ? error.message : String(error);
     return [...allowed].map((name) => ({ name, description: `metadata unavailable: ${message}` }));
   }
@@ -233,11 +271,12 @@ async function searchTools(
   resolved: ResolvedMcpSettings,
   query: string,
   serverFilter?: string,
+  signal?: AbortSignal,
 ): Promise<string> {
   const lines: string[] = [];
   for (const [serverName, server] of Object.entries(resolved.servers)) {
     if (serverFilter && serverName !== serverFilter) continue;
-    const tools = (await listAllowlistedTools(connector, serverName, server)).filter((tool) =>
+    const tools = (await listAllowlistedTools(connector, serverName, server, signal)).filter((tool) =>
       matchesSearch(tool, query),
     );
     if (tools.length) lines.push(formatToolList(serverName, tools));
@@ -250,6 +289,7 @@ async function describeTool(
   resolved: ResolvedMcpSettings,
   toolName: string,
   serverName?: string,
+  signal?: AbortSignal,
 ): Promise<string> {
   const location = resolveToolLocation(resolved, toolName, serverName);
   if (!location.ok) return location.error;
@@ -257,21 +297,14 @@ async function describeTool(
     connector,
     location.location.serverName,
     location.location.server,
+    signal,
   );
   const tool = tools.find((item) => item.name === toolName) ?? { name: toolName };
   const schema = tool.inputSchema ? `\nParameters:\n${JSON.stringify(tool.inputSchema, null, 2)}` : "";
   return `${tool.name} (server: ${location.location.serverName})${tool.description ? `\n${tool.description}` : ""}${schema}`;
 }
 
-function envWithOverrides(env?: Record<string, string>): Record<string, string> {
-  const base: Record<string, string> = {};
-  for (const [key, value] of Object.entries(process.env)) {
-    if (value !== undefined) base[key] = value;
-  }
-  return { ...base, ...(env ?? {}) };
-}
-
-export const defaultMcpConnector: McpConnector = async (_serverName, server) => {
+export const defaultMcpConnector: McpConnector = async (_serverName, server, signal) => {
   const client = new Client({ name: "docuzen-mcp-bridge", version: "0.0.0" });
   let transport:
     | StdioClientTransport
@@ -283,7 +316,9 @@ export const defaultMcpConnector: McpConnector = async (_serverName, server) => 
     transport = new StdioClientTransport({
       command: server.command,
       args: server.args ?? [],
-      env: envWithOverrides(server.env),
+      // Only the server's own env, on top of the SDK's safe defaults (HOME, LOGNAME, PATH,
+      // SHELL, TERM, USER) — never docd's whole environment with its API keys and tokens.
+      ...(server.env ? { env: server.env } : {}),
     });
   } else {
     if (!server.url) throw new Error(`${server.transport} MCP server requires url`);
@@ -293,20 +328,25 @@ export const defaultMcpConnector: McpConnector = async (_serverName, server) => 
         : new StreamableHTTPClientTransport(new URL(server.url));
   }
 
-  await client.connect(transport);
+  try {
+    await client.connect(transport, signal ? { signal } : undefined);
+  } catch (error) {
+    await transport.close().catch(() => {}); // don't leave a half-started server running
+    throw error;
+  }
   return {
-    async listTools() {
+    async listTools(signal) {
       const tools: McpToolInfo[] = [];
       let cursor: string | undefined;
       do {
-        const page = await client.listTools(cursor ? { cursor } : undefined);
+        const page = await client.listTools(cursor ? { cursor } : undefined, { signal });
         tools.push(...(page.tools ?? []));
         cursor = page.nextCursor;
       } while (cursor);
       return tools;
     },
-    async callTool(name, args) {
-      return (await client.callTool({ name, arguments: args })) as McpCallResult;
+    async callTool(name, args, signal) {
+      return (await client.callTool({ name, arguments: args }, undefined, { signal })) as McpCallResult;
     },
     async close() {
       await client.close().catch(() => {});
@@ -339,24 +379,34 @@ export function createMcpProxyTool(
       describe: Type.Optional(Type.String({ description: "Show one allowlisted tool's description and JSON schema." })),
       connect: Type.Optional(Type.String({ description: "Probe a configured server and refresh its live tool metadata." })),
     }),
-    async execute(_toolCallId, params) {
+    async execute(_toolCallId, params, signal) {
       const serverName = typeof params.server === "string" ? params.server : undefined;
       if (typeof params.search === "string") {
-        return textResult(await searchTools(connector, resolved, params.search, serverName));
+        return textResult(await searchTools(connector, resolved, params.search, serverName, signal));
       }
       if (typeof params.describe === "string") {
-        return textResult(await describeTool(connector, resolved, params.describe, serverName));
+        return textResult(await describeTool(connector, resolved, params.describe, serverName, signal));
       }
       if (typeof params.connect === "string") {
         const server = resolved.servers[params.connect];
         if (!server) return textResult(`MCP server "${params.connect}" is not configured.`);
-        const tools = await listAllowlistedTools(connector, params.connect, server);
-        return textResult(`Connected to "${params.connect}" (${tools.length} allowlisted tools).`);
+        try {
+          await withConnection(connector, params.connect, server, async (c) => c.listTools?.(signal), signal);
+        } catch (error) {
+          if (signal?.aborted) throw error;
+          const message = error instanceof Error ? error.message : String(error);
+          return textResult(`Could not connect to MCP server "${params.connect}": ${message}`, {
+            error: "connect_failed",
+          });
+        }
+        return textResult(`Connected to "${params.connect}" (${toolAllowlist(server).size} allowlisted tools).`);
       }
       if (serverName && !params.tool) {
         const server = resolved.servers[serverName];
         if (!server) return textResult(`MCP server "${serverName}" is not configured.`);
-        return textResult(formatToolList(serverName, await listAllowlistedTools(connector, serverName, server)));
+        return textResult(
+          formatToolList(serverName, await listAllowlistedTools(connector, serverName, server, signal)),
+        );
       }
       if (typeof params.tool === "string") {
         const parsed = parseArgs(params.args);
@@ -370,14 +420,20 @@ export function createMcpProxyTool(
             location.location.server,
             async (connection) =>
               normalizeResult(
-                await connection.callTool(params.tool as string, {
-                  ...parsed.args,
-                  // Pinned last so the model can never override them (e.g. edit_file's dryRun).
-                  ...(location.location.server.forcedArgs?.[params.tool as string] ?? {}),
-                }),
+                await connection.callTool(
+                  params.tool as string,
+                  {
+                    ...parsed.args,
+                    // Pinned last so the model can never override them (e.g. edit_file's dryRun).
+                    ...(location.location.server.forcedArgs?.[params.tool as string] ?? {}),
+                  },
+                  signal,
+                ),
               ),
+            signal,
           );
         } catch (error) {
+          if (signal?.aborted) throw error;
           const message = error instanceof Error ? error.message : String(error);
           return textResult(`MCP tool call failed: ${message}`, { error: "call_failed" });
         }

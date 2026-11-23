@@ -71,16 +71,42 @@ export const DOC_FILES_SERVER = "doc-files";
 const FILESYSTEM_SERVER_PACKAGE = "@modelcontextprotocol/server-filesystem@2.2.0";
 
 /**
+ * stdio servers start with only their configured env plus the MCP SDK's safe defaults
+ * (HOME, PATH, ...), not docd's environment. npx (npm) still needs the network settings it
+ * would otherwise lose to download the server behind a proxy or a TLS-inspecting gateway.
+ */
+const LAUNCHER_ENV_VARS = [
+  "HTTPS_PROXY",
+  "https_proxy",
+  "HTTP_PROXY",
+  "http_proxy",
+  "NO_PROXY",
+  "no_proxy",
+  "NODE_EXTRA_CA_CERTS",
+];
+
+function launcherEnv(): Record<string, string> | undefined {
+  const env: Record<string, string> = {};
+  for (const name of LAUNCHER_ENV_VARS) {
+    const value = process.env[name];
+    if (value) env[name] = value;
+  }
+  return Object.keys(env).length ? env : undefined;
+}
+
+/**
  * Both document toolchains use the same server: source reads, searches, and a DRAFT edit
  * (`edit_file` with `dryRun` pinned on returns a git-style diff and writes nothing). The
  * server's mutating tools (write_file, append_file, move_file, …) are simply not allowlisted.
  */
 function documentFilesPreset(scopeDir: string): Record<string, McpServerDefinition> {
+  const env = launcherEnv();
   return {
     [DOC_FILES_SERVER]: {
       transport: "stdio",
       command: "npx",
       args: ["-y", FILESYSTEM_SERVER_PACKAGE, scopeDir],
+      ...(env ? { env } : {}),
       tools: {
         read_text_file: "read",
         read_multiple_files: "read",
