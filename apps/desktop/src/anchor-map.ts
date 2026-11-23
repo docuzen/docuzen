@@ -10,6 +10,8 @@ export interface Projection {
   text: string;
   /** posOfOffset[i] = the ProseMirror position of projection char i. */
   posOfOffset: number[];
+  /** [start, end) offsets of text that is code (code blocks, inline code), in order. */
+  code?: { start: number; end: number }[];
 }
 
 /**
@@ -21,10 +23,11 @@ export interface Projection {
  * "RolloutWe enable…"), corrupting the anchor's `exact` and the agent's input.
  */
 export function assembleProjection(
-  nodes: { text: string; pos: number; span?: number }[],
+  nodes: { text: string; pos: number; span?: number; code?: boolean }[],
 ): Projection {
   let text = "";
   const posOfOffset: number[] = [];
+  const code: { start: number; end: number }[] = [];
   let lastEnd = -1;
   for (const node of nodes) {
     if (lastEnd !== -1 && node.pos > lastEnd) {
@@ -35,17 +38,25 @@ export function assembleProjection(
     for (let i = 0; i < node.text.length; i++) {
       posOfOffset.push(isAtom ? node.pos : node.pos + i);
     }
+    if (node.code && node.text) {
+      const last = code[code.length - 1];
+      if (last && last.end === text.length) last.end += node.text.length;
+      else code.push({ start: text.length, end: text.length + node.text.length });
+    }
     text += node.text;
     lastEnd = node.pos + (node.span ?? node.text.length);
   }
-  return { text, posOfOffset };
+  return code.length ? { text, posOfOffset, code } : { text, posOfOffset };
 }
 
+const isCode = (spec: { code?: boolean }): boolean => spec.code === true;
+
 export function buildProjection(doc: ProseNode): Projection {
-  const nodes: { text: string; pos: number; span?: number }[] = [];
-  doc.descendants((node: ProseNode, pos: number) => {
+  const nodes: { text: string; pos: number; span?: number; code?: boolean }[] = [];
+  doc.descendants((node: ProseNode, pos: number, parent: ProseNode | null) => {
     if (node.isText && node.text) {
-      nodes.push({ text: node.text, pos });
+      const code = (parent ? isCode(parent.type.spec) : false) || node.marks.some((m) => isCode(m.type.spec));
+      nodes.push({ text: node.text, pos, ...(code ? { code } : {}) });
     } else if (node.type.name === "math_inline") {
       const val = String(node.attrs.value ?? "");
       const delim = node.attrs.doubleDollar ? "$$" : "$";

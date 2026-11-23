@@ -150,12 +150,26 @@ const searchPlugin = $prose(
 const directiveKey = new PluginKey("had-directives");
 let directivesWorking = false;
 
-/** Find `[[ … ]]` ranges as projection offsets (mirrors the backend detector). */
-export function findDirectiveOffsets(text: string): { start: number; end: number }[] {
-  const re = /\[\[(?:(?!\]\])[\s\S])+\]\]/g;
+/**
+ * Find `[[ … ]]` ranges as projection offsets. Mirrors the sidecar's findDirectives
+ * (packages/docd/src/orchestrator/directives.ts) rule for rule, because `directive-N` is
+ * an ordinal both sides count: text in `code` ranges (code blocks, inline code — see
+ * Projection.code) never opens or closes a directive, a marker never contains another
+ * `[[` (an unclosed one is plain text), and a whitespace-only marker is not a directive.
+ * directive-agreement.test.ts feeds both the same documents.
+ */
+export function findDirectiveOffsets(
+  text: string,
+  code: { start: number; end: number }[] = [],
+): { start: number; end: number }[] {
+  let masked = text;
+  for (const c of code) masked = masked.slice(0, c.start) + "x".repeat(c.end - c.start) + masked.slice(c.end);
+  const re = /\[\[((?:(?!\]\]|\[\[)[\s\S])+)\]\]/g;
   const out: { start: number; end: number }[] = [];
   let m: RegExpExecArray | null;
-  while ((m = re.exec(text)) !== null) out.push({ start: m.index, end: m.index + m[0].length });
+  while ((m = re.exec(masked)) !== null) {
+    if (m[1].trim()) out.push({ start: m.index, end: m.index + m[0].length });
+  }
   return out;
 }
 
@@ -168,7 +182,7 @@ export function findDirectiveOffsets(text: string): { start: number; end: number
 function directivePosRanges(state: EditorState): PosRange[] {
   const proj = buildProjection(state.doc);
   const ranges: PosRange[] = [];
-  for (const d of findDirectiveOffsets(proj.text)) {
+  for (const d of findDirectiveOffsets(proj.text, proj.code)) {
     const r = posRangeForOffsets(proj, d.start, d.end);
     if (r) ranges.push(r);
   }
