@@ -10,6 +10,7 @@ import {
   imageFilesFrom,
   initDocImages,
   localImagePath,
+  makeImageView,
   resolveImageSrc,
   rewriteHtmlImages,
   sidecarImageUrl,
@@ -30,6 +31,9 @@ describe("resolving image links", () => {
     expect(localImagePath(DOC, "../.docuzen/notes/plan.md.had/assets/x.png")).toBe("/Users/me/.docuzen/notes/plan.md.had/assets/x.png");
     expect(localImagePath(DOC, "/abs/p.png?v=2#frag")).toBe("/abs/p.png");
     expect(localImagePath(DOC, "file:///abs/my%20p.png")).toBe("/abs/my p.png");
+    expect(localImagePath(DOC, "file://localhost/abs/p.png")).toBe("/abs/p.png");
+    // A single slash is a valid file URI too (RFC 8089).
+    expect(localImagePath(DOC, "file:/abs/my%20p.png")).toBe("/abs/my p.png");
   });
 
   it("leaves web, data and blob images alone", () => {
@@ -164,6 +168,61 @@ describe("HTML documents", () => {
     expect(serializeDocument(doc)).toContain('src=".docuzen/report.html.had/assets/shot one.png"');
   });
 
+  it("an image dropped onto an image, a diagram, an inline element or a docuzen card lands beside it, never inside it", async () => {
+    const SVG_NS = "http://www.w3.org/2000/svg";
+    const cases: { body: string; hit: (doc: Document) => Element; parent: string; next: string }[] = [
+      { body: '<div id="box"><img id="pic" src="https://x.test/a.png"></div>', hit: (d) => d.getElementById("pic")!, parent: "box", next: "pic" },
+      { body: '<div id="box"><video id="vid"></video></div>', hit: (d) => d.getElementById("vid")!, parent: "box", next: "vid" },
+      {
+        body: '<div id="box"></div>',
+        hit: (d) => {
+          const svg = d.createElementNS(SVG_NS, "svg");
+          svg.id = "svg";
+          const rect = d.createElementNS(SVG_NS, "rect");
+          svg.appendChild(rect);
+          d.getElementById("box")!.appendChild(svg);
+          return rect;
+        },
+        parent: "box",
+        next: "svg",
+      },
+      {
+        // A diagram's HTML label (mermaid draws labels as HTML in a foreignObject).
+        body: '<div id="box"></div>',
+        hit: (d) => {
+          const svg = d.createElementNS(SVG_NS, "svg");
+          svg.id = "svg";
+          const fo = d.createElementNS(SVG_NS, "foreignObject");
+          const label = d.createElement("p");
+          label.textContent = "Start";
+          fo.appendChild(label);
+          svg.appendChild(fo);
+          d.getElementById("box")!.appendChild(svg);
+          return label;
+        },
+        parent: "box",
+        next: "svg",
+      },
+      { body: '<span id="s">loose text</span>', hit: (d) => d.getElementById("s")!, parent: "", next: "s" },
+      { body: '<div id="card" data-had-overlay=""><p id="cp">Proposed text</p></div>', hit: (d) => d.getElementById("cp")!, parent: "", next: "card" },
+    ];
+    for (const c of cases) {
+      const doc = htmlDoc(c.body);
+      const target = c.hit(doc);
+      doc.elementFromPoint = () => target;
+      setup(doc);
+      fire(doc, "drop", "dataTransfer", { types: ["Files"], files: [new File([new Uint8Array([1])], "a.png", { type: "image/png" })] });
+      await settle();
+      const added = doc.querySelector('img[alt="a"]')!;
+      expect(added, c.body).not.toBeNull();
+      const block = added.parentElement!;
+      expect(block.parentElement!.id, c.body).toBe(c.parent); // "" is the body
+      // Dropped on the lower half of the target (a zero-size box here): it goes right after it.
+      expect(block.previousElementSibling?.id, c.body).toBe(c.next);
+      expect(serializeDocument(doc), c.body).toContain('src=".docuzen/report.html.had/assets/a.png"');
+    }
+  });
+
   it("review mode takes no images by drop, paste or picker: nothing is stored, the user is told to click Edit", async () => {
     const doc = htmlDoc("<h1>Title</h1><p>Body</p>");
     const { api, saveImage, onHtmlEdited, notify, mode } = setup(doc);
@@ -250,5 +309,38 @@ describe("HTML documents", () => {
     await api.addPaths(["/Users/me/Desktop/photo.jpg"]);
     expect(saveImage).toHaveBeenCalledWith({ name: "photo.jpg", sourcePath: "/Users/me/Desktop/photo.jpg" });
     expect(doc.querySelectorAll("img").length).toBe(1);
+  });
+});
+
+describe("markdown image view", () => {
+  type ViewFactory = () => (node: unknown) => { dom: HTMLImageElement; update: (node: unknown) => boolean };
+  const imageType = { name: "image" };
+  const node = (src: string) => ({ type: imageType, attrs: { src, alt: "", title: "" } });
+  const settle = async () => {
+    for (let i = 0; i < 10; i++) await new Promise((r) => setTimeout(r, 0));
+  };
+
+  it("keeps the RPC fallback when the editor re-renders the node, and retries when the link changes", async () => {
+    const resolve = (src: string) => resolveImageSrc("/d/plan.md", src, PORT);
+    const read = vi.fn(async () => ({ mime: "image/png", dataBase64: "AQID" }));
+    const view = (makeImageView(resolve, read) as unknown as ViewFactory)()(node("pics/a.png"));
+    const img = view.dom;
+    expect(img.getAttribute("src")).toBe(served("/d/pics/a.png"));
+
+    img.dispatchEvent(new Event("error")); // the webview could not load it over HTTP
+    await settle();
+    expect(img.getAttribute("src")).toBe("data:image/png;base64,AQID");
+
+    // Typing elsewhere re-renders the node with the same link: the image must stay shown.
+    expect(view.update(node("pics/a.png"))).toBe(true);
+    expect(img.getAttribute("src")).toBe("data:image/png;base64,AQID");
+
+    // A different link is loaded, and gets its own fallback if it fails too.
+    view.update(node("pics/b.png"));
+    expect(img.getAttribute("src")).toBe(served("/d/pics/b.png"));
+    img.dispatchEvent(new Event("error"));
+    await settle();
+    expect(read).toHaveBeenLastCalledWith("/d/pics/b.png");
+    expect(img.getAttribute("src")).toBe("data:image/png;base64,AQID");
   });
 });
