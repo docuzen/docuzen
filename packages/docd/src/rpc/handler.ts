@@ -152,7 +152,12 @@ export class RpcHandler {
       restoreVersion: (p) => restoreVersion(p.docPath, p.versionId, now()),
       listVersions: (p) => listVersions(p.docPath),
       readVersion: async (p) => ({ content: await readVersion(p.docPath, p.versionId) }),
-      exportHadz: (p) => exportHadz(p.docPath, { versionId: p.versionId, outPath: p.outPath }),
+      exportHadz: (p) => {
+        // The bundle copies state.db but not its -wal file, so rows still in the log
+        // would be left out; fold them in first.
+        this.docs.get(p.docPath)?.db.checkpoint();
+        return exportHadz(p.docPath, { versionId: p.versionId, outPath: p.outPath });
+      },
       // The import replaces the target's review folder, state.db included: close any open
       // task database in it first, so the next request opens the imported one instead of
       // reading (and writing) the deleted file through a stale handle.

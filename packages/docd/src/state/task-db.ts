@@ -113,6 +113,12 @@ export class TaskDB {
     this.db.prepare(`DELETE FROM tasks WHERE thread_id = ?`).run(threadId);
   }
 
+  /** Fold the write-ahead log into the database file, so a copy of that one file (a .hadz
+   * export) holds every row written so far. */
+  checkpoint(): void {
+    this.db.pragma("wal_checkpoint(TRUNCATE)");
+  }
+
   close(): void {
     this.db.close();
   }
