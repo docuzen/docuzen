@@ -30,16 +30,59 @@ export interface QueuedTurn {
 /** What a dispatch attempt resolved to — decides whether `driveSend` keeps draining. */
 export type SendOutcome = "sent" | "failed" | "stopped";
 
+/** The live agent bubble a turn streams into (chat-transcript.ts's StreamingTurn). */
+export interface TurnBubble {
+  onEvent: (e: { event: string; data: unknown; model?: string }) => void;
+  done: (finalText?: string) => void;
+  fail: (msg: string) => void;
+}
+
+/**
+ * A claim on one thread for an agent turn that is not a queued chat message (card "Ask
+ * agent", Improve, Brainstorm, Visualize, Panel) — chat.ts's beginExclusiveTurn. It is
+ * bound to the document activation it started in: thread ids repeat across documents
+ * (c0001, directive-1, review) and the sidecar keeps running a turn after a tab switch,
+ * so after every await the turn asks `isCurrent()` before it touches the pane, the
+ * comment cards or the queue. A stale turn's result is on disk; the document shows it
+ * when it is opened again.
+ */
+export interface ExclusiveTurn {
+  readonly threadId: string;
+  /** The document the turn runs on — pass it to every RPC explicitly. */
+  readonly docPath: string;
+  /** Its document is still on screen, in the same activation (no tab switch or reload since). */
+  isCurrent(): boolean;
+  /** isCurrent() and the chat pane shows this turn's thread. */
+  isShown(): boolean;
+  /** A live agent bubble for this turn: in the pane while its thread is shown, re-attached when the thread is re-opened, until end(). */
+  bubble(meta?: string, modelId?: string): TurnBubble;
+  /** Keep a turn-owned element (Improve's or Visualize's box) with the thread the same way, until end(). */
+  track(el: HTMLElement): void;
+  /**
+   * Release the thread: clears its Stop, and delivers the messages queued behind it when
+   * `drain` (the turn succeeded and was not stopped); otherwise they are held for the
+   * user to send or remove. Call exactly once, in a `finally`. A no-op for a stale turn,
+   * whose queue went with its document.
+   */
+  end(drain: boolean): void;
+}
+
 /**
  * Per-thread FIFO of not-yet-dispatched turns, plus the "is a turn currently
  * in flight for this thread" bit that governs whether a new commit dispatches
  * immediately or queues. One in-flight turn per thread, ever — `driveSend` below
- * holds the bit for queued chat messages, and chat.ts's beginExclusiveTurn/
- * endExclusiveTurn hold the same bit for the turns that aren't chat messages
+ * holds the bit for queued chat messages, and chat.ts's beginExclusiveTurn
+ * holds the same bit for the turns that aren't chat messages
  * (card "Ask agent", Improve, Brainstorm, Visualize, Panel).
+ *
+ * Messages left behind by a failed or stopped turn are HELD, not queued: they wait
+ * for the user to send (or remove) each one, and no later send drains them. Without
+ * that split a new message sent after a failure jumped ahead of them and then
+ * dragged them out after it.
  */
 export class SendQueue {
   private readonly queues = new Map<string, QueuedTurn[]>();
+  private readonly heldItems = new Map<string, QueuedTurn[]>();
   private readonly inFlight = new Set<string>();
 
   /** True while `threadId` has a turn actually dispatched (awaiting/streaming its RPC). */
@@ -74,27 +117,42 @@ export class SendQueue {
    * (already dispatched, already removed, or an unknown thread/id).
    */
   remove(threadId: string, itemId: string): QueuedTurn | undefined {
-    const q = this.queues.get(threadId);
-    if (!q) return undefined;
-    const idx = q.findIndex((i) => i.id === itemId);
-    if (idx === -1) return undefined;
-    return q.splice(idx, 1)[0];
+    for (const q of [this.queues.get(threadId), this.heldItems.get(threadId)]) {
+      const idx = q?.findIndex((i) => i.id === itemId) ?? -1;
+      if (idx !== -1) return q!.splice(idx, 1)[0];
+    }
+    return undefined;
   }
 
-  /** Pop the head of `threadId`'s queue, or undefined when it's empty. */
+  /** Pop the head of `threadId`'s queue, or undefined when it's empty. Held items are never dequeued. */
   dequeueNext(threadId: string): QueuedTurn | undefined {
     return this.queues.get(threadId)?.shift();
   }
 
-  /** Drop one thread's queue + in-flight bit entirely (e.g. the thread/comment was deleted). */
+  /** Move everything still queued for `threadId` to its held list (its turn failed or was stopped). Returns what moved. */
+  hold(threadId: string): QueuedTurn[] {
+    const moved = this.queues.get(threadId) ?? [];
+    this.queues.delete(threadId);
+    if (moved.length) this.heldItems.set(threadId, [...(this.heldItems.get(threadId) ?? []), ...moved]);
+    return moved;
+  }
+
+  /** Snapshot of `threadId`'s held items (left behind by a failed/stopped turn), oldest first. */
+  held(threadId: string): readonly QueuedTurn[] {
+    return this.heldItems.get(threadId) ?? [];
+  }
+
+  /** Drop one thread's queue, held items + in-flight bit entirely (e.g. the thread/comment was deleted). */
   clearThread(threadId: string): void {
     this.queues.delete(threadId);
+    this.heldItems.delete(threadId);
     this.inFlight.delete(threadId);
   }
 
-  /** Drop every thread's queue + in-flight state (e.g. switching to a different document). */
+  /** Drop every thread's queue, held items + in-flight state (e.g. switching to a different document). */
   resetAll(): void {
     this.queues.clear();
+    this.heldItems.clear();
     this.inFlight.clear();
   }
 }
@@ -105,10 +163,10 @@ export class SendQueue {
  * concurrently (the in-flight bit is held for the whole `send` call).
  *
  * BIND (task-1-brief.md): a "failed" or "stopped" outcome HALTS the chain —
- * whatever is left in the queue (if anything) is left completely untouched,
- * still queued, for the user to manually clear (✕) and re-send. This function
- * never inspects *why* the outcome wasn't "sent"; `send` owns rendering the
- * failure/stop and any input-restore side effects.
+ * whatever is left in the queue (if anything) is moved to the thread's held list,
+ * in order, for the user to send or clear (✕) one by one; a later send never drains
+ * it. This function never inspects *why* the outcome wasn't "sent"; `send` owns
+ * rendering the failure/stop and any input-restore side effects.
  */
 export async function driveSend(
   queue: SendQueue,
@@ -123,7 +181,10 @@ export async function driveSend(
   } finally {
     queue.clearInFlight(threadId);
   }
-  if (outcome !== "sent") return; // halted — remaining queue (if any) stays queued
+  if (outcome !== "sent") {
+    queue.hold(threadId); // halted — the rest waits for the user
+    return;
+  }
   const next = queue.dequeueNext(threadId);
   if (next) await driveSend(queue, threadId, next, send);
 }
@@ -144,7 +205,7 @@ export function claimExclusive(queue: SendQueue, threadId: string): boolean {
 /**
  * Release a thread claimed by `claimExclusive`. When `drain` is true (the turn succeeded
  * and wasn't stopped) the messages that queued up behind it start flowing through
- * `driveSend`; otherwise they stay queued for the user to resend or remove — the same
+ * `driveSend`; otherwise they are held for the user to resend or remove — the same
  * halt-on-failure rule `driveSend` applies to its own chain. Returns the drain's promise
  * (resolved immediately when nothing was dispatched).
  */
@@ -155,6 +216,7 @@ export function releaseExclusive(
   send: (item: QueuedTurn) => Promise<SendOutcome>,
 ): Promise<void> {
   queue.clearInFlight(threadId);
+  if (!drain) queue.hold(threadId);
   const next = drain ? queue.dequeueNext(threadId) : undefined;
   return next ? driveSend(queue, threadId, next, send) : Promise.resolve();
 }

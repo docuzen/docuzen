@@ -29,7 +29,8 @@ describe("Improve proposal flow", () => {
   it("approves every Improve proposal — markdown legacy or HTML structured — through the single approveProposal path", () => {
     expect(runImproveSource).toContain("result.proposalId");
     expect(runImproveSource).toContain("api.approveProposal(");
-    expect(runImproveSource).toMatch(/approveProposal\(\{\s*threadId: id, proposalId\s*\}\)/);
+    // ...on the document the rewrite was made for (H28), not whichever is active at click time.
+    expect(runImproveSource).toMatch(/approveProposal\(\{\s*docPath, threadId: id, proposalId\s*\}\)/);
     // The applyProposal RPC is gone end-to-end — Apply never falls back to it.
     expect(runImproveSource).not.toContain("api.applyProposal(");
     expect(mainSource).not.toContain("api.applyProposal(");
@@ -45,12 +46,14 @@ describe("Improve proposal flow", () => {
     const applyHandler = sourceBetween(
       runImproveSource,
       "applyBtn.addEventListener(\"click\"",
-      "chatImproveEl.disabled = false;",
+      "return { runImprove, isImproving };",
     );
     const catchBlock = sourceBetween(applyHandler, "} catch (e) {", "});");
     expect(catchBlock).toContain("alreadyResolvedStatus(e)");
     expect(catchBlock).toContain("box.remove();");
-    expect(catchBlock).toMatch(/if \(resolved === "approved"\) await deps\.reloadActiveDoc\(\);/);
+    // The reload is of the rewrite's own document, and only while it is on screen (H28).
+    expect(catchBlock).toMatch(/if \(resolved === "approved"\) await reloadIfShowing\(\);/);
+    expect(runImproveSource).toContain("if (deps.getDocPath() === docPath) await deps.reloadActiveDoc();");
     // cleanup returns before the failure path — the button is NOT re-enabled
     const returnAt = catchBlock.indexOf("return;");
     const reEnableAt = catchBlock.indexOf("applyBtn.disabled = false;");

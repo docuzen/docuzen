@@ -59,10 +59,11 @@ function fakeApi() {
 function setup() {
   const sidecar = fakeApi();
   const log: string[] = [];
+  const doc = { path: "/d/plan.md" };
   const explicit: Record<string, unknown> = {
     api: sidecar.api,
     log: (l: string) => void log.push(l),
-    getDocPath: () => "/d/plan.md",
+    getDocPath: () => doc.path,
     getFormat: () => "markdown",
     getHtmlSurface: () => null,
     renderPreviewText: (into: HTMLElement, text: string) => {
@@ -79,7 +80,12 @@ function setup() {
     get: (target, prop: string) => (prop in target ? target[prop] : (target[prop] = vi.fn())),
   }) as unknown as ChatDeps;
   const chat: ChatApi = initChat(deps);
-  return { chat, deps: explicit, log, ...sidecar };
+  /** shell.ts's activateTab: the active document changes, then the chat region is reset. */
+  const switchDoc = (path: string) => {
+    doc.path = path;
+    chat.resetChat();
+  };
+  return { chat, deps: explicit, log, switchDoc, ...sidecar };
 }
 
 const $ = <T extends HTMLElement>(sel: string) => document.querySelector<T>(sel)!;
@@ -346,7 +352,8 @@ describe("one agent turn per thread", () => {
     await settle();
     expect(api.reply).not.toHaveBeenCalled();
     expect(api.discuss).toHaveBeenCalledTimes(1);
-    expect($$("#chatTurns .turn-you").at(-1)!.textContent).toContain("queued");
+    // Held for the user (Send or ✕), not sent behind the failure.
+    expect($$("#chatTurns .turn-you").at(-1)!.textContent).toContain("not sent");
   });
 
   it("Improve is refused while a turn is running on the thread", async () => {
@@ -370,7 +377,7 @@ describe("one agent turn per thread", () => {
 
     $<HTMLButtonElement>("#chatStop").click();
     await settle();
-    expect(api.cancelTurn).toHaveBeenCalledWith({ threadId: "c0001" });
+    expect(api.cancelTurn).toHaveBeenCalledWith({ docPath: "/d/plan.md", threadId: "c0001" });
     calls.discuss[0].resolve(); // a cancelled turn's RPC resolves normally
     await settle();
 
@@ -475,7 +482,7 @@ describe("Improve", () => {
 
     apply.click();
     await settle();
-    expect(api.approveProposal).toHaveBeenCalledWith({ threadId: "c0001", proposalId: "c0001#p1" });
+    expect(api.approveProposal).toHaveBeenCalledWith({ docPath: "/d/plan.md", threadId: "c0001", proposalId: "c0001#p1" });
     expect(deps.reloadActiveDoc).toHaveBeenCalled();
     expect(document.querySelector("#chatTurns .proposal")).toBeNull();
     expect($<HTMLButtonElement>("#chatImprove").disabled).toBe(false);
@@ -633,7 +640,7 @@ describe("thread tree", () => {
 
 describe("document switch", () => {
   it("a previous document's review form and result do not persist", async () => {
-    const { chat, calls } = setup();
+    const { calls, switchDoc } = setup();
     $<HTMLButtonElement>("#reviewDocBtn").click();
     $<HTMLButtonElement>("#reviewRun").click();
     await settle();
@@ -642,10 +649,22 @@ describe("document switch", () => {
     expect($("#reviewForm").hidden).toBe(false);
     expect($("#reviewStatus").textContent).toContain("Review complete");
 
-    chat.resetChat();
+    switchDoc("/d/other.md");
     expect($("#reviewForm").hidden).toBe(true);
     expect($("#reviewStatus").hidden).toBe(true);
     expect($("#reviewStatus").textContent).toBe("");
+  });
+
+  it("reloading the same document (as the review itself does) keeps its review result on screen", async () => {
+    const { chat, calls } = setup();
+    $<HTMLButtonElement>("#reviewDocBtn").click();
+    $<HTMLButtonElement>("#reviewRun").click();
+    await settle();
+    calls.reviewDocument[0].resolve({ batchId: "b", findings: [] });
+    await settle();
+    chat.resetChat(); // shell.ts's reloadActiveDoc re-activates the same tab
+    expect($("#reviewStatus").hidden).toBe(false);
+    expect($("#reviewStatus").textContent).toContain("Review complete");
   });
 
   it("⌘⇧D runs the inline-directive pass and reports when there is nothing to resolve", async () => {

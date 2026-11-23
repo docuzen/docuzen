@@ -25,9 +25,10 @@ export function phaseForEvent(event: string): string | undefined {
   return undefined;
 }
 
-export function startWaitStatus(el: HTMLElement, initial: string): WaitStatus {
+/** `since`: when the wait began (default now) — a caller re-showing a wait that is already under way passes its start. */
+export function startWaitStatus(el: HTMLElement, initial: string, since: number = Date.now()): WaitStatus {
   let label = initial;
-  const t0 = Date.now();
+  const t0 = since;
   let timer: ReturnType<typeof setInterval> | null = null;
   const stop = (): void => {
     if (timer !== null) clearInterval(timer);

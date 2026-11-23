@@ -39,6 +39,13 @@ describe("wait status", () => {
     expect(vi.getTimerCount()).toBe(0);
   });
 
+  it("a wait shown again after it began counts from its own start", () => {
+    const began = Date.now();
+    vi.advanceTimersByTime(5000);
+    startWaitStatus(el, WAIT_PHASE.writing, began);
+    expect(el.textContent).toBe("writing… 5s");
+  });
+
   it("stops by itself when its element leaves the document", () => {
     startWaitStatus(el, WAIT_PHASE.waiting);
     el.remove();

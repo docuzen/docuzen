@@ -152,14 +152,15 @@ describe("driveSend", () => {
     expect(maxConcurrent).toBe(1);
   });
 
-  it("failure HALTS the remaining queue: no further sends, remaining items stay queued untouched", async () => {
+  it("failure HALTS the remaining queue: no further sends, remaining items are held in order", async () => {
     const q = new SendQueue();
     q.enqueue(item({ id: "b", text: "second" }));
     q.enqueue(item({ id: "c", text: "third" }));
     const send = vi.fn(async (i: QueuedTurn): Promise<SendOutcome> => (i.id === "a" ? "failed" : "sent"));
     await driveSend(q, "t1", item({ id: "a", text: "first" }), send);
     expect(send).toHaveBeenCalledTimes(1); // b and c were never attempted
-    expect(q.list("t1").map((i) => i.id)).toEqual(["b", "c"]); // left exactly as they were
+    expect(q.held("t1").map((i) => i.id)).toEqual(["b", "c"]); // held, in order, for the user
+    expect(q.list("t1")).toEqual([]);
     expect(q.isInFlight("t1")).toBe(false); // not stuck "busy" — a fresh send can go out
   });
 
@@ -169,17 +170,42 @@ describe("driveSend", () => {
     const send = vi.fn(async (): Promise<SendOutcome> => "stopped");
     await driveSend(q, "t1", item({ id: "a" }), send);
     expect(send).toHaveBeenCalledTimes(1);
-    expect(q.list("t1").map((i) => i.id)).toEqual(["b"]);
+    expect(q.held("t1").map((i) => i.id)).toEqual(["b"]);
   });
 
-  it("✕ removal during the halted tail: removing a still-queued item after a failure works normally", async () => {
+  it("a later send goes out alone: held items are never drained by it", async () => {
+    const q = new SendQueue();
+    q.enqueue(item({ id: "b" }));
+    await driveSend(q, "t1", item({ id: "a" }), async () => "failed");
+    const sent: string[] = [];
+    await driveSend(q, "t1", item({ id: "d" }), async (i) => {
+      sent.push(i.id);
+      return "sent";
+    });
+    expect(sent).toEqual(["d"]);
+    expect(q.held("t1").map((i) => i.id)).toEqual(["b"]);
+  });
+
+  it("✕ removal during the halted tail: removing a held item after a failure works normally", async () => {
     const q = new SendQueue();
     q.enqueue(item({ id: "b" }));
     q.enqueue(item({ id: "c" }));
     const send = vi.fn(async (): Promise<SendOutcome> => "failed");
     await driveSend(q, "t1", item({ id: "a" }), send);
     expect(q.remove("t1", "b")?.id).toBe("b");
-    expect(q.list("t1").map((i) => i.id)).toEqual(["c"]);
+    expect(q.held("t1").map((i) => i.id)).toEqual(["c"]);
+  });
+
+  it("clearThread and resetAll drop held items too", async () => {
+    const q = new SendQueue();
+    q.enqueue(item({ id: "b" }));
+    await driveSend(q, "t1", item({ id: "a" }), async () => "failed");
+    q.clearThread("t1");
+    expect(q.held("t1")).toEqual([]);
+    q.enqueue(item({ id: "c" }));
+    q.hold("t1");
+    q.resetAll();
+    expect(q.held("t1")).toEqual([]);
   });
 
   it("clears the in-flight bit even when send() throws, so the thread isn't stuck busy forever", async () => {
@@ -259,7 +285,7 @@ describe("exclusive turns (card Ask agent, Improve, Brainstorm, Visualize, Panel
     expect(q.isInFlight("t1")).toBe(false);
   });
 
-  it("release without drain (the turn failed or was stopped) leaves the queue untouched", async () => {
+  it("release without drain (the turn failed or was stopped) holds the queue for the user", async () => {
     const q = new SendQueue();
     claimExclusive(q, "t1");
     q.enqueue(item("a"));
@@ -269,7 +295,8 @@ describe("exclusive turns (card Ask agent, Improve, Brainstorm, Visualize, Panel
       return "sent";
     });
     expect(sent).toEqual([]);
-    expect(q.list("t1").map((i) => i.id)).toEqual(["a"]);
+    expect(q.held("t1").map((i) => i.id)).toEqual(["a"]);
+    expect(q.list("t1")).toEqual([]);
     expect(q.isInFlight("t1")).toBe(false);
   });
 });

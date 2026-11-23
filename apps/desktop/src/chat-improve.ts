@@ -8,6 +8,7 @@ import type { DocdApi } from "./session.js";
 import type { HtmlSnippetPreviewContext } from "./html-snippet-preview.js";
 import { alreadyResolvedStatus, reportError, runStreamingTurn } from "./ui.js";
 import { startWaitStatus } from "./wait-status.js";
+import type { ExclusiveTurn } from "./send-queue.js";
 
 export interface ImproveDeps {
   api: DocdApi;
@@ -20,22 +21,29 @@ export interface ImproveDeps {
   reloadActiveDoc: () => Promise<void>;
   /** The highlighted passage of a comment thread (shown as the "before" text). */
   commentQuoted: (id: string) => string | undefined;
-  /** One agent turn per thread: see chat.ts's beginExclusiveTurn/endExclusiveTurn. */
-  beginExclusiveTurn: (threadId: string, label: string) => boolean;
-  endExclusiveTurn: (threadId: string, drain: boolean) => void;
-  setChatBusy: (threadId: string | null) => void;
-  /** Re-derive the footer's Resolve/Improve button labels from the active thread. */
+  /** One agent turn per thread, bound to its document: see chat.ts's beginExclusiveTurn. */
+  beginExclusiveTurn: (threadId: string, label: string) => ExclusiveTurn | null;
+  /** Re-derive the footer's Resolve/Improve buttons from the active thread (they read isImproving). */
   updateChatActions: () => void;
 }
 
 export interface ImproveApi {
   runImprove: (id: string) => Promise<void>;
+  /** An Improve is running on thread `id` of the document on screen. */
+  isImproving: (id: string) => boolean;
 }
 
 export function initImprove(deps: ImproveDeps): ImproveApi {
   const chatTurnsEl = document.querySelector<HTMLDivElement>("#chatTurns")!;
   const chatEmptyEl = document.querySelector<HTMLDivElement>("#chatEmpty")!;
-  const chatImproveEl = document.querySelector<HTMLButtonElement>("#chatImprove")!;
+
+  // Improves in flight. A turn whose document is no longer on screen doesn't count, so a
+  // tab switch never leaves the new document's Improve button disabled.
+  const running = new Set<ExclusiveTurn>();
+  function isImproving(id: string): boolean {
+    for (const t of running) if (t.threadId === id && t.isCurrent()) return true;
+    return false;
+  }
 
   /**
    * Run the Improve flow for thread `id`: render a proposal box in the chat pane,
@@ -47,9 +55,10 @@ export function initImprove(deps: ImproveDeps): ImproveApi {
    */
   async function runImprove(id: string): Promise<void> {
     if (!deps.getDocPath()) return;
-    if (!deps.beginExclusiveTurn(id, "improve")) return;
-    chatImproveEl.disabled = true;
-    chatImproveEl.textContent = "Improving...";
+    const turn = deps.beginExclusiveTurn(id, "improve"); // also shows Stop: cancelKey docPath#<id>
+    if (!turn) return;
+    running.add(turn);
+    deps.updateChatActions();
     // One live improve proposal at a time — drop any stale box (e.g. from a prior
     // Improve click on this pane) so rewrites don't stack on top of each other.
     chatTurnsEl.querySelectorAll(".proposal").forEach((node) => node.remove());
@@ -64,19 +73,22 @@ export function initImprove(deps: ImproveDeps): ImproveApi {
     const status = startWaitStatus(pnew, "Waiting for the model…");
     const applyBtn = box.querySelector<HTMLButtonElement>(".papply")!;
     box.querySelector<HTMLButtonElement>(".preject")!.addEventListener("click", () => box.remove());
-    chatEmptyEl.hidden = true;
-    chatTurnsEl.appendChild(box);
-    chatTurnsEl.scrollTop = chatTurnsEl.scrollHeight;
+    if (turn.isShown()) {
+      chatEmptyEl.hidden = true;
+      chatTurnsEl.appendChild(box);
+      chatTurnsEl.scrollTop = chatTurnsEl.scrollHeight;
+    }
+    turn.track(box); // re-shown if the thread is re-opened while the rewrite streams
 
-    deps.setChatBusy(id); // show Stop; cancelKey for improve is docPath#<id>
     let sawToken = false;
     let sawProposal = false;
     let proposedText = "";
     const outcome = await runStreamingTurn({
       run: () =>
         deps.api.improve(
-          { threadId: id },
+          { docPath: turn.docPath, threadId: id },
           (e) => {
+            if (!turn.isCurrent()) return; // its document is no longer on screen
             if (e.event === "applied") {
               deps.routeProposal(e); // Editing mode: already applied — reload, no review card
               return;
@@ -101,7 +113,7 @@ export function initImprove(deps: ImproveDeps): ImproveApi {
               // Plain text while streaming; the HTML-aware preview (which builds a
               // sandboxed iframe) is rendered once, after the stream settles.
               pnew.textContent = proposedText;
-              chatTurnsEl.scrollTop = chatTurnsEl.scrollHeight;
+              if (box.isConnected) chatTurnsEl.scrollTop = chatTurnsEl.scrollHeight;
             }
           },
         ),
@@ -109,18 +121,19 @@ export function initImprove(deps: ImproveDeps): ImproveApi {
         status.stop();
         pnew.classList.remove("pending");
         pnew.textContent = `⚠ ${String(e)}`;
-        chatImproveEl.disabled = false;
-        deps.updateChatActions();
       },
       onSettled: () => {
         status.stop();
         box.classList.remove("working");
-        deps.setChatBusy(null);
+        running.delete(turn);
         // Improve adds no conversation turn, so queued messages can go either way.
-        deps.endExclusiveTurn(id, true);
+        turn.end(true);
+        if (turn.isCurrent()) deps.updateChatActions();
       },
     });
-    if (!outcome.ok) return;
+    // A stale turn's rewrite is a pending proposal on its own document's disk: nothing
+    // here may wire an Apply for it into the document on screen.
+    if (!outcome.ok || !turn.isCurrent()) return;
     const result = outcome.result;
     const proposalId = result.proposalId;
     if (result.applied) {
@@ -133,8 +146,6 @@ export function initImprove(deps: ImproveDeps): ImproveApi {
       applyBtn.remove();
       box.querySelector<HTMLButtonElement>(".preject")!.textContent = "Dismiss";
       deps.log(`applied rewrite to ${id} (Editing mode)`);
-      chatImproveEl.disabled = false;
-      deps.updateChatActions();
       return;
     }
     // HTML Improve's newText is a raw HTML fragment — never dump it as chat text; point
@@ -151,15 +162,21 @@ export function initImprove(deps: ImproveDeps): ImproveApi {
       proposedText = result.newText;
       deps.renderPreviewText(pnew, proposedText);
     }
+    // The proposal lives on the turn's document: approve it there, and reload only if
+    // that document is still the one on screen when the answer comes back.
+    const docPath = turn.docPath;
+    const reloadIfShowing = async (): Promise<void> => {
+      if (deps.getDocPath() === docPath) await deps.reloadActiveDoc();
+    };
     applyBtn.disabled = false;
     applyBtn.addEventListener("click", async () => {
       applyBtn.disabled = true;
       try {
         if (!proposalId) throw new Error("no proposal to approve");
-        await deps.api.approveProposal({ threadId: id, proposalId });
+        await deps.api.approveProposal({ docPath, threadId: id, proposalId });
         deps.log(`applied rewrite to ${id}`);
         box.remove();
-        await deps.reloadActiveDoc();
+        await reloadIfShowing();
       } catch (e) {
         // Already-resolved retry (see ui.ts's alreadyResolvedStatus + proposalActions):
         // a lost approve RESPONSE (connection drop / sidecar restart after the server
@@ -175,16 +192,14 @@ export function initImprove(deps: ImproveDeps): ImproveApi {
         if (resolved) {
           deps.log(`proposal already ${resolved} — removing the stale card`);
           box.remove();
-          if (resolved === "approved") await deps.reloadActiveDoc();
+          if (resolved === "approved") await reloadIfShowing();
           return;
         }
         reportError("apply", e, deps.log);
         applyBtn.disabled = false;
       }
     });
-    chatImproveEl.disabled = false;
-    deps.updateChatActions();
   }
 
-  return { runImprove };
+  return { runImprove, isImproving };
 }

@@ -11,13 +11,28 @@
 //   send-queue.ts           per-thread FIFO + the "one turn per thread" bit (pure)
 //
 // What stays here:
-//   - pane state: `activeChatId`, `busyThread` (Stop), the footer pickers, the model cache;
+//   - pane state: `activeChatId`, the Stop button, the footer pickers, the model cache;
 //   - opening threads: activateChatPane / promoteToChat / openThreadById / jumpTo*;
-//   - sending: commitSend → driveSend → dispatchQueuedTurn, the queued-message chips,
+//   - sending: commitSend → driveSend → dispatchQueuedTurn, the queued/held message chips,
 //     Panel fan-out, a card's first message (askAgentFromCard), and the exclusive-turn
-//     claim every non-queue flow takes (beginExclusiveTurn / endExclusiveTurn);
+//     claim every non-queue flow takes (beginExclusiveTurn → ExclusiveTurn.end);
 //   - edit-to-fork (beginEditBranch) and its busy locks;
 //   - resetChat on document switch.
+//
+// Two generations keep late results where they belong:
+//   - the DOCUMENT generation (`scope`, a DocScope): resetChat — every tab switch, reload
+//     and close — starts a new one with its own send queue, Stop bookkeeping and live
+//     turns. Thread ids repeat across documents (c0001, directive-1, review) and the
+//     sidecar finishes a turn after the user has switched away, so a turn captures the
+//     scope and its docPath when it starts (TurnCtx), passes that docPath to every RPC,
+//     and after each await touches the queue, a lock, the pane or the card registry only
+//     while `isCurrent(turn)`. A stale turn's result is on disk: returning to the
+//     document re-reads it (cards from listThreads, the thread from getThread, pending
+//     proposals from listProposals). The old scope's queue is emptied, so a stale chain
+//     stops after the turn in flight.
+//   - the PANE generation (`paneGen`): bumped whenever the pane's subject changes
+//     (setPaneSubject). A thread fetch renders only if the pane still shows what it
+//     was fetched for.
 //
 // Rules shared with the other UI modules:
 //   - no cross-imports between regions: main.ts composes them and passes `deps`;
@@ -25,23 +40,32 @@
 //   - no module-scope `document.querySelector`: elements are looked up inside init;
 //   - anything derived from the document's on-disk state is re-fetched, never assumed.
 //
-// Tests: chat-behaviour.test.ts drives this region through the real DOM with a scripted
-// sidecar. Several older tests assert on source text via module-source.test-support.ts.
+// Tests: chat-behaviour.test.ts and chat-async-state.test.ts drive this region through
+// the real DOM with a scripted sidecar. Several older tests assert on source text via
+// module-source.test-support.ts.
 
 import { excerpt } from "./excerpt.js";
 import type { RpcEvent } from "./rpc.js";
 import type { DocdApi } from "./session.js";
 import type { HtmlSurface } from "./html-surface.js";
 import type { HtmlSnippetPreviewContext } from "./html-snippet-preview.js";
-import type { ThreadTurn, ThreadNode, ModelConfig } from "@ai-native-doc/docd/protocol";
+import type { ThreadTurn, ThreadNode, ModelConfig, RpcResult } from "@ai-native-doc/docd/protocol";
 import { initAgentsPanel } from "./chat-agents-panel.js";
 import { initImprove } from "./chat-improve.js";
 import { initCommentCards, type CardAsk, type CommentEntry } from "./chat-comment-cards.js";
-import { initTranscript } from "./chat-transcript.js";
+import { initTranscript, type StreamingTurn } from "./chat-transcript.js";
 import { initThreadTree } from "./chat-thread-tree.js";
 import { initDocPasses } from "./chat-doc-passes.js";
 import { el, reportError, runStreamingTurn, lastAgentReply } from "./ui.js";
-import { SendQueue, driveSend, type QueuedTurn, type SendOutcome, claimExclusive, releaseExclusive } from "./send-queue.js";
+import {
+  SendQueue,
+  driveSend,
+  type ExclusiveTurn,
+  type QueuedTurn,
+  type SendOutcome,
+  claimExclusive,
+  releaseExclusive,
+} from "./send-queue.js";
 import { focusRangeBlocks } from "./long-range.js";
 
 export interface ChatDeps {
@@ -96,10 +120,12 @@ export interface ChatApi {
     fail: (msg: string) => void;
   };
   setChip: (id: string, status: "idle" | "running" | "responded" | "error") => void;
-  setChatBusy: (threadId: string | null) => void;
-  /** Claim/release a thread for a turn that bypasses the send queue (see chat.ts's beginExclusiveTurn). */
-  beginExclusiveTurn: (threadId: string, label: string) => boolean;
-  endExclusiveTurn: (threadId: string, drain: boolean) => void;
+  /**
+   * Claim a thread on the active document for a turn that bypasses the send queue (card
+   * "Ask agent", Improve, Brainstorm, Visualize, Panel); null when it already has one. The
+   * claim carries the document it started on — see send-queue.ts's ExclusiveTurn.
+   */
+  beginExclusiveTurn: (threadId: string, label: string) => ExclusiveTurn | null;
   /** Marks a comment thread as discussed without a full runCardAskAgent cycle (used by the Brainstorm quick action). */
   markDiscussed: (id: string) => void;
   focusCommentInput: (id: string) => void;
@@ -138,6 +164,35 @@ export interface ChatApi {
   /** Re-scroll the turns list to the bottom (Visualize's mid-stream token updates). */
   scrollTurnsToBottom: () => void;
 }
+
+/** One document generation's in-flight bookkeeping — see the file header. */
+interface DocScope {
+  readonly queue: SendQueue;
+  /** threadIds whose in-flight turn was cancelled via Stop (see the Stop handler). */
+  readonly stopped: Set<string>;
+  /** threadIds with an in-flight turn that Stop can cancel. */
+  readonly busy: Set<string>;
+  /** The elements of each thread's in-flight turn, put back when the thread is re-opened. */
+  readonly live: Map<string, Set<LiveElement>>;
+}
+
+interface LiveElement {
+  el: HTMLElement;
+  attach: () => void;
+}
+
+/** What a turn captures when it starts: the document generation, its document, its thread. */
+interface TurnCtx {
+  readonly scope: DocScope;
+  readonly docPath: string;
+  readonly threadId: string;
+}
+
+/** A thread as getThread returns it. */
+type ThreadView = RpcResult<"getThread">;
+
+/** A queued message's pending state, shown as a chip on its own "you" bubble. */
+type PendingState = "live" | "queued" | "held";
 
 export function initChat(deps: ChatDeps): ChatApi {
 
@@ -200,11 +255,26 @@ export function initChat(deps: ChatDeps): ChatApi {
 
   let activeChatId: string | null = null;
 
-  // The pane's own staleness counter (the thread tree has its own — chat-thread-tree.ts).
-  // Same idea for the chat pane's transcript: promoteToChat/openThreadById clear the pane
-  // synchronously, then await getThread. Clicking a second thread before the first fetch
-  // lands used to render thread A's turns (and stance/model) into thread B's pane.
+  // --- the two generations (see the file header) ---
+  function newScope(): DocScope {
+    return { queue: new SendQueue(), stopped: new Set(), busy: new Set(), live: new Map() };
+  }
+  let scope = newScope();
   let paneGen = 0;
+
+  /** Capture the active document for a turn on `threadId`; null with no document open. */
+  function turnCtx(threadId: string): TurnCtx | null {
+    const docPath = deps.getDocPath();
+    return docPath ? { scope, docPath, threadId } : null;
+  }
+  /** The turn's document is still on screen, in the same activation. */
+  function isCurrent(t: TurnCtx): boolean {
+    return t.scope === scope && deps.getDocPath() === t.docPath;
+  }
+  /** isCurrent, and the pane shows the turn's thread. */
+  function isShown(t: TurnCtx): boolean {
+    return isCurrent(t) && activeChatId === t.threadId;
+  }
 
   // --- review-rail comment cards + the comment registry (chat-comment-cards.ts) ---
   const cards = initCommentCards({
@@ -229,7 +299,7 @@ export function initChat(deps: ChatDeps): ChatApi {
   });
 
   // --- Improve: rewrite a highlighted passage (chat-improve.ts) ---
-  const { runImprove } = initImprove({
+  const improve = initImprove({
     api: deps.api,
     log: deps.log,
     getDocPath: deps.getDocPath,
@@ -240,10 +310,9 @@ export function initChat(deps: ChatDeps): ChatApi {
     reloadActiveDoc: deps.reloadActiveDoc,
     commentQuoted: (id) => comments.get(id)?.quoted,
     beginExclusiveTurn: (threadId, label) => beginExclusiveTurn(threadId, label),
-    endExclusiveTurn: (threadId, drain) => endExclusiveTurn(threadId, drain),
-    setChatBusy: (threadId) => setChatBusy(threadId),
     updateChatActions: () => updateChatActions(),
   });
+  const { runImprove } = improve;
 
   // --- thread navigator: select, branch tree, version pager (chat-thread-tree.ts) ---
   const tree = initThreadTree({
@@ -254,7 +323,7 @@ export function initChat(deps: ChatDeps): ChatApi {
     openVersionPreview: (v) => deps.openVersionPreview(v),
     getActiveChatId: () => activeChatId,
     comments: () => comments.values(),
-    promoteToChat: (id) => promoteToChat(id),
+    openThread: (id) => jumpToAnnotation(id),
     appendToTurns: (el) => void chatTurnsEl.appendChild(el),
     onNodes: (nodes) => cards.applyThreadNodes(nodes),
   });
@@ -291,50 +360,40 @@ export function initChat(deps: ChatDeps): ChatApi {
   let threadModels: ModelConfig[] = [];
   let defaultModelKey = ""; // per-doc default (getSettings().model); "" = sidecar default
 
-  // --- Stop control: cancel the in-flight agent turn streaming in the chat pane ---
-  // While a discuss/reply/improve turn streams, Stop targets the running thread
-  // (Send stays visible alongside it — Phase 9 T1 — so a message typed during a
-  // turn queues rather than being blocked; see the send-queue section below).
+  // --- Stop control: cancel the in-flight agent turn of the thread in the pane ---
+  // Stop is DERIVED: it shows exactly when the pane's thread has a cancellable turn in
+  // flight in this document generation (`scope.busy`), so switching threads or documents
+  // and coming back can never leave it pointing at the wrong turn, or hidden while the
+  // thread is still running. Send stays visible alongside it (Phase 9 T1) so a message
+  // typed during a turn queues rather than being blocked.
   // Clicking Stop calls cancelTurn, which aborts that thread's pi session; the
-  // in-flight RPC call then resolves with whatever streamed, so the existing
-  // bubble.done()/finally cleanup runs normally.
-  // (Branch is intentionally NOT wired here — see runBranch — because the backend
-  // cancelKey is docPath#<branchThreadId>, and the UI doesn't know that id until
-  // the call resolves, so a Stop there would be a misleading no-op.)
+  // in-flight RPC call then resolves with whatever streamed, so the turn's normal
+  // done()/cleanup runs.
+  // (Branch takes the thread but is not cancellable — see runBranch — because the backend
+  // cancelKey is docPath#<branchThreadId>, and the UI doesn't know that id until the call
+  // resolves, so a Stop there would be a misleading no-op.)
   let busyThread: string | null = null;
-  function setChatBusy(threadId: string | null): void {
-    busyThread = threadId;
-    // A turn that is only now starting cannot be the one Stop cancelled. Flows that
-    // bypass dispatchQueuedTurn (card "Ask agent", Improve, Brainstorm, Panel) never
-    // consume stoppedThreads, so without this a Stop on one of them would make the
-    // NEXT queued send on the same thread read as "stopped" and halt draining.
-    if (threadId) stoppedThreads.delete(threadId);
-    chatStopEl.hidden = !threadId;
-    chatPanelEl.disabled = !!threadId; // no concurrent panel run while a turn streams
-    chatFootEl.classList.toggle("busy", !!threadId);
+  function refreshBusy(): void {
+    busyThread = activeChatId && scope.busy.has(activeChatId) ? activeChatId : null;
+    chatStopEl.hidden = !busyThread;
+    chatPanelEl.disabled = !!busyThread; // no concurrent panel run while a turn streams
+    chatFootEl.classList.toggle("busy", !!busyThread);
     refreshEditLocks(); // Phase 9 T2: busy state is one of forkLocked's two inputs
   }
-  /** Only clears busy if `threadId` is still the one being shown as busy — a
-   * background thread's turn settling must never stomp on whatever thread the
-   * user has since switched Send/Stop to look at (see dispatchQueuedTurn). */
-  function clearBusyIfCurrent(threadId: string): void {
-    if (busyThread === threadId) setChatBusy(null);
-  }
-  // threadIds whose in-flight turn was cancelled via Stop. cancelTurn makes the
-  // underlying discuss/reply RPC RESOLVE normally (see comment above) — without
-  // this set, dispatchQueuedTurn would read that resolve as an ordinary success
-  // and auto-drain the next queued message. BIND (task-1-brief.md): Stop also
-  // halts draining — queued items stay queued. Consumed (deleted) by the one
-  // dispatch it applies to, so it can never leak into a later unrelated send.
-  const stoppedThreads = new Set<string>();
+  // scope.stopped: threadIds whose in-flight turn was cancelled via Stop. cancelTurn
+  // makes the underlying RPC RESOLVE normally (see above) — without this set, a stopped
+  // turn would read as an ordinary success and auto-drain the next queued message. BIND
+  // (task-1-brief.md): Stop also halts draining. Consumed (deleted) by the turn it
+  // applies to when it settles, and cleared when a new turn starts on the thread, so it
+  // can never leak into a later unrelated send.
   chatStopEl.addEventListener("click", async () => {
-    if (!busyThread || !deps.getDocPath()) return;
-    const threadId = busyThread;
-    stoppedThreads.add(threadId);
+    const t = busyThread ? turnCtx(busyThread) : null;
+    if (!t) return;
+    t.scope.stopped.add(t.threadId);
     chatStopEl.disabled = true;
     try {
-      await deps.api.cancelTurn({ threadId });
-      deps.log(`stopped ${threadId}`);
+      await deps.api.cancelTurn({ docPath: t.docPath, threadId: t.threadId });
+      deps.log(`stopped ${t.threadId}`);
     } catch (e) {
       reportError("stop", e, deps.log);
     } finally {
@@ -342,15 +401,33 @@ export function initChat(deps: ChatDeps): ChatApi {
     }
   });
 
+  // --- live turns: what an in-flight turn shows in its thread's pane ---
+  /** Keep `item` with the turn's thread until the turn ends, so re-opening the thread puts it back. */
+  function trackLive(t: TurnCtx, item: LiveElement): void {
+    let set = t.scope.live.get(t.threadId);
+    if (!set) t.scope.live.set(t.threadId, (set = new Set()));
+    set.add(item);
+  }
+  /** The live agent bubble for a turn: in the pane when its thread is shown, otherwise kept aside. */
+  function turnBubble(t: TurnCtx, meta?: string, modelId?: string): StreamingTurn {
+    const bubble = streamingAgentTurn(meta, modelId, { detached: !isShown(t) });
+    trackLive(t, { el: bubble.el, attach: bubble.attach });
+    return bubble;
+  }
+  function appendCustomTurn(box: HTMLElement): void {
+    chatEmptyEl.hidden = true;
+    chatTurnsEl.appendChild(box);
+    chatTurnsEl.scrollTop = chatTurnsEl.scrollHeight;
+  }
+
   // --- per-thread send queue ---
   // Messages typed while their thread already has a turn in flight are queued
   // (FIFO, one thread's queue never affects another's) instead of being
   // hard-blocked — see send-queue.ts for the pure enqueue/drain/halt logic this
   // wraps. `turnElByItemId` remembers each committed-but-not-yet-settled
-  // message's own "you" bubble so a later queued-chip removal, chip strip (on
+  // message's own "you" bubble so a later chip removal, chip strip (on
   // dispatch), or failure marking can find the right DOM node — entries are
   // deleted once a turn reaches a terminal state (sent, failed, or removed).
-  const sendQueue = new SendQueue();
   const turnElByItemId = new Map<string, HTMLDivElement>();
   let queueSeq = 0;
 
@@ -361,50 +438,81 @@ export function initChat(deps: ChatDeps): ChatApi {
     return undefined;
   }
 
-  /** See ui.ts's lastAgentReply (shared with the other pane module). */
-  const fetchLastAgentReply = (threadId: string) => lastAgentReply(deps.api, deps.getDocPath, threadId);
+  /** See ui.ts's lastAgentReply — read from the turn's own document, whatever is active now. */
+  const fetchLastAgentReply = (docPath: string, threadId: string) =>
+    lastAgentReply({ getThread: (p) => deps.api.getThread({ ...p, docPath }) }, () => docPath, threadId);
 
-  /** A "queued" chip + ✕ remove button, wired to pull `item` back out of the queue. */
-  function queuedChip(item: QueuedTurn): HTMLSpanElement {
+  /** Drop a not-yet-sent message: out of the queue and off the screen. */
+  function removePending(s: DocScope, item: QueuedTurn): boolean {
+    if (!s.queue.remove(item.threadId, item.id)) return false;
+    turnElByItemId.get(item.id)?.remove();
+    turnElByItemId.delete(item.id);
+    refreshEditLocks(); // Phase 9 T2: removing the last queued item can unlock fork edits
+    return true;
+  }
+
+  /**
+   * The chip on a not-yet-sent message's bubble: "queued" (waits behind the turn in
+   * flight, ✕ removes it) or "not sent" (held after a failed or stopped turn: Send it on
+   * its own, or ✕). Both act on the queue of the document generation they were drawn in.
+   */
+  function pendingChip(item: QueuedTurn, state: "queued" | "held"): HTMLSpanElement {
+    const s = scope;
     const chip = document.createElement("span");
-    chip.className = "chip queued";
-    chip.textContent = "queued ";
+    chip.className = `chip ${state}`;
+    chip.textContent = state === "queued" ? "queued " : "not sent ";
+    if (state === "held") {
+      const send = document.createElement("button");
+      send.className = "held-send";
+      send.title = "Send this message now";
+      send.textContent = "Send";
+      send.addEventListener("click", (ev) => {
+        ev.stopPropagation();
+        if (s !== scope || !removePending(s, item)) return;
+        commitSend(item.threadId, item.text, { stance: item.stance, modelId: item.modelId });
+      });
+      chip.appendChild(send);
+    }
     const x = document.createElement("button");
     x.className = "queued-remove";
-    x.title = "Remove from queue";
+    x.title = state === "queued" ? "Remove from queue" : "Remove";
     x.textContent = "✕";
     x.addEventListener("click", (ev) => {
       ev.stopPropagation();
-      sendQueue.remove(item.threadId, item.id);
-      turnElByItemId.get(item.id)?.remove();
-      turnElByItemId.delete(item.id);
-      refreshEditLocks(); // Phase 9 T2: removing the last queued item can unlock fork edits
+      removePending(s, item);
     });
     chip.appendChild(x);
     return chip;
   }
 
+  function setPendingChip(turnEl: HTMLDivElement, item: QueuedTurn, state: PendingState): void {
+    turnEl.querySelector(".chip.queued, .chip.held")?.remove();
+    if (state !== "live") turnEl.querySelector(".trole")?.appendChild(pendingChip(item, state));
+  }
+
   /**
-   * Render `item`'s own "you" turn into the transcript — used both for a
-   * message committed straight to dispatch (`queued: false`) and one that has
-   * to wait behind an in-flight turn (`queued: true`, gets a chip + ✕). A
-   * no-op when `item.threadId` isn't the currently-displayed thread: another
-   * thread's pane has nothing here to render into (see promoteToChat/
-   * openThreadById, which replay any still-queued items for a thread once it
-   * becomes active again — this is what makes switching away and back safe).
+   * Render `item`'s own "you" turn into the transcript — `live` for a message going
+   * straight out, `queued` for one waiting behind an in-flight turn, `held` for one left
+   * behind by a failed/stopped turn. A no-op when `item.threadId` isn't the displayed
+   * thread (promoteToChat/openThreadById replay a thread's pending items when it is
+   * opened). An item already on screen just gets its chip updated — never a second bubble.
    */
-  function renderYouTurn(item: QueuedTurn, opts: { queued: boolean }): void {
+  function renderYouTurn(item: QueuedTurn, state: PendingState): void {
     if (item.threadId !== activeChatId) return;
+    const existing = turnElByItemId.get(item.id);
+    if (existing?.isConnected) return setPendingChip(existing, item, state);
     const body = chatTurn("you", item.text);
     const turnEl = body.closest<HTMLDivElement>(".turn");
     if (!turnEl) return;
     turnElByItemId.set(item.id, turnEl);
-    if (opts.queued) turnEl.querySelector(".trole")?.appendChild(queuedChip(item));
+    setPendingChip(turnEl, item, state);
   }
 
-  /** Strip the "queued" chip once `item` actually starts dispatching (no-op if it never had one, or its thread isn't active). */
-  function stripQueuedChip(item: QueuedTurn): void {
-    turnElByItemId.get(item.id)?.querySelector(".chip.queued")?.remove();
+  /** After a chain halted: show the thread's held messages as held. */
+  function refreshPendingChips(t: TurnCtx): void {
+    if (!isShown(t)) return;
+    for (const item of t.scope.queue.held(t.threadId)) renderYouTurn(item, "held");
+    refreshEditLocks();
   }
 
   /**
@@ -426,28 +534,26 @@ export function initChat(deps: ChatDeps): ChatApi {
   }
   /**
    * True while `threadId` has a turn actually in flight OR still-queued messages
-   * behind it (disabled while that thread's turn is in flight or queues have items
-   * for it). Forking mid-drain would
-   * leave the fork target's `atTurnIndex` ambiguous — a queued message could land
-   * between the edited turn and "now" while the branch RPC is still resolving the
-   * turns array — so edit-to-fork simply refuses for the duration rather than
-   * trying to reconcile that race.
+   * behind it. Forking mid-drain would leave the fork target's `atTurnIndex`
+   * ambiguous — a queued message could land between the edited turn and "now" while
+   * the branch RPC is still resolving the turns array — so edit-to-fork simply refuses
+   * for the duration rather than trying to reconcile that race. Held messages don't
+   * count: nothing sends them unless the user does.
    */
   function forkLocked(threadId: string): boolean {
-    return sendQueue.isInFlight(threadId) || sendQueue.list(threadId).length > 0;
+    return scope.queue.isInFlight(threadId) || scope.queue.list(threadId).length > 0;
   }
 
   /**
    * Keep every rendered you-turn's fork affordance (the ✎ button AND the
    * double-click-to-fork bubble itself, both marked `.turn-editable`) visually in
    * sync with `forkLocked(activeChatId)` — disabled + an explanatory tooltip while
-   * locked, per task-2-brief.md's "simplest: disabled when isInFlight(threadId) or
-   * queue non-empty". `beginEditBranch` re-checks `forkLocked` itself at click
-   * time as the actual guard; this only keeps the affordance from lying about it
-   * beforehand. Called at every point that can flip lock state for the active
-   * thread: `setChatBusy`, `commitSend`, the queued-chip ✕ removal, and once after
-   * a thread's turns finish rendering (`promoteToChat`/`openThreadById`) so a
-   * freshly-reopened busy/queued thread starts locked too.
+   * locked. `runBranch` re-checks `forkLocked` itself at click time as the actual
+   * guard; this only keeps the affordance from lying about it beforehand. Called at
+   * every point that can flip lock state for the active thread: `refreshBusy`,
+   * `commitSend`, the queued-chip ✕ removal, a turn claim, and once after a thread's
+   * turns finish rendering (`renderOpenedThread`) so a freshly-reopened busy/queued
+   * thread starts locked too.
    */
   function refreshEditLocks(): void {
     if (!activeChatId) return;
@@ -505,35 +611,55 @@ export function initChat(deps: ChatDeps): ChatApi {
       body.style.display = prevDisplay;
     };
     cancelBtn.addEventListener("click", () => restore());
+    const setButtons = (disabled: boolean): void => {
+      latestBtn.disabled = disabled;
+      atTurnBtn.disabled = disabled;
+      cancelBtn.disabled = disabled;
+    };
 
     const runBranch = async (doc: "latest" | "at-turn"): Promise<void> => {
       const message = ta.value.trim();
-      if (!message || !deps.getDocPath()) return;
-      latestBtn.disabled = true;
-      atTurnBtn.disabled = true;
-      cancelBtn.disabled = true;
+      if (!message) return;
+      // The editor may have been open for a while: a turn can have started on the thread since.
+      if (forkLocked(parentId)) {
+        deps.log("branch: this thread has an agent turn running or messages queued — wait for them, then branch");
+        return;
+      }
+      // Hold the parent thread like any other turn, so a footer Send meanwhile queues
+      // instead of racing the fork. Not cancellable: see the Stop section.
+      const turn = claimTurn(parentId, "branch", false);
+      if (!turn) return;
+      setButtons(true);
       const quoted = comments.get(parentId)?.quoted ?? "";
       const modelId = chatModelEl.value || undefined;
-      const bubble = streamingAgentTurn(chatStanceEl.value, modelId);
+      const bubble = turn.bubble(chatStanceEl.value, modelId);
       try {
         const res = await deps.api.branchThread(
-          { threadId: parentId, atTurnIndex: turnIndex, message, doc, ...(modelId ? { modelId } : {}) },
+          { docPath: turn.docPath, threadId: parentId, atTurnIndex: turnIndex, message, doc, ...(modelId ? { modelId } : {}) },
           (e: RpcEvent) => {
+            if (!turn.isCurrent()) return;
             if (deps.routeProposal(e)) return;
             bubble.onEvent(e);
           },
         );
+        if (!turn.isCurrent()) return; // the branch is on disk; its document lists it when reopened
         bubble.done();
         cards.registerBranchEntry(res.branchThreadId, quoted, parentId);
-        tree.refreshThreadSelect();
-        await promoteToChat(res.branchThreadId);
         deps.log(`branched ${parentId} → ${res.branchThreadId} (doc=${doc})`);
+        // The pager under the forked turn is computed from the thread listing: refresh it
+        // before opening the branch, or the new branch isn't in it yet.
+        await tree.refreshThreadTree();
+        if (!turn.isCurrent()) return;
+        turn.end(true); // release the parent before the pane moves to the branch
+        await promoteToChat(res.branchThreadId);
       } catch (e) {
-        bubble.fail(String(e));
-        latestBtn.disabled = false;
-        atTurnBtn.disabled = false;
-        cancelBtn.disabled = false;
         reportError("branch", e, deps.log);
+        if (!turn.isCurrent()) return;
+        bubble.fail(String(e));
+        setButtons(false);
+      } finally {
+        // A branch adds no turn to the parent: messages queued on it go out either way.
+        turn.end(true);
       }
     };
     latestBtn.addEventListener("click", () => void runBranch("latest"));
@@ -568,48 +694,69 @@ export function initChat(deps: ChatDeps): ChatApi {
     (first as Element | null)?.scrollIntoView({ block: "center", behavior: "smooth" });
   }
 
-  /** Reflect the active thread's resolved state in the chat action buttons. */
+  /** Reflect the active thread's state (resolved, an Improve running) in the footer action buttons. */
   function updateChatActions(): void {
     const e = activeChatId ? comments.get(activeChatId) : null;
     const resolved = e?.resolved ?? false;
+    const improving = !!activeChatId && improve.isImproving(activeChatId);
     chatResolveEl.textContent = resolved ? "Reopen thread" : "Resolve thread";
-    chatImproveEl.textContent = resolved ? "Incorporate into doc" : "Improve passage";
+    chatImproveEl.textContent = improving ? "Improving..." : resolved ? "Incorporate into doc" : "Improve passage";
+    chatImproveEl.disabled = improving;
     chatImproveEl.classList.toggle("incorporate", resolved);
   }
 
   chatResolveEl.addEventListener("click", async () => {
     const id = activeChatId;
-    if (!id || !deps.getDocPath()) return;
+    const t = id ? turnCtx(id) : null;
+    if (!id || !t) return;
     const e = comments.get(id);
     if (!e) return;
+    const gen = paneGen;
     const next = !e.resolved;
     try {
-      await deps.api.resolveComment({ id, resolved: next });
+      await deps.api.resolveComment({ docPath: t.docPath, id, resolved: next });
     } catch (err) {
       return void reportError("resolve", err, deps.log);
     }
+    deps.log(`${next ? "resolved" : "reopened"} ${id}`);
+    if (!isCurrent(t)) return; // its document re-reads the resolved state when reopened
     e.resolved = next;
     e.card.classList.toggle("resolved", next);
+    if (gen !== paneGen) return; // the pane moved on: the card says it
     if (next) chatTurn("system", "Marked resolved.");
     else chatTurn("system", "Reopened.");
     updateChatActions();
-    deps.log(`${next ? "resolved" : "reopened"} ${id}`);
   });
+
+  /**
+   * Point the pane at a new subject — a thread, a banner (`id` null or a directive), or
+   * nothing — and re-derive everything that depends on which thread is shown: a new
+   * pane generation (so an older fetch can't render here), the active card, the branch
+   * tree, the footer labels and Stop. A turn still running on the thread puts its live
+   * elements back, so its stream and its final reply or error show here again.
+   * Callers set the quote/footer/empty-state chrome.
+   */
+  function setPaneSubject(id: string | null): number {
+    activeChatId = id;
+    paneGen++;
+    comments.forEach((e) => e.card.classList.toggle("active", e.id === id));
+    chatTurnsEl.replaceChildren();
+    if (id) for (const l of scope.live.get(id) ?? []) l.attach();
+    tree.select(id ?? "");
+    tree.renderThreadTree(); // re-scope the tree to the newly-focused thread's family
+    updateChatActions();
+    refreshBusy();
+    return paneGen;
+  }
 
   /** Make `id` the live chat thread and reset the pane chrome (no turns rendered). */
   function activateChatPane(id: string, quoted: string): void {
     deps.uncollapseLeftPane(); // opening a conversation always shows the left pane (Phase 11 T1 exception)
     deps.clearAnnotationUndo(); // engaging a discussion ends the "undo my last highlight" window
-    setChatBusy(null); // switching threads hides any stale Stop from a prior turn
-    activeChatId = id;
-    comments.forEach((e) => e.card.classList.toggle("active", e.id === id));
+    setPaneSubject(id);
     focusAnnotation(id);
-    updateChatActions();
-    tree.select(id);
-    tree.renderThreadTree(); // re-scope the tree to the newly-focused thread's family
     chatQuoteEl.hidden = false;
     chatQuoteEl.textContent = `“${excerpt(quoted)}”`;
-    chatTurnsEl.innerHTML = "";
     // Populate the footer model picker (default for now; promoteToChat refines it
     // to the thread's persisted model once the thread is fetched).
     modelSelectOptions(chatModelEl, defaultModelKey);
@@ -618,49 +765,67 @@ export function initChat(deps: ChatDeps): ChatApi {
     chatEmptyEl.hidden = true;
   }
 
+  /** A thread's persisted turns, with the ‹ k / n › pager under each forked "you" turn. */
+  function renderThreadTurns(id: string, thread: ThreadView, agentMeta: (tn: ThreadTurn) => string | undefined): void {
+    thread.turns.forEach((tn, i) => {
+      chatTurn(tn.role, tn.body, agentMeta(tn), tn.thinking, i);
+      if (tn.role === "you") {
+        const sibs = tree.siblingsAt(id, i);
+        if (sibs.length >= 2) tree.renderVersionPager(sibs, id);
+      }
+    });
+  }
+
+  /**
+   * Render a just-fetched transcript of `id` above what the pane already shows — the live
+   * elements of a turn still running on the thread (put back by setPaneSubject) and
+   * anything sent while the transcript was loading (Send is live as soon as the pane
+   * opens) — then the thread's still-pending messages that aren't on screen yet.
+   */
+  function renderOpenedThread(id: string, render: () => void): void {
+    const notOnDiskYet = [...chatTurnsEl.children];
+    chatTurnsEl.replaceChildren();
+    render();
+    chatTurnsEl.append(...notOnDiskYet);
+    // Phase 9 T1: still-pending messages are client-only, so getThread() never includes
+    // them. This is what makes switching away from a busy thread and back show them again.
+    for (const item of scope.queue.held(id)) renderYouTurn(item, "held");
+    for (const item of scope.queue.list(id)) renderYouTurn(item, "queued");
+    refreshEditLocks(); // Phase 9 T2: a reopened busy/queued thread starts fork-locked too
+    chatTurnsEl.scrollTop = chatTurnsEl.scrollHeight;
+  }
+
   async function promoteToChat(id: string): Promise<void> {
     const entry = comments.get(id);
-    if (!entry || !deps.getDocPath()) return;
+    const docPath = deps.getDocPath();
+    if (!entry || !docPath) return;
     activateChatPane(id, entry.quoted);
-    const gen = ++paneGen;
+    const gen = paneGen;
+    let thread: ThreadView | null = null;
     try {
-      const thread = await deps.api.getThread({ threadId: id });
-      if (gen !== paneGen) return; // the user opened another thread meanwhile — don't render into its pane
+      thread = await deps.api.getThread({ docPath, threadId: id });
+    } catch {
+      thread = null;
+    }
+    if (gen !== paneGen) return; // the pane moved on meanwhile — don't render into it
+    const placeholder = () => chatTurn("you", entry.commentInput.value || "(write a comment, then Discuss)");
+    renderOpenedThread(id, () => {
+      if (!thread) return void placeholder();
       if (thread.frontmatter?.stance) chatStanceEl.value = thread.frontmatter.stance;
       // Picker defaults to the thread's persisted model, else the per-doc default.
-      const threadModel = thread.frontmatter?.model ?? defaultModelKey;
-      modelSelectOptions(chatModelEl, threadModel);
+      const threadModel = thread.frontmatter?.model;
+      modelSelectOptions(chatModelEl, threadModel ?? defaultModelKey);
       refreshMoreLabel();
-      let lastUser: ThreadTurn | undefined;
-      thread.turns.forEach((tn, i) => {
-        // Persisted agent turns get a subtle "· {model}" tag when the thread has a model.
-        const meta =
-          tn.role === "agent" && thread.frontmatter?.model
-            ? `${tn.meta ?? "agent"} · ${modelName(thread.frontmatter.model)}`
-            : tn.meta;
-        chatTurn(tn.role, tn.body, meta, tn.thinking, i);
-        if (tn.role === "you") {
-          lastUser = tn;
-          const sibs = tree.siblingsAt(id, i);
-          if (sibs.length >= 2) tree.renderVersionPager(sibs, id);
-        }
-      });
+      // Persisted agent turns get a subtle "· {model}" tag when the thread has a model.
+      renderThreadTurns(id, thread, (tn) =>
+        tn.role === "agent" && threadModel ? `${tn.meta ?? "agent"} · ${modelName(threadModel)}` : tn.meta,
+      );
+      const lastUser = lastUserTurn(thread.turns);
       if (thread.frontmatter?.status === "error" && lastUser && !chatInputEl.value.trim()) {
         chatInputEl.value = lastUser.body;
       }
-      if (!thread.turns.length) {
-        chatTurn("you", entry.commentInput.value || "(write a comment, then Discuss)");
-      }
-    } catch {
-      if (gen !== paneGen) return;
-      chatTurn("you", entry.commentInput.value || "(write a comment, then Discuss)");
-    }
-    // Phase 9 T1: replay this thread's still-queued (not yet dispatched) messages —
-    // they're client-only, so the getThread() above never includes them. This is
-    // what makes switching away from a busy thread and back show them again,
-    // instead of a queued message silently vanishing until it's actually sent.
-    for (const item of sendQueue.list(id)) renderYouTurn(item, { queued: true });
-    refreshEditLocks(); // Phase 9 T2: a reopened busy/queued thread starts fork-locked too
+      if (!thread.turns.length) placeholder();
+    });
   }
 
   chatImproveEl.addEventListener("click", () => {
@@ -678,13 +843,11 @@ export function initChat(deps: ChatDeps): ChatApi {
 
   /**
    * Actually dispatch one queued/committed turn's RPC — the `send` callback
-   * `driveSend` (send-queue.ts) drives sequentially. Always resolves threadId
-   * from `threadId`/`item.threadId` (the queue key), NEVER from `activeChatId`
-   * — this may be running for a thread the user has since switched away from
-   * (see renderYouTurn's header comment), so every DOM touch below is gated on
-   * `isActive`; the RPC call itself, the margin card's chip
-   * (`setChip`/`setCommentActionState` — always visible regardless of which
-   * thread's pane is open) is not.
+   * `driveSend` (send-queue.ts) drives sequentially. `t` names the thread (the
+   * queue key, NEVER `activeChatId`) and the document generation the chain belongs
+   * to. The user may have opened another thread since (the bubble is then kept aside
+   * and re-attached when this thread is opened again) or another document (the turn
+   * then touches nothing: see the file header).
    *
    * `wasQueued` is false only for a message that went straight to dispatch
    * (the thread was free) — that's the one case task-1-brief.md's "outright
@@ -692,93 +855,124 @@ export function initChat(deps: ChatDeps): ChatApi {
    * already has its own failed "you" bubble as feedback, so its text isn't
    * also stuffed back into the (possibly by-then-different) input.
    */
-  async function dispatchQueuedTurn(threadId: string, item: QueuedTurn, wasQueued: boolean): Promise<SendOutcome> {
+  async function dispatchQueuedTurn(t: TurnCtx, item: QueuedTurn, wasQueued: boolean): Promise<SendOutcome> {
+    if (!isCurrent(t)) return "stopped"; // its document's queue went with it
+    const { threadId, docPath } = t;
     const entry = comments.get(threadId);
-    const isActive = threadId === activeChatId;
-    if (isActive) stripQueuedChip(item);
-    const bubble = isActive ? streamingAgentTurn(item.stance, item.modelId) : null;
+    t.scope.stopped.delete(threadId); // a turn only now starting cannot be the one Stop cancelled
+    const stripChip = turnElByItemId.get(item.id);
+    if (stripChip) setPendingChip(stripChip, item, "live");
+    const bubble = turnBubble(t, item.stance, item.modelId);
     const onEvent = (e: RpcEvent) => {
+      if (!isCurrent(t)) return;
       if (deps.routeProposal(e)) return;
-      bubble?.onEvent(e);
+      bubble.onEvent(e);
     };
     setChip(threadId, "running");
-    if (isActive) setChatBusy(threadId); // show Stop; cancelKey for discuss/reply is docPath#<threadId>
-    // onSuccess runs INSIDE runStreamingTurn's try, before its finally clears busy, so the
-    // Stop button stays up until the final reply has been fetched and rendered.
+    if (entry && !entry.discussed) setCommentActionState(entry, "running");
+    t.scope.busy.add(threadId); // Stop; cancelKey for discuss/reply is docPath#<threadId>
+    refreshBusy();
     const outcome = await runStreamingTurn({
-      run: async () => {
+      run: () => {
         if (entry && !entry.discussed) {
-          setCommentActionState(entry, "running");
-          const r = await deps.api.discuss(
-            { threadId, annotationId: threadId, stance: item.stance, comment: item.text, ...(item.modelId ? { modelId: item.modelId } : {}) },
+          return deps.api.discuss(
+            { docPath, threadId, annotationId: threadId, stance: item.stance, comment: item.text, ...(item.modelId ? { modelId: item.modelId } : {}) },
             onEvent,
           );
-          entry.discussed = true;
-          return r;
         }
         return deps.api.reply(
-          { threadId, message: item.text, stance: item.stance, ...(item.modelId ? { modelId: item.modelId } : {}) },
+          { docPath, threadId, message: item.text, stance: item.stance, ...(item.modelId ? { modelId: item.modelId } : {}) },
           onEvent,
         );
       },
+      // Runs before driveSend releases the thread, so a message queued behind this one
+      // sees the thread discussed and goes out as a reply.
       onSuccess: async () => {
+        const finalText = await fetchLastAgentReply(docPath, threadId);
+        if (!isCurrent(t)) return; // the reply is on disk; the document re-reads it when reopened
         turnElByItemId.delete(item.id); // reached a terminal (sent) state — no more failure/removal to wire up
-        if (isActive) bubble?.done(await fetchLastAgentReply(threadId));
-        if (entry) setCommentActionState(entry, "responded");
+        bubble.done(finalText);
+        if (entry) {
+          entry.discussed = true;
+          setCommentActionState(entry, "responded");
+        }
       },
       onError: (e) => {
+        if (!isCurrent(t)) return;
         const msg = String(e);
-        if (isActive) bubble?.fail(msg);
+        bubble.fail(msg);
         if (entry) setCommentActionState(entry, "error");
         markYouTurnFailed(item, msg);
         // Outright delivery failure (task-1-brief.md): give the typed text back
         // instead of making the user retype it — only if they haven't already
-        // started a new draft in the meantime, and only for the direct-send case
-        // (a queued item's failed text stays visible on its own failed bubble).
-        if (!wasQueued && isActive && !chatInputEl.value.trim()) chatInputEl.value = item.text;
+        // started a new draft in the meantime, only for the direct-send case
+        // (a queued item's failed text stays visible on its own failed bubble), and
+        // only into this thread's own footer.
+        if (!wasQueued && isShown(t) && !chatInputEl.value.trim()) chatInputEl.value = item.text;
       },
-      onSettled: () => clearBusyIfCurrent(threadId),
+      onSettled: () => {
+        t.scope.busy.delete(threadId);
+        t.scope.live.delete(threadId);
+        if (isCurrent(t)) refreshBusy();
+      },
     });
-    // cancelTurn makes the RPC above resolve normally (see the Stop handler's
-    // comment) — stoppedThreads is what turns that resolve into "stopped" so
-    // driveSend halts instead of reading a user-cancelled turn as a plain success.
+    // cancelTurn makes the RPC above resolve normally (see the Stop section) —
+    // scope.stopped is what turns that resolve into "stopped" so driveSend halts
+    // instead of reading a user-cancelled turn as a plain success.
     // Consumed on EVERY settle: a Stop that surfaces as an error must not leave
     // the id poisoned for a later, unrelated send on the same threadId.
-    const wasStopped = stoppedThreads.delete(threadId);
+    const wasStopped = t.scope.stopped.delete(threadId);
     if (!outcome.ok) return "failed";
     return wasStopped ? "stopped" : "sent";
   }
 
   /**
    * Claim `threadId` for a turn that is NOT a queued chat message — card "Ask agent",
-   * Improve, Brainstorm, Visualize, Panel. These used to call their RPC directly without
-   * touching the send queue, so a footer Send during one of them dispatched a SECOND
-   * concurrent turn on the same thread (and, before the first discuss() finished, a second
-   * discuss() that re-initialised the thread file under it). Holding the same in-flight
-   * bit `driveSend` uses makes `commitSend` queue behind them instead.
+   * Improve, Brainstorm, Visualize, Panel, Branch. These used to call their RPC directly
+   * without touching the send queue, so a footer Send during one of them dispatched a
+   * SECOND concurrent turn on the same thread (and, before the first discuss() finished,
+   * a second discuss() that re-initialised the thread file under it). Holding the same
+   * in-flight bit `driveSend` uses makes `commitSend` queue behind them instead.
    *
-   * Returns false — and the caller must not start — when the thread already has a turn in
-   * flight. Every successful begin MUST be paired with `endExclusiveTurn` in a `finally`.
+   * Returns null — and the caller must not start — when the thread already has a turn in
+   * flight or no document is open. Every claim MUST be paired with `end()` in a `finally`.
    */
-  function beginExclusiveTurn(threadId: string, label: string): boolean {
-    if (!claimExclusive(sendQueue, threadId)) {
+  function claimTurn(threadId: string, label: string, cancellable: boolean): ExclusiveTurn | null {
+    const t = turnCtx(threadId);
+    if (!t) return null;
+    if (!claimExclusive(t.scope.queue, threadId)) {
       deps.log(`${label}: ${threadId} already has an agent turn running — wait for it or press Stop`);
-      return false;
+      return null;
     }
-    refreshEditLocks();
-    return true;
+    t.scope.stopped.delete(threadId); // a turn only now starting cannot be the one Stop cancelled
+    if (cancellable) t.scope.busy.add(threadId);
+    refreshBusy();
+    let ended = false;
+    return {
+      threadId,
+      docPath: t.docPath,
+      isCurrent: () => isCurrent(t),
+      isShown: () => isShown(t),
+      bubble: (meta, modelId) => turnBubble(t, meta, modelId),
+      track: (box) => trackLive(t, { el: box, attach: () => appendCustomTurn(box) }),
+      end: (drain) => {
+        if (ended) return;
+        ended = true;
+        // The same halt-on-failure rule driveSend applies to itself: after a failure or a
+        // Stop, the messages queued behind this turn are held for the user.
+        const stopped = t.scope.stopped.delete(threadId);
+        t.scope.busy.delete(threadId);
+        t.scope.live.delete(threadId);
+        if (!isCurrent(t)) return; // the queue and the claim went with the document's scope
+        void releaseExclusive(t.scope.queue, threadId, drain && !stopped, (i) => dispatchQueuedTurn(t, i, true)).then(() =>
+          refreshPendingChips(t),
+        );
+        refreshBusy();
+      },
+    };
   }
-
-  /**
-   * Release a thread claimed by `beginExclusiveTurn`. `drain` says whether to deliver the
-   * messages that queued up behind it: true after a turn that succeeded, false after a
-   * failure or Stop — the same halt-on-failure rule `driveSend` applies to itself, so
-   * queued messages stay queued for the user to resend or ✕.
-   */
-  function endExclusiveTurn(threadId: string, drain: boolean): void {
-    const stopped = stoppedThreads.delete(threadId);
-    void releaseExclusive(sendQueue, threadId, drain && !stopped, (i) => dispatchQueuedTurn(threadId, i, true));
-    refreshEditLocks();
+  function beginExclusiveTurn(threadId: string, label: string): ExclusiveTurn | null {
+    return claimTurn(threadId, label, true);
   }
 
   /**
@@ -788,23 +982,27 @@ export function initChat(deps: ChatDeps): ChatApi {
    * after this returns, regardless of which branch ran, so the textarea is
    * empty the instant the message is committed rather than on turn success.
    */
-  function commitSend(threadId: string, text: string): void {
+  function commitSend(threadId: string, text: string, picked?: { stance: string; modelId?: string }): void {
+    const t = turnCtx(threadId);
+    if (!t) return;
     const item: QueuedTurn = {
       id: `q${++queueSeq}`,
       threadId,
       text,
-      stance: chatStanceEl.value,
-      modelId: chatModelEl.value || undefined,
+      stance: picked?.stance ?? chatStanceEl.value,
+      modelId: picked ? picked.modelId : chatModelEl.value || undefined,
     };
-    if (sendQueue.isInFlight(threadId)) {
-      sendQueue.enqueue(item);
-      renderYouTurn(item, { queued: true });
+    if (t.scope.queue.isInFlight(threadId)) {
+      t.scope.queue.enqueue(item);
+      renderYouTurn(item, "queued");
       refreshEditLocks(); // Phase 9 T2: a newly-queued item can flip forkLocked(threadId)
       return;
     }
-    renderYouTurn(item, { queued: false });
+    renderYouTurn(item, "live");
     const firstId = item.id; // only THIS call's own item skips the queued-failure input-restore carve-out
-    void driveSend(sendQueue, threadId, item, (i) => dispatchQueuedTurn(threadId, i, i.id !== firstId));
+    void driveSend(t.scope.queue, threadId, item, (i) => dispatchQueuedTurn(t, i, i.id !== firstId)).then(() =>
+      refreshPendingChips(t),
+    );
     // driveSend's markInFlight(threadId) already ran synchronously above (it's the
     // very first line of driveSend, before its one `await`) — refresh now, not
     // before, so this reflects the just-started in-flight state (Phase 9 T2).
@@ -857,29 +1055,28 @@ export function initChat(deps: ChatDeps): ChatApi {
     // annotation; a directive-N/review pseudo-thread never has one, so this would be
     // a guaranteed RPC error. Only Send is wired for those threads.
     if (!entry) return;
-    const msg =
-      chatInputEl.value.trim() ||
-      entry?.commentInput.value.trim() ||
-      "Compare your takes on this.";
+    const typed = chatInputEl.value.trim();
+    const msg = typed || entry.commentInput.value.trim() || "Compare your takes on this.";
     const models = threadModels.map((m) => m.key);
     if (!models.length && chatModelEl.value) models.push(chatModelEl.value);
     if (!models.length) {
       deps.log("panel: no models configured — add one in File ▸ Settings");
       return;
     }
-    if (!beginExclusiveTurn(id, "panel")) return;
+    const turn = beginExclusiveTurn(id, "panel"); // also shows Stop: cancelKey docPath#<id>
+    if (!turn) return;
+    if (typed) chatInputEl.value = ""; // committed — cleared now, like Send, never when the run ends
     let panelOk = false;
     chatTurn("you", msg);
     // Each model gets a streaming bubble, created lazily on its first event so the
     // label is the producing model rather than a generic "agent".
-    const bubbles = new Map<string, ReturnType<typeof streamingAgentTurn>>();
-    setChip(id, "running");
-    if (entry) setCommentActionState(entry, "running");
-    setChatBusy(id); // Stop cancels the panel run (cancelKey docPath#<id>)
-    const outcome = await runStreamingTurn({
+    const bubbles = new Map<string, ReturnType<ExclusiveTurn["bubble"]>>();
+    setCommentActionState(entry, "running");
+    await runStreamingTurn({
       run: () =>
         deps.api.panel(
           {
+            docPath: turn.docPath,
             threadId: id,
             annotationId: id,
             stance: chatStanceEl.value,
@@ -887,54 +1084,52 @@ export function initChat(deps: ChatDeps): ChatApi {
             models,
           },
           (e) => {
+            if (!turn.isCurrent()) return;
             if (deps.routeProposal(e)) return;
             const model = e.model ?? "agent";
             let b = bubbles.get(model);
             if (!b) {
-              b = streamingAgentTurn(modelName(model) || model, model);
+              b = turn.bubble(modelName(model) || model, model);
               bubbles.set(model, b);
             }
             b.onEvent(e);
           },
         ),
-      onError: (e) => {
-        if (bubbles.size) bubbles.forEach((b) => b.fail(String(e)));
-        else streamingAgentTurn().fail(String(e));
-        if (entry) setCommentActionState(entry, "error");
-        else setChip(id, "error");
-        reportError("panel", e, deps.log);
-      },
-      onSuccess: () => {
-        panelOk = true;
-      },
-      onSettled: () => {
-        setChatBusy(null);
-        endExclusiveTurn(id, panelOk);
-      },
-    });
-    if (outcome.ok) {
-      // Each model's persisted turn is `meta === model` on the thread (see
-      // Orchestrator.panel's agentMeta) — one getThread covers every bubble instead of
-      // one round-trip per model. Best-effort: a fetch failure just leaves every bubble
-      // showing its streamed text unchanged (same as calling b.done() with no argument).
-      const finalTurns = await deps.api.getThread({ threadId: id }).catch(() => null);
-      const lastReplyFor = (model: string): string | undefined => {
-        if (!finalTurns) return undefined;
-        for (let i = finalTurns.turns.length - 1; i >= 0; i--) {
-          const tn = finalTurns.turns[i];
-          if (tn.role === "agent" && tn.meta === model) return tn.body;
-        }
-        return undefined;
-      };
-      bubbles.forEach((b, model) => b.done(lastReplyFor(model)));
-      chatInputEl.value = "";
-      if (entry) {
+      // Everything that depends on the run having succeeded happens HERE, before
+      // onSettled releases the thread: a message queued behind the panel must find the
+      // thread discussed (a reply), or it would go out as a fresh discuss() that
+      // re-initialises the thread file and wipes every model's reply.
+      onSuccess: async () => {
+        // Each model's persisted turn is `meta === model` on the thread (see
+        // Orchestrator.panel's agentMeta) — one getThread covers every bubble instead of
+        // one round-trip per model. Best-effort: a fetch failure just leaves every bubble
+        // showing its streamed text unchanged (same as calling b.done() with no argument).
+        const finalTurns = await deps.api.getThread({ docPath: turn.docPath, threadId: id }).catch(() => null);
+        if (!turn.isCurrent()) return; // persisted; the document re-reads it when reopened
+        const lastReplyFor = (model: string): string | undefined => {
+          if (!finalTurns) return undefined;
+          for (let i = finalTurns.turns.length - 1; i >= 0; i--) {
+            const tn = finalTurns.turns[i];
+            if (tn.role === "agent" && tn.meta === model) return tn.body;
+          }
+          return undefined;
+        };
+        bubbles.forEach((b, model) => b.done(lastReplyFor(model)));
         entry.discussed = true;
         setCommentActionState(entry, "responded");
-      } else {
-        setChip(id, "responded");
-      }
-    }
+        panelOk = true;
+      },
+      onError: (e) => {
+        reportError("panel", e, deps.log);
+        if (!turn.isCurrent()) return;
+        if (bubbles.size) bubbles.forEach((b) => b.fail(String(e)));
+        else turn.bubble().fail(String(e));
+        setCommentActionState(entry, "error");
+        // Like a failed direct send: give the typed text back unless a new draft is there.
+        if (typed && turn.isShown() && !chatInputEl.value.trim()) chatInputEl.value = typed;
+      },
+      onSettled: () => turn.end(panelOk),
+    });
   });
 
   /**
@@ -948,62 +1143,55 @@ export function initChat(deps: ChatDeps): ChatApi {
    * (so `chatSendEl` always replies here — see its own comment — and Improve/Resolve,
    * which need an anchored `CommentEntry`, stay harmless no-ops).
    * Phase 9 T2b: `branch()` got the identical server-side tolerance, so this thread's
-   * "you" turns now carry a `turnIndex` too (see the `forEach` below) — the ✎ button/
-   * double-click fork affordance (`renderTurn`'s `role === "you" && turnIndex != null`
-   * gate) now renders here exactly as it does for `promoteToChat`'s real comment
-   * threads. Any turns here that aren't "you" (or a transcript with no "you" turn at
-   * all, e.g. an agent/system-only pseudo-thread) simply render no affordance — no
-   * special-casing needed, the same gate already handles it.
+   * "you" turns carry a `turnIndex` too — the ✎ button/double-click fork affordance
+   * renders here exactly as it does for `promoteToChat`'s real comment threads, and so
+   * does the branch pager.
    */
   async function openThreadById(id: string, title: string): Promise<void> {
-    if (!deps.getDocPath()) return;
+    const docPath = deps.getDocPath();
+    if (!docPath) return;
     deps.uncollapseLeftPane(); // opening a conversation always shows the left pane (Phase 11 T1 exception)
-    activeChatId = id;
-    comments.forEach((e) => e.card.classList.remove("active"));
+    const gen = setPaneSubject(id);
     chatQuoteEl.hidden = false;
     chatQuoteEl.textContent = title;
     chatFootEl.hidden = false;
     chatEmptyEl.hidden = true;
-    chatTurnsEl.replaceChildren();
     modelSelectOptions(chatModelEl, defaultModelKey);
     refreshMoreLabel();
-    const gen = ++paneGen;
+    let thread: ThreadView | null = null;
+    let failure = "";
     try {
-      const thread = await deps.api.getThread({ threadId: id });
-      if (gen !== paneGen) return; // superseded by a newer thread open (see paneGen)
-      if (thread.frontmatter?.stance) chatStanceEl.value = thread.frontmatter.stance;
-      modelSelectOptions(chatModelEl, thread.frontmatter?.model ?? defaultModelKey);
-      refreshMoreLabel();
-      if (!thread.turns.length) chatTurn("system", "No transcript for this agent task yet.");
-      thread.turns.forEach((tn, i) => chatTurn(tn.role, tn.body, tn.meta, tn.thinking, i));
+      thread = await deps.api.getThread({ docPath, threadId: id });
     } catch (e) {
-      if (gen !== paneGen) return;
-      const msg = String(e);
-      if (/ENOENT|no such file/.test(msg)) {
+      failure = String(e);
+    }
+    if (gen !== paneGen) return; // superseded by a newer subject (see setPaneSubject)
+    renderOpenedThread(id, () => {
+      if (thread) {
+        if (thread.frontmatter?.stance) chatStanceEl.value = thread.frontmatter.stance;
+        modelSelectOptions(chatModelEl, thread.frontmatter?.model ?? defaultModelKey);
+        refreshMoreLabel();
+        if (!thread.turns.length) chatTurn("system", "No transcript for this agent task yet.");
+        renderThreadTurns(id, thread, (tn) => tn.meta);
+      } else if (/ENOENT|no such file/.test(failure)) {
         chatTurn(
           "system",
           "No saved transcript for this agent task — it predates transcript saving or ended before responding. Re-run it (Resolve [[ ]] / Review) to capture the conversation.",
         );
       } else {
-        chatTurn("system", `Could not open this agent: ${msg}`);
+        chatTurn("system", `Could not open this agent: ${failure}`);
       }
-    }
-    // Phase 9 T1: replay this thread's still-queued (not yet dispatched) messages — see promoteToChat's identical comment.
-    for (const item of sendQueue.list(id)) renderYouTurn(item, { queued: true });
-    // Phase 9 T2 / T2b: keeps the ✎ affordance's busy/queued disabled state in sync —
-    // see its own doc comment. Now does real work here (not a no-op) since the turns
-    // above render with a turnIndex and can carry `.turn-editable`.
-    refreshEditLocks();
+    });
   }
 
   /**
    * meta/ctrl+click jump target for an annotation id (comment, review finding, or a
-   * highlight that was never discussed) — Phase-8 T4. Mirrors the Agents panel's own
-   * click routing (see refreshAgents' row click handler below): promoteToChat when a
-   * margin CommentEntry exists, else the read-only openThreadById pseudo-thread view
-   * — which already degrades gracefully (see its own doc comment) when `id` has no
-   * thread at all, so no extra existence check is needed here (contrast
-   * jumpToDirective, which does need one).
+   * highlight that was never discussed) — Phase-8 T4. Also how the branch tree and the
+   * version pager open a thread. Mirrors the Agents panel's own click routing:
+   * promoteToChat when a margin CommentEntry exists, else the openThreadById
+   * pseudo-thread view — which already degrades gracefully (see its own doc comment)
+   * when `id` has no thread at all, so no extra existence check is needed here
+   * (contrast jumpToDirective, which does need one).
    */
   async function jumpToAnnotation(id: string): Promise<void> {
     if (comments.has(id)) await promoteToChat(id);
@@ -1022,13 +1210,15 @@ export function initChat(deps: ChatDeps): ChatApi {
    */
   async function jumpToDirective(n: number): Promise<void> {
     const id = `directive-${n}`;
-    if (!deps.getDocPath()) return;
+    const docPath = deps.getDocPath();
+    if (!docPath) return;
     try {
-      await deps.api.getThread({ threadId: id });
+      await deps.api.getThread({ docPath, threadId: id });
     } catch {
       deps.log(`directive ${n}: run Resolve [[ ]] to start this agent`);
       return;
     }
+    if (deps.getDocPath() !== docPath) return;
     await openThreadById(id, agents.taskTitle(id));
   }
 
@@ -1044,14 +1234,12 @@ export function initChat(deps: ChatDeps): ChatApi {
    * (fully repliable via `openThreadById`).
    */
   function showDirectiveResult(headline: string, reply: string, threadId?: string): void {
-    activeChatId = threadId ?? null;
-    comments.forEach((e) => e.card.classList.remove("active"));
+    setPaneSubject(threadId ?? null);
     chatQuoteEl.hidden = true;
     // Footer only when there is a single addressable thread — the N≠1 summary
     // banner has no reply target (each directive is repliable from its own row).
     chatFootEl.hidden = threadId === undefined;
     chatEmptyEl.hidden = true;
-    chatTurnsEl.replaceChildren();
     chatTurn("system", headline);
     if (reply.trim()) chatTurn("agent", reply, "Resolve [[ ]]");
   }
@@ -1063,19 +1251,20 @@ export function initChat(deps: ChatDeps): ChatApi {
    */
   async function askAgentFromCard(entry: CommentEntry, ask: CardAsk): Promise<void> {
     const { id, quoted } = entry;
-    if (!beginExclusiveTurn(id, "ask agent")) return;
+    const turn = beginExclusiveTurn(id, "ask agent"); // also shows Stop: cancelKey docPath#<id>
+    if (!turn) return;
     let askOk = false;
     chatStanceEl.value = ask.stance;
     activateChatPane(id, quoted);
     chatModelEl.value = ask.modelId ?? ""; // keep the footer picker in sync
     refreshMoreLabel();
     setCommentActionState(entry, "running");
-    setChatBusy(id); // show Stop; cancelKey for discuss is docPath#<id>
     chatTurn("you", ask.comment);
-    const bubble = streamingAgentTurn(ask.stance, ask.modelId);
+    const bubble = turn.bubble(ask.stance, ask.modelId);
     try {
       await deps.api.discuss(
         {
+          docPath: turn.docPath,
           threadId: id,
           annotationId: id,
           stance: ask.stance,
@@ -1083,22 +1272,25 @@ export function initChat(deps: ChatDeps): ChatApi {
           ...(ask.modelId ? { modelId: ask.modelId } : {}),
         },
         (e: RpcEvent) => {
+          if (!turn.isCurrent()) return;
           if (deps.routeProposal(e)) return;
           bubble.onEvent(e);
         },
       );
-      bubble.done(await fetchLastAgentReply(id));
+      const finalText = await fetchLastAgentReply(turn.docPath, id);
+      if (!turn.isCurrent()) return; // persisted; the document re-reads it when reopened
+      bubble.done(finalText);
       entry.discussed = true;
       setCommentActionState(entry, "responded");
       askOk = true;
     } catch (e) {
+      reportError("discuss", e, deps.log);
+      if (!turn.isCurrent()) return;
       bubble.fail(String(e));
       entry.discussed = false;
       setCommentActionState(entry, "error");
-      reportError("discuss", e, deps.log);
     } finally {
-      setChatBusy(null);
-      endExclusiveTurn(id, askOk);
+      turn.end(askOk);
     }
   }
 
@@ -1108,66 +1300,74 @@ export function initChat(deps: ChatDeps): ChatApi {
    */
   async function resendFromCard(entry: CommentEntry): Promise<void> {
     await promoteToChat(entry.id);
-    if (deps.getDocPath() && !chatInputEl.value.trim()) {
+    const docPath = deps.getDocPath();
+    const gen = paneGen;
+    if (!docPath || activeChatId !== entry.id) return; // the pane moved on while it opened
+    if (!chatInputEl.value.trim()) {
       try {
-        const thread = await deps.api.getThread({ threadId: entry.id });
+        const thread = await deps.api.getThread({ docPath, threadId: entry.id });
+        if (gen !== paneGen) return;
         const last = lastUserTurn(thread.turns);
-        if (last) chatInputEl.value = last.body;
+        if (last && !chatInputEl.value.trim()) chatInputEl.value = last.body;
       } catch {
         /* best effort; the user can still type a resend */
       }
     }
-    chatInputEl.focus();
+    if (gen === paneGen) chatInputEl.focus();
   }
 
   /**
    * The chat-pane side of fully removing an annotation: backend delete + in-document
    * decoration removal happen in main.ts's removeAnnotationById, which calls this for
-   * the margin-card/branch-children/queue/chat-pane cleanup.
+   * the margin-card/branch-descendants/queue/chat-pane cleanup.
    */
   function removeCommentEntry(id: string): void {
-    if (!cards.removeEntry(id)) return;
-    // Any still-queued (not-yet-dispatched) messages for this thread are moot now —
-    // drop them and their DOM bookkeeping so they don't dangle forever.
-    for (const item of sendQueue.list(id)) turnElByItemId.delete(item.id);
-    sendQueue.clearThread(id);
-    // If the deleted thread was open in the chat pane, reset the pane.
-    if (activeChatId === id) {
-      activeChatId = null;
-      chatTurnsEl.innerHTML = "";
+    const removed = cards.removeEntry(id);
+    if (!removed.length) return;
+    for (const rid of removed) {
+      // Any still-pending messages for these threads are moot now — drop them and their
+      // DOM bookkeeping so they don't dangle forever; nothing of theirs shows Stop.
+      for (const item of [...scope.queue.list(rid), ...scope.queue.held(rid)]) turnElByItemId.delete(item.id);
+      scope.queue.clearThread(rid);
+      scope.busy.delete(rid);
+      scope.live.delete(rid);
+    }
+    // If a deleted thread was open in the chat pane, reset the pane.
+    if (activeChatId && removed.includes(activeChatId)) {
+      setPaneSubject(null);
       chatQuoteEl.hidden = true;
       chatFootEl.hidden = true;
       chatEmptyEl.hidden = false;
+    } else {
+      refreshBusy();
     }
   }
 
-  /** Clear the comment registry + chat pane (called on document switch). */
+  /** Clear the comment registry + chat pane (called on every document switch, reload and close). */
   function resetChat(): void {
     cards.clear();
-    activeChatId = null;
     deps.resetCommentSeq();
-    chatTurnsEl.innerHTML = "";
-    chatQuoteEl.hidden = true;
-    chatFootEl.hidden = true;
-    chatEmptyEl.hidden = false;
+    // A new document generation. Turns still in flight keep running on the sidecar and
+    // land on disk; nothing of theirs reaches this document (see the file header).
+    // Emptying the old queue stops their chains after the turn in flight — queued ids
+    // like "directive-1" aren't unique across documents, so they must not carry over.
+    scope.queue.resetAll();
+    scope = newScope();
+    turnElByItemId.clear();
     // Synchronously clear the thread tree before the async re-fetch so the previous
     // document's threads are never visible in the newly-active tab's left pane. The
     // re-fetch (refreshThreadTree via refreshThreadSelect below) will repopulate it;
     // the treeGen staleness guard ensures only the newest fetch's result lands here.
     tree.clear();
-    // Reset the review form: dismiss the form and its status line so the previous
-    // document's review result ("N findings added to the rail") does not persist in
-    // the right pane after switching to a different document.
+    setPaneSubject(null);
+    chatQuoteEl.hidden = true;
+    chatFootEl.hidden = true;
+    chatEmptyEl.hidden = false;
+    // The document-wide passes and the Agents panel re-derive their state for the newly
+    // active document (a pass still running elsewhere keeps its own lock).
     passes.reset();
+    agents.reset();
     tree.refreshThreadSelect();
-    // Queued (not-yet-dispatched) turns are scoped to THIS document's threads —
-    // thread ids like "directive-1" aren't globally unique across documents, so
-    // carrying a queue entry over to the next-opened doc could misfire a send at
-    // an unrelated same-named thread there. In-flight turns started before the
-    // switch keep running server-side; there's just no pane left to report into.
-    turnElByItemId.clear();
-    sendQueue.resetAll();
-    stoppedThreads.clear(); // same cross-document id-reuse hazard as the queue
   }
 
   async function refreshThreadModels(): Promise<void> {
@@ -1205,11 +1405,9 @@ export function initChat(deps: ChatDeps): ChatApi {
     jumpToDirective,
     chatTurn,
     chatTurnWithAction,
-    streamingAgentTurn,
+    streamingAgentTurn: (meta) => streamingAgentTurn(meta),
     setChip,
-    setChatBusy,
     beginExclusiveTurn,
-    endExclusiveTurn,
     markDiscussed: (id) => {
       const e = comments.get(id);
       if (e) e.discussed = true;
@@ -1235,11 +1433,7 @@ export function initChat(deps: ChatDeps): ChatApi {
     handleResolveShortcut: passes.handleResolveShortcut,
     getStance: () => chatStanceEl.value,
     getModelId: () => chatModelEl.value || undefined,
-    appendCustomTurn: (box) => {
-      chatEmptyEl.hidden = true;
-      chatTurnsEl.appendChild(box);
-      chatTurnsEl.scrollTop = chatTurnsEl.scrollHeight;
-    },
+    appendCustomTurn,
     scrollTurnsToBottom: () => {
       chatTurnsEl.scrollTop = chatTurnsEl.scrollHeight;
     },
