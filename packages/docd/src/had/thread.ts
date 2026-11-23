@@ -27,6 +27,16 @@ function headerFor(turn: ThreadTurn): string {
 const escapeThinking = (s: string): string => s.replace(/--(\\*)>/g, "--$1\\>");
 const unescapeThinking = (s: string): string => s.replace(/--(\\*)\\>/g, "--$1>");
 
+// A line inside a turn that reads like a turn header would start a new turn on the way
+// back. Every line that begins with backslashes + "## you|agent|system" gains one
+// backslash on the way out and loses it on the way back, which is reversible for any text.
+const HEADERISH_RE = /^(\\*)## (?:you|agent|system)\b/;
+const ESCAPED_HEADERISH_RE = /^\\+## (?:you|agent|system)\b/;
+const escapeHeaderLines = (s: string): string =>
+  s.split("\n").map((l) => (HEADERISH_RE.test(l) ? `\\${l}` : l)).join("\n");
+const unescapeHeaderLines = (s: string): string =>
+  s.split("\n").map((l) => (ESCAPED_HEADERISH_RE.test(l) ? l.slice(1) : l)).join("\n");
+
 /**
  * Split a turn's accumulated lines into its persisted reasoning + reply body. Reasoning
  * is only ever written as the turn's first block, so a `<!--think` line anywhere else is
@@ -37,7 +47,7 @@ function extractThinking(lines: string[]): { thinking?: string; body: string } {
   if (start === -1 || lines[start].trim() !== THINK_OPEN) return { body: lines.join("\n") };
   let end = start + 1;
   while (end < lines.length && lines[end].trim() !== THINK_CLOSE) end++;
-  const thinking = unescapeThinking(lines.slice(start + 1, end).join("\n").trim());
+  const thinking = unescapeHeaderLines(unescapeThinking(lines.slice(start + 1, end).join("\n").trim()));
   const body = [...lines.slice(0, start), ...lines.slice(end + 1)].join("\n");
   return { thinking, body };
 }
@@ -46,9 +56,9 @@ export function serializeThread(t: ThreadFile): string {
   const body = t.turns
     .map((turn) => {
       const think = turn.thinking
-        ? `${THINK_OPEN}\n${escapeThinking(turn.thinking.trim())}\n${THINK_CLOSE}\n\n`
+        ? `${THINK_OPEN}\n${escapeHeaderLines(escapeThinking(turn.thinking.trim()))}\n${THINK_CLOSE}\n\n`
         : "";
-      return `${headerFor(turn)}\n\n${think}${turn.body.trim()}\n`;
+      return `${headerFor(turn)}\n\n${think}${escapeHeaderLines(turn.body.trim())}\n`;
     })
     .join("\n");
   const fm = t.frontmatter;
@@ -92,7 +102,7 @@ export function parseThread(text: string): ThreadFile {
   const flush = () => {
     if (current) {
       const { thinking, body } = extractThinking(buf);
-      current.body = body.trim();
+      current.body = unescapeHeaderLines(body.trim());
       if (thinking !== undefined) current.thinking = thinking;
       turns.push(current);
     }

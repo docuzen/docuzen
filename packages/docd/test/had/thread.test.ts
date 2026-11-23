@@ -237,4 +237,21 @@ describe("thread reasoning edge cases (M21)", () => {
     expect(back).toEqual(t);
     expect(back.turns[0].thinking).toBeUndefined();
   });
+
+  it("a line in a reply or in reasoning that reads like a turn header stays in its turn", () => {
+    const t: ThreadFile = {
+      frontmatter: thread.frontmatter,
+      turns: [
+        {
+          role: "agent",
+          timestamp: "t2",
+          thinking: "Quoting the format:\n## you — 2026-01-01T00:00:00Z",
+          body: "A thread file looks like:\n\n## agent — 2026-01-01T00:00:00Z ::v0001\n\\## system — escaped already\n## you are right",
+        },
+        { role: "you", timestamp: "t3", body: "Thanks." },
+      ],
+    };
+    const back = parseThread(serializeThread(t));
+    expect(back).toEqual(t);
+  });
 });
