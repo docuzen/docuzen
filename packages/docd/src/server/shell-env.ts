@@ -49,8 +49,20 @@ export function mergeShellEnv(target: NodeJS.ProcessEnv, shellEnv: Record<string
   return added;
 }
 
+/**
+ * `value` as one single-quoted shell word. `'` becomes `'\''` (close, escaped quote, reopen),
+ * which sh, bash, zsh, fish and csh all read back as a literal quote; csh/tcsh also expand
+ * `!` history references inside single quotes in an interactive shell, so those get `\!`.
+ */
+export function singleQuote(value: string, csh = false): string {
+  const quoted = value.replace(/'/g, "'\\''");
+  return `'${csh ? quoted.replace(/!/g, "\\!") : quoted}'`;
+}
+
 /** Ask the login shell for its environment. Resolves null on any failure — never throws. */
-export function readShellEnv(opts: { shell?: string; timeoutMs?: number } = {}): Promise<Record<string, string> | null> {
+export function readShellEnv(
+  opts: { shell?: string; timeoutMs?: number; node?: string } = {},
+): Promise<Record<string, string> | null> {
   let shell = opts.shell ?? process.env.SHELL;
   if (!shell) {
     try {
@@ -60,10 +72,12 @@ export function readShellEnv(opts: { shell?: string; timeoutMs?: number } = {}):
     }
   }
   shell ||= "/bin/zsh";
+  const csh = /\/(t?csh)$/.test(shell);
   // Interactive + login, so both profile and rc files run (keys usually live in ~/.zshrc).
   // The dump is printed by this same Node binary, so no shell-specific quoting of values.
-  const dump = `'${process.execPath}' -e 'process.stdout.write("${MARK}"+JSON.stringify(process.env)+"${MARK}")'`;
-  const args = /\/(t?csh)$/.test(shell) ? ["-ic", dump] : ["-ilc", dump];
+  const node = singleQuote(opts.node ?? process.execPath, csh);
+  const dump = `${node} -e 'process.stdout.write("${MARK}"+JSON.stringify(process.env)+"${MARK}")'`;
+  const args = csh ? ["-ic", dump] : ["-ilc", dump];
   return new Promise((resolve) => {
     const child = execFile(
       shell,

@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { chmodSync, mkdtempSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { mergeShellEnv, parseShellEnvOutput, readShellEnv } from "../../src/server/shell-env.js";
@@ -28,6 +28,28 @@ describe("shell environment", () => {
     expect(target.LLM_KEY).toBe("secret");
     expect(target.SHLVL).toBeUndefined();
     expect(added.sort()).toEqual(["EMPTY", "LLM_KEY"]);
+  });
+
+  it("runs a node binary whose path has quotes, $(…) or ! in it, as that path and nothing more", async () => {
+    const home = mkdtempSync(join(tmpdir(), "shell-env-home-")); // no rc files: the probe stays hermetic
+    const dir = join(home, "a'; export INJECTED=yes; setenv INJECTED yes; '$(echo x)b!c");
+    mkdirSync(dir);
+    const node = join(dir, "node");
+    symlinkSync(process.execPath, node);
+    const shells = ["/bin/sh", "/bin/bash", "/bin/zsh", "/bin/csh", "/bin/tcsh"].filter((s) => existsSync(s));
+    expect(shells.length).toBeGreaterThan(0);
+    const prevHome = process.env.HOME;
+    process.env.HOME = home;
+    try {
+      for (const shell of shells) {
+        const env = await readShellEnv({ shell, node });
+        expect(env, shell).not.toBeNull();
+        expect(env?.HOME, shell).toBe(home);
+        expect(env?.INJECTED, shell).toBeUndefined();
+      }
+    } finally {
+      process.env.HOME = prevHome;
+    }
   });
 
   it("reads exports from a real shell, and survives a shell that fails", async () => {
