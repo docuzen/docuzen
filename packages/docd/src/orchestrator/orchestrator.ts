@@ -650,6 +650,8 @@ export class Orchestrator {
           invoke: (runner, ctx, tok) => runner.start(ctx, tok),
           onToken: tagged,
         });
+        // The thread keeps only the last model's session; free the one it replaces.
+        if (lastSessionId && lastSessionId !== sessionId) runner.release?.(lastSessionId);
         lastSessionId = sessionId;
       }
     } catch (e) {
