@@ -10,6 +10,25 @@ describe("document search helpers", () => {
     ]);
   });
 
+  it("reports offsets into the original text after a character whose lowercase is longer", () => {
+    // "İ" lowercases to "i" + a combining dot: two code units for one.
+    const text = "İstanbul and istanbul";
+    const matches = findTextMatches(text, "stan");
+    expect(matches).toEqual([
+      { start: 1, end: 5 },
+      { start: 14, end: 18 },
+    ]);
+    for (const m of matches) expect(text.slice(m.start, m.end)).toBe("stan");
+  });
+
+  it("covers the whole original character when a match ends inside its lowercase form", () => {
+    expect(findTextMatches("xİy", "xi")).toEqual([{ start: 0, end: 2 }]);
+    expect(findTextMatches("İİ", "İ")).toEqual([
+      { start: 0, end: 1 },
+      { start: 1, end: 2 },
+    ]);
+  });
+
   it("ignores blank queries", () => {
     expect(findTextMatches("anything", "   ")).toEqual([]);
   });
