@@ -15,20 +15,27 @@ export interface ModelConfig {
   apiKey?: string; // INPUT to saveModels only; never returned by listModels
 }
 
-/** Structural view of pi's ~/.pi/agent/models.json on disk. */
+/**
+ * Structural view of pi's ~/.pi/agent/models.json on disk. Settings manages only the
+ * fields named here; everything else (a provider's `headers`, `compat`, `modelOverrides`,
+ * a model's `contextWindow`, `cost`, ...) is pi configuration that saves carry over as is.
+ */
 interface PiModelDef {
   id: string;
   name?: string;
   reasoningEffort?: ModelConfig["reasoningEffort"];
+  [field: string]: unknown;
 }
 interface PiProvider {
   baseUrl?: string;
   api?: string;
   apiKey?: string;
   models?: PiModelDef[];
+  [field: string]: unknown;
 }
 interface PiModelsFile {
   providers?: Record<string, PiProvider>;
+  [field: string]: unknown;
 }
 
 async function readFileOrEmpty(path: string): Promise<PiModelsFile> {
@@ -89,10 +96,16 @@ export async function readModelWithKey(path: string, key: string): Promise<Model
 }
 
 /**
- * Group ModelConfig rows by provider and write pi's models.json shape.
- * Key preservation: a provider/model whose incoming apiKey is blank/undefined
- * keeps the apiKey already stored on disk for that provider, so editing
- * non-secret fields never wipes the credential.
+ * Write the Settings model list (every row, as listModels returned it, with edits) into
+ * pi's models.json, merged onto what is on disk:
+ *  - each provider and model keeps the fields Settings doesn't manage; `api` defaults to
+ *    "openai-completions" only for a provider this save creates;
+ *  - a provider with no models (e.g. a key for one of pi's built-in providers) has no row,
+ *    so it is kept; a provider whose last model row was removed is removed;
+ *  - a non-empty apiKey on any row sets that row's provider's key; a blank one keeps the
+ *    stored key, so editing non-secret fields never wipes the credential;
+ *  - every row carries its provider's baseUrl, so a non-empty one that differs from the
+ *    stored URL is the edit and moves the provider; a blank one keeps the stored URL.
  */
 export function saveModels(path: string, models: ModelConfig[]): Promise<void> {
   // Locked: the stored apiKey is carried over from the file being replaced, so two
@@ -102,27 +115,32 @@ export function saveModels(path: string, models: ModelConfig[]): Promise<void> {
 }
 
 async function saveModelsUnlocked(path: string, models: ModelConfig[]): Promise<void> {
-  const existing = (await readFileOrEmpty(path)).providers ?? {};
+  const file = await readFileOrEmpty(path);
+  const existing = file.providers ?? {};
   const providers: Record<string, PiProvider> = {};
+  for (const [id, def] of Object.entries(existing)) {
+    if (!def.models?.length) providers[id] = { ...def };
+  }
 
   for (const m of models) {
+    const prior = existing[m.provider];
     let provider = providers[m.provider];
     if (!provider) {
-      const incomingKey = m.apiKey?.trim();
-      provider = {
-        api: "openai-completions",
-        ...(m.baseUrl !== undefined ? { baseUrl: m.baseUrl } : {}),
-        apiKey: incomingKey || existing[m.provider]?.apiKey,
-        models: [],
-      };
+      provider = prior ? { ...prior, models: [] } : { api: "openai-completions", models: [] };
       providers[m.provider] = provider;
     }
-    provider.models!.push({
+    const apiKey = m.apiKey?.trim();
+    if (apiKey) provider.apiKey = apiKey;
+    const baseUrl = m.baseUrl?.trim();
+    if (baseUrl && baseUrl !== prior?.baseUrl) provider.baseUrl = baseUrl;
+    const { reasoningEffort: _managed, ...kept } = prior?.models?.find((d) => d.id === m.modelId) ?? {};
+    (provider.models ??= []).push({
+      ...kept,
       id: m.modelId,
       name: m.name,
       ...(m.reasoningEffort !== undefined ? { reasoningEffort: m.reasoningEffort } : {}),
     });
   }
 
-  await writeJsonFile(path, { providers }, { mode: 0o600 }); // holds API keys: owner-only
+  await writeJsonFile(path, { ...file, providers }, { mode: 0o600 }); // holds API keys: owner-only
 }
