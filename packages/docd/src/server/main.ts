@@ -1,12 +1,10 @@
 import { userInfo } from "node:os";
 import { startServer } from "./ws-server.js";
 import { selectRunner } from "./select-runner.js";
+import { setupHarnesses } from "./harness-setup.js";
 import { createCodexHarness } from "../agent/codex-runner.js";
-import { FakePiRunner } from "../agent/fake-runner.js";
-import { HarnessRegistry, PI_CAPABILITIES } from "../agent/harness-registry.js";
 import { listModels } from "../agent/index.js";
 import { PiRunner } from "../agent/pi-runner.js";
-import type { AgentRunner } from "../agent/types.js";
 import { appConfigPath, readAppConfig } from "../config/app-config.js";
 import { defaultModelsPath } from "../rpc/handler.js";
 import { loadShellEnvIfRequested } from "./shell-env.js";
@@ -25,41 +23,18 @@ async function main(): Promise<void> {
   // Codex is detected first: an unconfigured install defaults to whichever harness is usable.
   const codexHarness = createCodexHarness({ config: { ...config.codex, modelsPath } });
   const sel = selectRunner({ env: process.env, config, models, codexAvailable: codexHarness.available });
+  const { registry, piRunner, piOfflineReason } = await setupHarnesses({
+    sel,
+    config,
+    codex: codexHarness,
+    createPi: (model) => PiRunner.create(model),
+  });
 
-  const registry = new HarnessRegistry(sel.defaultHarness);
-  let piRunner: AgentRunner | null = null;
-  let piOfflineReason = sel.reason;
-  if (sel.live) {
-    try {
-      piRunner = await PiRunner.create({ provider: sel.provider, modelId: sel.modelId });
-    } catch (e) {
-      // e.g. LLM_API_KEY is set but the model isn't in pi's registry. Stay up with pi
-      // offline (the reason reaches the UI) instead of crashing the whole sidecar.
-      piOfflineReason = e instanceof Error ? e.message : String(e);
-    }
-  }
-  if (piRunner) {
-    registry.register({
-      id: "pi",
-      label: "Pi",
-      runner: piRunner,
-      capabilities: PI_CAPABILITIES,
-      available: true,
-    });
-    console.log(`docd: PiRunner (provider=${sel.provider}, model=${sel.modelId}) — ${sel.reason}`);
-  } else {
-    registry.register({
-      id: "pi",
-      label: "Pi",
-      runner: new FakePiRunner([]),
-      capabilities: PI_CAPABILITIES,
-      available: false,
-      unavailableReason: piOfflineReason,
-    });
-    console.log(`docd: pi offline (FakePiRunner) — ${piOfflineReason} [config: ${appConfigPath()}]`);
-  }
-
-  registry.register(codexHarness);
+  console.log(
+    piRunner
+      ? `docd: PiRunner (provider=${sel.provider}, model=${sel.modelId}) — ${sel.reason}`
+      : `docd: pi offline (FakePiRunner) — ${piOfflineReason} [config: ${appConfigPath()}]`,
+  );
   console.log(
     codexHarness.available
       ? `docd: Codex harness available (${codexHarness.status ?? "detected"})`

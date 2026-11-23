@@ -41,9 +41,16 @@ export function selectRunner(opts: {
 }): RunnerSelection {
   const { env, config, models } = opts;
   const pi = selectPi(env, config, models);
-  const defaultHarness: HarnessChoice =
-    config.harness?.default ?? (pi.live ? "pi" : opts.codexAvailable ? "codex" : "pi");
-  return { ...pi, defaultHarness };
+  return { ...pi, defaultHarness: chooseDefaultHarness(config, pi.live, opts.codexAvailable ?? false) };
+}
+
+/**
+ * The configured default if config.toml names one; otherwise pi when pi is usable, codex
+ * when its CLI is present, and pi again when nothing is (so the error names pi's problem).
+ * server/harness-setup.ts asks again once pi has actually started or failed.
+ */
+export function chooseDefaultHarness(config: AppConfig, piUsable: boolean, codexAvailable: boolean): HarnessChoice {
+  return config.harness?.default ?? (piUsable ? "pi" : codexAvailable ? "codex" : "pi");
 }
 
 function selectPi(
