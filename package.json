@@ -19,6 +19,7 @@
     "visual": "node tools/visual/run.mjs",
     "check:images": "node tools/visual/images.mjs",
     "check:links": "node tools/visual/links.mjs",
+    "check:scripts": "node tools/visual/html-scripts.mjs",
     "drill:reconnect": "node tools/parity/reconnect-drill.mjs",
     "live": "node tools/live/run.mjs",
     "live:ui": "node tools/live/ui.mjs"

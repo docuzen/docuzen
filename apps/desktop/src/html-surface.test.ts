@@ -5,7 +5,7 @@
 // relative links resolve. Iframe navigation is deferred to match a real browser (see
 // iframe-navigation.test-support.ts).
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { HtmlSurface, baseHrefForDoc, serializeDocument } from "./html-surface.js";
+import { HtmlSurface, baseHrefForDoc, serializeDocument, withScriptsBlocked } from "./html-surface.js";
 import { insertDiagramIntoHtmlDoc } from "./html-diagram-insert.js";
 import { deferIframeNavigation, type DeferredNavigation } from "./iframe-navigation.test-support.js";
 
@@ -221,5 +221,87 @@ describe("relative links resolve against the document's folder", () => {
     expect(baseHrefForDoc("/Users/me/A#1 ?x%/doc.html")).toBe("file:///Users/me/A%231%20%3Fx%25/");
     expect(new URL("img.png", baseHrefForDoc("/Users/me/A#1 ?x%/doc.html")).pathname).toBe("/Users/me/A%231%20%3Fx%25/img.png");
     expect(baseHrefForDoc("/d/plain/doc.html")).toBe("file:///d/plain/");
+  });
+});
+
+describe("a document's own scripts are blocked unless the user runs them (C4)", () => {
+  const META = "<meta data-had-overlay http-equiv=\"Content-Security-Policy\"";
+  const policyAt = (html: string) => withScriptsBlocked(html).indexOf(META);
+
+  it("puts the policy first in the head, after only what cannot run, ahead of all other markup", () => {
+    const head = '<!doctype html>\n<html lang="en" data-x="a>b">\n<!-- c --><head prefix="og: https://ogp.me/ns#">';
+    expect(policyAt(head + "<script>x()</script>")).toBe(head.length);
+    const lead = "\ufeff  <!-- licence -->\n<?xml version=\"1.0\"?><!DOCTYPE html>";
+    expect(policyAt(lead + "<script>x()</script>")).toBe(lead.length);
+    expect(policyAt("<!doctype html><html><body><script>x()</script>")).toBe("<!doctype html><html>".length);
+    expect(policyAt("<p>no doctype</p><script>x()</script>")).toBe(0);
+  });
+
+  it("goes in front of an <html> or <head> tag that carries an inline handler", () => {
+    expect(policyAt('<!doctype html><html onclick="x()"><head>')).toBe("<!doctype html>".length);
+    expect(policyAt("<!doctype html><html><head onload=x()>")).toBe("<!doctype html><html>".length);
+    expect(policyAt('<!doctype html><html title="unclosed><head>')).toBe("<!doctype html>".length);
+  });
+
+  it("ends comments where the HTML tokenizer does, so a comment cannot hide a script in front of the policy", () => {
+    for (const html of [
+      "<!--><script>x()</script>--><!doctype html><p>a</p>",
+      "<!---><script>x()</script>--><!doctype html><p>a</p>",
+      "<!-- a --!><script>x()</script>--><!doctype html><p>a</p>",
+      "<!-- never closed <script>x()</script>",
+    ]) {
+      const out = withScriptsBlocked(html);
+      expect(out.indexOf(META), html).toBeLessThan(out.indexOf("<script"));
+    }
+  });
+
+  it("loads a document with the policy first and never saves it", async () => {
+    const s = new HtmlSurface(host);
+    const doc = "<!doctype html><html><head><script>document.title = 'ran'</script></head><body><p>alpha</p></body></html>";
+    s.load(doc, undefined, "/d/policy.html");
+    await nav.commit();
+    const src = frame().getAttribute("srcdoc") ?? "";
+    expect(src.indexOf(META)).toBeGreaterThan(-1);
+    expect(src.indexOf(META)).toBeLessThan(src.indexOf("<script"));
+    expect(s.doc?.head.firstElementChild?.getAttribute("http-equiv")).toBe("Content-Security-Policy");
+    expect(s.getHtml()).not.toContain("Content-Security-Policy");
+  });
+
+  it("says so only for a document that has scripts, and Run scripts reloads it with them for this session", async () => {
+    const s = new HtmlSurface(host);
+    const notice = () => host.querySelector<HTMLElement>(".htmlscripts")!;
+    s.load(A, undefined, "/d/plain.html");
+    await nav.commit();
+    expect(notice().hidden).toBe(true);
+
+    const withScript = "<!doctype html><html><head></head><body><p onclick=\"go()\">alpha</p></body></html>";
+    s.load(withScript, undefined, "/d/script.html");
+    await nav.commit();
+    expect(notice().hidden).toBe(false);
+
+    notice().querySelector("button")!.click();
+    await nav.commit();
+    expect(frame().getAttribute("srcdoc")).not.toContain("Content-Security-Policy");
+    expect(notice().hidden).toBe(true);
+
+    // Remembered for that document (by path) for the rest of the session, and only for it.
+    s.load(withScript, undefined, "/d/other.html");
+    await nav.commit();
+    expect(frame().getAttribute("srcdoc")).toContain("Content-Security-Policy");
+    s.load(withScript, undefined, "/d/script.html");
+    await nav.commit();
+    expect(frame().getAttribute("srcdoc")).not.toContain("Content-Security-Policy");
+  });
+
+  it("keeps what was typed when the scripts are turned on", async () => {
+    const s = new HtmlSurface(host);
+    s.load("<!doctype html><html><head><script>1</script></head><body><p>alpha</p></body></html>", undefined, "/d/typed.html");
+    await nav.commit();
+    s.setEditable(true);
+    typeInto(s.doc!, " typed");
+    s.runScripts();
+    await nav.commit();
+    expect(s.doc?.body.textContent).toContain("alpha typed");
+    expect(s.editedHtmlFor("/d/typed.html")).toContain("alpha typed");
   });
 });
