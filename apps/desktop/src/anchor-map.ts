@@ -98,6 +98,12 @@ export function posRangeForOffsets(
     return null;
   }
   const from = arr[startOff];
-  const to = arr[endOff - 1] + 1; // end of the last selected char
-  return { from, to };
+  const last = endOff - 1;
+  // End of the last selected char — unless that char is the "\n" standing for a block
+  // boundary (the next char sits more than one position further on): the range then ends
+  // where the block's text does, not past its closing token. A hard break's "\n" is a
+  // real one-position node and stays included.
+  const blockSep = proj.text[last] === "\n" && endOff < arr.length && arr[endOff] - arr[last] > 1;
+  const to = blockSep ? arr[last] : arr[last] + 1;
+  return from < to ? { from, to } : null;
 }

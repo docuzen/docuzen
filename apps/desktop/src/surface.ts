@@ -10,10 +10,11 @@ import type { Editor } from "@milkdown/kit/core";
 import { editorViewCtx } from "@milkdown/kit/core";
 import type { EditorView } from "@milkdown/kit/prose/view";
 import type { PluginKey } from "@milkdown/kit/prose/state";
+import type { Node as ProseNode } from "@milkdown/kit/prose/model";
 import { createAnchor, resolveAnchor } from "@ai-native-doc/docd/anchor";
 import type { TextQuoteAnchor } from "@ai-native-doc/docd/anchor";
 import type { Annotation, EditHunk, RpcEvent } from "@ai-native-doc/docd/protocol";
-import { projectionOf, offsetForPos } from "./anchor-map.js";
+import { projectionOf, offsetForPos, posRangeForOffsets } from "./anchor-map.js";
 import type { SearchState } from "./search-panel.js";
 import { initSelectionAgentActions } from "./selection-agent-actions.js";
 import { buildHtmlProjection, offsetsForRange, rangeForOffsets, wrapRange, unwrapAnno } from "./html-projection.js";
@@ -154,14 +155,31 @@ export function initHtmlSurface(deps: HtmlSurfaceDeps): HtmlSurfaceApi {
   // see file header.
   let commentSeq = 0;
 
+  /**
+   * Bumped each time a document is put on screen (shell.ts's activateTab and empty state
+   * call showHtmlSurface/showMarkdownSurface before loading the content). Work that awaits
+   * the sidecar checks it afterwards so it never lands on a document opened meanwhile —
+   * including a reload of the same path.
+   */
+  let docGen = 0;
+  /** A new document is on screen: drop UI that belonged to the old one. */
+  function onDocumentShown(): void {
+    docGen++;
+    popover.hidden = true;
+    closeAnnoMenu();
+    lastHtmlSelectionRange = null;
+  }
+
   /** Show the iframe HTML surface and hide the markdown (Milkdown) editor. */
   function showHtmlSurface(): void {
+    onDocumentShown();
     deps.rootEl.style.display = "none";
     deps.htmlHostEl.hidden = false;
     deps.getHtmlSurface()?.show();
   }
   /** Show the markdown (Milkdown) editor and hide the iframe HTML surface. */
   function showMarkdownSurface(): void {
+    onDocumentShown();
     deps.htmlHostEl.hidden = true;
     deps.getHtmlSurface()?.hide();
     deps.rootEl.style.display = "";
@@ -243,17 +261,23 @@ ${LONG_RANGE_CSS}
     const doc = deps.getHtmlSurface()?.doc;
     const anchor = htmlLinkFromEvent(e);
     if (!doc || !anchor) return;
-    if (e.button !== 0) return;
 
     // A page's own script-driven or empty anchors are its business, not a link to open.
     const rawHref = anchor.getAttribute("href")?.trim() ?? "";
     if (!rawHref || /^javascript:/i.test(rawHref)) return;
     // Edit mode: a plain click places the caret; ⌘/Ctrl-click opens. Review mode: a click opens.
-    // The webview itself never navigates (that would replace the document in the frame).
+    // The webview itself never navigates (that would replace the document in the frame), and
+    // a middle-click opens nothing.
     e.preventDefault();
+    if (e.button !== 0) return;
     if (htmlEditMode && !(e.metaKey || e.ctrlKey)) return;
     e.stopPropagation();
     void deps.openLink(rawHref, doc);
+  }
+  /** Middle/other-button clicks arrive as `auxclick`: the frame must not follow those either. */
+  function handleHtmlLinkAuxClick(e: MouseEvent): void {
+    const rawHref = htmlLinkFromEvent(e)?.getAttribute("href")?.trim() ?? "";
+    if (rawHref && !/^javascript:/i.test(rawHref)) e.preventDefault();
   }
 
   /** Decorate one resolved annotation inside the iframe (highlight fill or comment tint + badge). */
@@ -317,6 +341,9 @@ ${LONG_RANGE_CSS}
       span.addEventListener("click", (e) => {
         // ⌘/Ctrl-click on a link always opens the link, annotated or not (doc-links.ts).
         if ((e.metaKey || e.ctrlKey) && span.closest("a[href]")) return;
+        // Any other click on marked link text is the annotation's: it stops here, before the
+        // document's link handler, so the frame must not follow the link either.
+        if (span.closest("a[href]")) e.preventDefault();
         e.stopPropagation();
         if (e.metaKey || e.ctrlKey) {
           void deps.onAnnotationJump(id);
@@ -353,9 +380,11 @@ ${LONG_RANGE_CSS}
     const anchor = createAnchor(proj.text, offs.start, offs.end);
     const quoted = proj.text.slice(offs.start, offs.end);
 
+    const docPath = deps.getDocPath();
+    const gen = docGen;
     let id = "";
     let author: string | undefined;
-    if (deps.getDocPath()) {
+    if (docPath) {
       try {
         const created = await deps.api.createAnnotation({ kind, anchor, color: color.name });
         id = created.id;
@@ -365,17 +394,34 @@ ${LONG_RANGE_CSS}
         deps.log(`persist FAILED: ${String(e)}`);
         return null;
       }
+      // Another document (or a reload of this one) may be on screen by now: the annotation
+      // is saved with its own document and shows when that is next opened.
+      if (gen !== docGen || deps.getDocPath() !== docPath || deps.getHtmlSurface()?.doc !== doc) {
+        deps.log(`${kind} ${id} saved; its document is no longer shown`);
+        return null;
+      }
     } else {
       id = `local-${Date.now()}`;
     }
 
-    const num = kind === "comment" ? ++commentSeq : undefined;
     sel?.removeAllRanges(); // clear so the decoration wrap isn't fighting the live selection
     lastHtmlSelectionRange = null;
-    decorateHtmlAnno(doc, anchor, id, kind, color, num);
+    // Re-resolved against the document as it is now (decorateHtmlAnno resolves the anchor).
+    const num = kind === "comment" ? commentSeq + 1 : undefined;
+    if (!decorateHtmlAnno(doc, anchor, id, kind, color, num)) {
+      dropUnplaced(id, kind, docPath);
+      return null;
+    }
+    if (num !== undefined) commentSeq = num;
     if (kind === "comment") deps.addCommentCard(id, quoted, "", num!, author);
     pushAnnotationUndo(id, kind);
     return { id, quoted, anchor };
+  }
+
+  /** The annotated text vanished while it was being saved: don't keep an annotation nobody can see. */
+  function dropUnplaced(id: string, kind: "highlight" | "comment", docPath: string | undefined): void {
+    deps.log(`${kind} ${id}: its text changed before it was saved — not kept`);
+    if (docPath) void deps.api.deleteAnnotation({ id, docPath }).catch((e) => reportError("delete", e, deps.log));
   }
 
   /** Dispatch annotate to the active surface (markdown editor vs HTML iframe). */
@@ -405,12 +451,18 @@ ${LONG_RANGE_CSS}
    * card Delete button and annotation-undo.
    */
   async function removeAnnotationById(id: string): Promise<void> {
-    if (deps.getDocPath()) {
+    forgetAnnotationUndo(id); // removed by any route: ⌘Z no longer refers to it
+    const docPath = deps.getDocPath();
+    if (docPath) {
       try {
         await deps.api.deleteAnnotation({ id });
       } catch (e) {
         return void reportError("delete", e, deps.log);
       }
+      // Ids repeat across documents (c0001…): only touch the document this was removed from.
+      // That document shown again (reloaded, or switched away and back) is still fair game:
+      // the id is its annotation.
+      if (deps.getDocPath() !== docPath) return;
     }
     removeAnnotationDecoration(id);
     deps.removeCommentEntry(id);
@@ -429,6 +481,10 @@ ${LONG_RANGE_CSS}
   function clearAnnotationUndo(): void {
     annotationUndoStack.length = 0;
   }
+  function forgetAnnotationUndo(id: string): void {
+    const at = annotationUndoStack.findIndex((a) => a.id === id);
+    if (at !== -1) annotationUndoStack.splice(at, 1);
+  }
   function undoLastAnnotation(): boolean {
     const last = annotationUndoStack.pop();
     if (!last) return false;
@@ -440,10 +496,25 @@ ${LONG_RANGE_CSS}
   function isUndoChord(e: KeyboardEvent): boolean {
     return (e.metaKey || e.ctrlKey) && !e.shiftKey && !e.altKey && (e.key === "z" || e.key === "Z");
   }
+  /**
+   * True when ⌘Z belongs to the control it was pressed in: any input, textarea or select
+   * (a comment draft, the chat box, search, settings, a form inside an HTML document), or
+   * editable text that is not the document itself.
+   */
+  function isOwnUndoTarget(target: EventTarget | null): boolean {
+    const el = target as Element | null;
+    if (!el || typeof el.closest !== "function") return false;
+    if (el.closest("input, textarea, select")) return true;
+    const editable = el.closest('[contenteditable]:not([contenteditable="false"])');
+    if (!editable) return false;
+    if (deps.rootEl.contains(editable)) return false; // the markdown document (ProseMirror)
+    return editable.ownerDocument !== deps.getHtmlSurface()?.doc; // the HTML document's body in Edit
+  }
   /** If an annotation can be undone, undo it and swallow the event; else let native undo run. */
   function handleAnnotationUndoKey(e: KeyboardEvent): void {
     if (!isUndoChord(e)) return;
     if (annotationUndoStack.length === 0) return; // nothing fresh → native (text) undo proceeds
+    if (isOwnUndoTarget(e.target)) return;
     if (undoLastAnnotation()) {
       e.preventDefault();
       e.stopPropagation();
@@ -465,13 +536,11 @@ ${LONG_RANGE_CSS}
   function openAnnoMenu(
     id: string,
     kind: "highlight" | "comment",
-    rect: { left: number; bottom: number },
+    rect: { left: number; top: number; bottom: number },
   ): void {
     closeAnnoMenu();
     const menu = document.createElement("div");
     menu.className = "annomenu";
-    menu.style.left = `${Math.max(8, rect.left)}px`;
-    menu.style.top = `${rect.bottom + 6}px`;
     const item = (label: string, danger: boolean, fn: () => void): void => {
       const b = document.createElement("button");
       b.className = danger ? "annomenu-item danger" : "annomenu-item";
@@ -489,6 +558,16 @@ ${LONG_RANGE_CSS}
     item(kind === "comment" ? "Remove comment" : "Remove highlight", true, () => void removeAnnotationById(id));
     document.body.appendChild(menu);
     annoMenuEl = menu;
+    // Below the mark, kept inside the window: flipped above it when there's no room below.
+    const pad = 8;
+    const gap = 6;
+    const w = menu.offsetWidth;
+    const hgt = menu.offsetHeight;
+    const left = Math.max(pad, Math.min(rect.left, window.innerWidth - pad - w));
+    let top = rect.bottom + gap;
+    if (top + hgt > window.innerHeight - pad) top = Math.max(pad, rect.top - gap - hgt);
+    menu.style.left = `${left}px`;
+    menu.style.top = `${top}px`;
   }
   // Dismiss on outside click (parent doc) or Escape. Clicks inside the iframe are dismissed
   // by a listener attached to the iframe document in onHtmlReady.
@@ -511,7 +590,7 @@ ${LONG_RANGE_CSS}
     const r = el.getBoundingClientRect();
     const ox = frameOffset?.left ?? 0;
     const oy = frameOffset?.top ?? 0;
-    openAnnoMenu(id, kind, { left: ox + r.left, bottom: oy + r.bottom });
+    openAnnoMenu(id, kind, { left: ox + r.left, top: oy + r.top, bottom: oy + r.bottom });
   }
 
   // Markdown surface: delegate clicks on highlight/comment decoration spans. We don't
@@ -566,10 +645,23 @@ ${LONG_RANGE_CSS}
     deps.log(`reloaded ${placed} annotation(s)${orphaned ? `, ${orphaned} orphaned` : ""}`);
   }
 
+  /** Each iframe load gets a number; a load's sidecar results only land while it is the latest. */
+  let htmlReadyGen = 0;
+  /** ⌘⇧L / ⌘⇧R (shell.ts's sidebar toggles) listen on the app window, which never sees the iframe's keys. */
+  function forwardSidebarShortcut(e: KeyboardEvent): void {
+    if (!(e.metaKey || e.ctrlKey) || !e.shiftKey || e.altKey || !/^[lr]$/i.test(e.key)) return;
+    e.preventDefault();
+    e.stopPropagation();
+    window.dispatchEvent(
+      new KeyboardEvent("keydown", { key: e.key, code: e.code, metaKey: e.metaKey, ctrlKey: e.ctrlKey, shiftKey: true, bubbles: true, cancelable: true }),
+    );
+  }
+
   /** Called when the iframe finishes loading: inject CSS + render this doc's annotations. */
   async function onHtmlReady(): Promise<void> {
     const doc = deps.getHtmlSurface()?.doc;
     if (!doc) return;
+    const gen = ++htmlReadyGen;
     // Focus lives inside the iframe for HTML docs, so annotation-undo (Cmd/Ctrl+Z) must be
     // handled here. Capture phase so we pre-empt the contenteditable's native undo, but only
     // when there's a fresh annotation to undo (else native text undo proceeds).
@@ -577,6 +669,7 @@ ${LONG_RANGE_CSS}
     doc.addEventListener("keydown", deps.handleResolveShortcut, true);
     doc.addEventListener("keydown", deps.handleSearchShortcut, true);
     doc.addEventListener("keydown", deps.handleZoomShortcut, true);
+    doc.addEventListener("keydown", forwardSidebarShortcut, true);
     // Trackpad pinch (ctrlKey wheel + WebKit GestureEvent) — same "own browsing
     // context needs its own listener" reasoning as the keydown handler just above.
     deps.wirePinchZoom(doc);
@@ -584,6 +677,7 @@ ${LONG_RANGE_CSS}
     // menu from here too (a click on a mark re-opens it via the span's own handler).
     doc.addEventListener("mousedown", () => closeAnnoMenu(), true);
     doc.addEventListener("click", handleHtmlLinkClick);
+    doc.addEventListener("auxclick", handleHtmlLinkAuxClick);
     deps.wireHtmlImages(doc); // drop/paste images + load the document's local ones
     if (doc.head && !doc.head.querySelector("style[data-had-overlay]")) {
       const style = doc.createElement("style");
@@ -597,9 +691,15 @@ ${LONG_RANGE_CSS}
     if (deps.searchIsOpen() && deps.searchState.query.trim()) deps.refreshHtmlSearch(false, false);
     if (deps.getFormat() !== "html" || !deps.getDocPath()) return;
     const docPath = deps.getDocPath()!;
+    /** Still the load this call is for (not superseded by a reload or another document)? */
+    const current = (): boolean =>
+      gen === htmlReadyGen &&
+      deps.getHtmlSurface()?.doc === doc &&
+      deps.getDocPath() === docPath &&
+      deps.getFormat() === "html";
     try {
       const opened = await deps.api.openDoc({ docPath });
-      if (deps.getDocPath() !== docPath || deps.getFormat() !== "html") return;
+      if (!current()) return;
       if (opened.annotations.length) renderLoadedHtml(opened.annotations);
     } catch (e) {
       reportError("load html annotations", e, deps.log);
@@ -607,7 +707,7 @@ ${LONG_RANGE_CSS}
     // Re-render pending proposals as in-iframe overlay cards (mirrors the markdown path).
     try {
       const props = await deps.api.listProposals({ docPath });
-      if (deps.getDocPath() !== docPath || deps.getFormat() !== "html") return;
+      if (!current()) return;
       for (const p of props) {
         if (p.status !== "pending") continue;
         if (p.fullText !== undefined) {
@@ -673,8 +773,10 @@ ${LONG_RANGE_CSS}
   document.addEventListener("selectionchange", updatePopover);
 
   interface Captured {
-    from: number;
-    to: number;
+    /** The document the offsets below were measured in. */
+    doc: ProseNode;
+    start: number;
+    end: number;
     anchor: TextQuoteAnchor;
     quoted: string;
   }
@@ -693,9 +795,12 @@ ${LONG_RANGE_CSS}
       const proj = projectionOf(view);
       const sOff = offsetForPos(proj, from);
       const eOff = offsetForPos(proj, to);
+      // No text selected (an image, a rule, an empty block): nothing an anchor could find again.
+      if (!posRangeForOffsets(proj, sOff, eOff)) return null;
       return {
-        from,
-        to,
+        doc: view.state.doc,
+        start: sOff,
+        end: eOff,
         anchor: createAnchor(proj.text, sOff, eOff),
         quoted: proj.text.slice(sOff, eOff),
       };
@@ -706,9 +811,11 @@ ${LONG_RANGE_CSS}
       return null;
     }
 
+    const docPath = deps.getDocPath();
+    const gen = docGen;
     let id = "";
     let author: string | undefined;
-    if (deps.getDocPath()) {
+    if (docPath) {
       try {
         const created = await deps.api.createAnnotation({ kind, anchor: cap.anchor, color: color.name });
         id = created.id;
@@ -718,24 +825,32 @@ ${LONG_RANGE_CSS}
         deps.log(`persist FAILED: ${String(e)}`);
         return null;
       }
+      // Another document may be on screen by now: the annotation is saved with its own
+      // document and shows when that is next opened.
+      if (gen !== docGen || deps.getDocPath() !== docPath || deps.getFormat() !== "markdown" || deps.getEditor() !== editor) {
+        deps.log(`${kind} ${id} saved; its document is no longer shown`);
+        return null;
+      }
     } else {
       id = `local-${Date.now()}`;
     }
 
-    const num = kind === "comment" ? ++commentSeq : undefined;
-    editor.action((ctx) => {
+    const num = kind === "comment" ? commentSeq + 1 : undefined;
+    const placed = editor.action((ctx): boolean => {
       const view: EditorView = ctx.get(editorViewCtx);
-      view.dispatch(
-        view.state.tr.setMeta(deps.annoKey, {
-          from: cap.from,
-          to: cap.to,
-          id,
-          kind,
-          color,
-          num,
-        }),
-      );
+      const proj = projectionOf(view);
+      // The text may have been edited while the annotation was saved: find it again.
+      const at = view.state.doc === cap.doc ? cap : resolveAnchor(proj.text, cap.anchor);
+      const range = at ? posRangeForOffsets(proj, at.start, at.end) : null;
+      if (!range) return false;
+      view.dispatch(view.state.tr.setMeta(deps.annoKey, { ...range, id, kind, color, num }));
+      return true;
     });
+    if (!placed) {
+      dropUnplaced(id, kind, docPath);
+      return null;
+    }
+    if (num !== undefined) commentSeq = num;
     if (kind === "comment") deps.addCommentCard(id, cap.quoted, "", num!, author);
     pushAnnotationUndo(id, kind);
     return { id, quoted: cap.quoted, anchor: cap.anchor };
