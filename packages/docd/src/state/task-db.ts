@@ -108,6 +108,11 @@ export class TaskDB {
     ).map(toRow);
   }
 
+  /** Drop a thread's row (its comment was deleted). No-op when there is none. */
+  delete(threadId: string): void {
+    this.db.prepare(`DELETE FROM tasks WHERE thread_id = ?`).run(threadId);
+  }
+
   close(): void {
     this.db.close();
   }

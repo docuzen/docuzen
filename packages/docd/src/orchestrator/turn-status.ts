@@ -32,12 +32,21 @@ export interface TransitionDetail {
   error?: string;
 }
 
+function isMissingFile(e: unknown): boolean {
+  return (e as NodeJS.ErrnoException | null)?.code === "ENOENT";
+}
+
 /**
  * Single writer for a turn's status: the TaskDB liveness row, and — only when the
  * call site asks for it — the thread's on-disk frontmatter `status` field.
  *
- * Every paired call site this replaces wrote frontmatter BEFORE the TaskDB row, so
- * that order is preserved here unconditionally rather than left to the caller.
+ * Frontmatter is written BEFORE the TaskDB row (a crash in between leaves the row
+ * "running", which reconcile repairs; the other order would leave the thread file
+ * saying "running" with nothing left to fix it). The TaskDB row is written even when
+ * the frontmatter write fails: a thread file deleted mid-turn (its comment was
+ * removed) must not leave the task "running" forever. That missing-file case is
+ * expected for an "error" transition and is swallowed; any other frontmatter failure
+ * is rethrown once the row is written.
  */
 export async function transition(
   deps: TransitionDeps,
@@ -45,8 +54,13 @@ export async function transition(
   status: TurnStatus,
   detail: TransitionDetail,
 ): Promise<void> {
+  let frontmatterError: unknown;
   if (detail.frontmatter) {
-    await updateThreadFrontmatter(deps.docPath, threadId, { status });
+    try {
+      await updateThreadFrontmatter(deps.docPath, threadId, { status });
+    } catch (e) {
+      frontmatterError = e ?? new Error("thread frontmatter update failed");
+    }
   }
   deps.db.upsert({
     threadId,
@@ -54,4 +68,7 @@ export async function transition(
     piSessionId: detail.piSessionId,
     errorText: detail.error ?? null,
   });
+  if (frontmatterError !== undefined && !(status === "error" && isMissingFile(frontmatterError))) {
+    throw frontmatterError;
+  }
 }

@@ -21,6 +21,15 @@ describe("TaskDB", () => {
     expect(db.get("c0001")).toBeNull();
   });
 
+  it("deletes a task row", () => {
+    db.upsert({ threadId: "c0001", status: "running", piSessionId: null });
+    db.upsert({ threadId: "c0002", status: "responded", piSessionId: null });
+    db.delete("c0001");
+    expect(db.get("c0001")).toBeNull();
+    expect(db.list().map((r) => r.threadId)).toEqual(["c0002"]);
+    db.delete("c0001"); // deleting a missing row is a no-op
+  });
+
   it("upserts and reads back a task", () => {
     db.upsert({ threadId: "c0001", status: "running", piSessionId: null });
     const row = db.get("c0001");

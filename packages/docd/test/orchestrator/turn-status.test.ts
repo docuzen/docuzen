@@ -119,4 +119,25 @@ describe("transition", () => {
     expect(thread.frontmatter.status).toBe("running"); // unchanged from the seed
     expect(db.get("c0001")?.status).toBe("responded");
   });
+
+  // A comment deleted mid-turn takes its thread file with it. The turn's error
+  // transition must still land in TaskDB, or the task reads "running" forever.
+  it('still records an "error" in TaskDB when the thread file is gone', async () => {
+    db.upsert({ threadId: "c0404", status: "running", piSessionId: null });
+    await transition({ db, docPath }, "c0404", "error", {
+      piSessionId: null,
+      frontmatter: true,
+      error: "boom",
+    });
+    expect(db.get("c0404")?.status).toBe("error");
+    expect(db.get("c0404")?.errorText).toBe("boom");
+  });
+
+  it('records "responded" in TaskDB before reporting a missing thread file', async () => {
+    db.upsert({ threadId: "c0405", status: "running", piSessionId: null });
+    await expect(
+      transition({ db, docPath }, "c0405", "responded", { piSessionId: "s", frontmatter: true }),
+    ).rejects.toThrow(/ENOENT/);
+    expect(db.get("c0405")?.status).toBe("responded");
+  });
 });
