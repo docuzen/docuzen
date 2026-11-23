@@ -72,4 +72,89 @@ HOME="$home" run uninstall --purge
 [ -e "$home/.docuzen" ] && { echo "FAIL: --purge kept ~/.docuzen"; exit 1; }
 echo "ok: uninstall --purge removes ~/.docuzen"
 
+# --- 6..10: an update never costs the user the app they already have ---
+# A previous install (1.0.0) with a marker file: any case below that fails must leave it as is.
+make_app() {   # <dir> <version>
+  mkdir -p "$1/docuzen.app/Contents"
+  printf '%s\n' '<?xml version="1.0" encoding="UTF-8"?>' '<plist version="1.0"><dict>' \
+    "<key>CFBundleShortVersionString</key><string>$2</string>" '</dict></plist>' \
+    > "$1/docuzen.app/Contents/Info.plist"
+}
+install_old() {
+  rm -rf "$appdir/docuzen.app"; make_app "$appdir" 1.0.0
+  echo keep > "$appdir/docuzen.app/Contents/marker"
+}
+old_intact() { [ -f "$appdir/docuzen.app/Contents/marker" ] && grep -q '<string>1.0.0</string>' "$appdir/docuzen.app/Contents/Info.plist"; }
+no_leftovers() { [ "$(ls -A "$appdir")" = "docuzen.app" ]; }
+publish() { ( cd "$rel" && shasum -a 256 "$tarball" > SHA256SUMS.txt ); }
+publish_good() { tar -czf "$rel/$tarball" -C "$stage" docuzen.app; publish; }
+fail() { echo "FAIL: $1"; ls -la "$appdir" || true; exit 1; }
+fresh_cli
+
+# 6. the download is not a tarball (but its checksum matches): extract fails, old app stays
+install_old
+echo "not a tarball" > "$rel/$tarball"; publish
+if run update >/dev/null 2>&1; then fail "a broken tarball installed"; fi
+old_intact || fail "a failed extract destroyed the installed app"
+no_leftovers || fail "a failed extract left staging files behind"
+echo "ok: failed extract keeps the installed app"
+
+# 7. the tarball holds no app, or an app of another version: refused, old app stays
+bad="$work/bad"; rm -rf "$bad"; mkdir -p "$bad/other"; echo x > "$bad/other/file"
+tar -czf "$rel/$tarball" -C "$bad" other; publish
+if run update >/dev/null 2>&1; then fail "a tarball without docuzen.app installed"; fi
+old_intact || fail "a tarball without an app destroyed the installed app"
+rm -rf "$bad"; make_app "$bad" 8.8.8
+tar -czf "$rel/$tarball" -C "$bad" docuzen.app; publish
+if run update >/dev/null 2>&1; then fail "an app whose version is not the release's installed"; fi
+old_intact || fail "a mismatched app destroyed the installed app"
+no_leftovers || fail "a refused app left staging files behind"
+echo "ok: the staged app is verified before it replaces anything"
+
+# 8. putting the new app in place fails: the previous one is moved back
+fakebin="$work/fakebin"; rm -rf "$fakebin"; mkdir -p "$fakebin"
+real_mv="$(command -v mv)"; real_tar="$(command -v tar)"
+# The fake's own "$1" / "$@" are meant literally.
+# shellcheck disable=SC2016
+printf '%s\n' '#!/bin/sh' 'case "$1" in *.docuzen-update.*) echo "mv: simulated failure" >&2; exit 1 ;; esac' \
+  "exec \"$real_mv\" \"\$@\"" > "$fakebin/mv"
+chmod +x "$fakebin/mv"
+publish_good
+if PATH="$fakebin:$PATH" run update >/dev/null 2>&1; then fail "the swap was reported as a success"; fi
+old_intact || fail "a failed swap lost the installed app"
+no_leftovers || fail "a failed swap left the backup or staging behind"
+echo "ok: a failed swap restores the installed app"
+
+# 9. TERM mid-update: exits 143 at once, old app intact, nothing left behind
+rm -f "$fakebin/mv" "$work/tar-started"
+printf '%s\n' '#!/bin/sh' "touch \"$work/tar-started\"" 'sleep 2' "exec \"$real_tar\" \"\$@\"" > "$fakebin/tar"
+chmod +x "$fakebin/tar"
+PATH="$fakebin:$PATH" DOCUZEN_APP_DIR="$appdir" DOCUZEN_RELEASES_API="file://$rel/latest.json" "$cli" update >/dev/null 2>&1 &
+pid=$!
+for _ in $(seq 1 200); do [ -e "$work/tar-started" ] && break; sleep 0.05; done
+[ -e "$work/tar-started" ] || fail "the update never reached the extract"
+kill -TERM "$pid"
+status=0; wait "$pid" || status=$?
+[ "$status" -eq 143 ] || fail "TERM should exit 143, got $status"
+old_intact || fail "an interrupted update destroyed the installed app"
+no_leftovers || fail "an interrupted update left staging files behind"
+rm -f "$fakebin/tar"
+echo "ok: TERM stops the update and keeps the installed app"
+
+# 10. and a good release replaces it cleanly
+run update >/dev/null
+grep -q '<string>9.9.9</string>' "$appdir/docuzen.app/Contents/Info.plist" || fail "the update did not install 9.9.9"
+[ ! -e "$appdir/docuzen.app/Contents/marker" ] || fail "the old app's files survived the update"
+no_leftovers || fail "a successful update left the backup or staging behind"
+echo "ok: update replaces the installed app"
+
+# --- 11. `open` launches the app in DOCUZEN_APP_DIR, not whichever one LaunchServices picks ---
+printf '%s\n' '#!/bin/sh' "printf '%s\\n' \"\$@\" > \"$work/open-args\"" > "$fakebin/open"
+chmod +x "$fakebin/open"
+PATH="$fakebin:$PATH" run open "$work/notes.md"
+[ "$(cat "$work/open-args")" = "-a
+$appdir/docuzen.app
+$work/notes.md" ] || fail "open ran with: $(cat "$work/open-args")"
+echo "ok: open uses the app in DOCUZEN_APP_DIR"
+
 echo "ALL HERMETIC TESTS PASSED"

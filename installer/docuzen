@@ -18,17 +18,19 @@ detect_arch() {
   esac
 }
 
-# Installed app version, or empty. Uses `defaults` on macOS (handles binary
+# Version of the app bundle at $1, or empty. Uses `defaults` on macOS (handles binary
 # plists); falls back to an XML-plist grep so the hermetic test works on Linux.
-installed_version() {
-  [ -e "$APP/Contents/Info.plist" ] || { echo ""; return; }
+app_version() {
+  [ -e "$1/Contents/Info.plist" ] || { echo ""; return; }
   if command -v defaults >/dev/null 2>&1 &&
-     v=$(defaults read "$APP/Contents/Info" CFBundleShortVersionString 2>/dev/null); then
+     v=$(defaults read "$1/Contents/Info" CFBundleShortVersionString 2>/dev/null); then
     echo "$v"; return
   fi
-  grep -A1 CFBundleShortVersionString "$APP/Contents/Info.plist" 2>/dev/null \
+  grep -A1 CFBundleShortVersionString "$1/Contents/Info.plist" 2>/dev/null \
     | sed -n 's/.*<string>\(.*\)<\/string>.*/\1/p' | head -1
 }
+
+installed_version() { app_version "$APP"; }
 
 # Extract the last double-quoted value from a "key": "value" JSON line — no jq.
 _json_last_quoted() { sed -E 's/.*"([^"]*)"[^"]*$/\1/'; }
@@ -48,8 +50,13 @@ resolve_and_install() {
   [ -n "$tar_url" ] || die "no .app.tar.gz asset for $arch in the latest release"
   [ -n "$sums_url" ] || die "no SHA256SUMS.txt in the latest release"
 
+  # Cleanup runs on every exit. INT/TERM only exit (130/143), so an interrupted update
+  # stops where it is and the EXIT trap puts things back; it never carries on half-done.
+  tmp="" stage="" backup=""
+  trap install_cleanup EXIT
+  trap 'exit 130' INT
+  trap 'exit 143' TERM
   tmp=$(mktemp -d)
-  trap 'rm -rf "$tmp"' EXIT INT TERM
   curl -fsSL "$tar_url" -o "$tmp/app.tar.gz" || die "download failed: $tar_url"
   curl -fsSL "$sums_url" -o "$tmp/SHA256SUMS.txt" || die "checksum list download failed"
 
@@ -65,10 +72,37 @@ resolve_and_install() {
 
   mkdir -p "$APP_DIR"
   [ -w "$APP_DIR" ] || die "$APP_DIR is not writable"
-  rm -rf "$APP"
-  tar -xzf "$tmp/app.tar.gz" -C "$APP_DIR" || die "extract failed"
-  xattr -cr "$APP" 2>/dev/null || true   # clear Gatekeeper quarantine (macOS)
+  # Stage next to $APP (same volume, so the swap below is two renames) and check the new
+  # app before the installed one is touched.
+  stage=$(mktemp -d "$APP_DIR/.docuzen-update.XXXXXX") || die "cannot stage in $APP_DIR"
+  tar -xzf "$tmp/app.tar.gz" -C "$stage" || die "extract failed; kept the installed app"
+  [ -d "$stage/docuzen.app" ] || die "the download holds no docuzen.app; kept the installed app"
+  staged_version=$(app_version "$stage/docuzen.app")
+  [ "$staged_version" = "$version" ] ||
+    die "the downloaded app is version '${staged_version:-unknown}', not $version; kept the installed app"
+  xattr -cr "$stage/docuzen.app" 2>/dev/null || true   # clear Gatekeeper quarantine (macOS)
+
+  if [ -e "$APP" ]; then
+    backup=$(mktemp -d "$APP_DIR/.docuzen-previous.XXXXXX") || die "cannot back up $APP"
+    mv "$APP" "$backup/docuzen.app" || die "cannot move the installed app aside"
+  fi
+  mv "$stage/docuzen.app" "$APP" || die "cannot put the new app in place; restored the installed one"
   printf 'docuzen %s installed to %s\n' "$version" "$APP"
+}
+
+# EXIT trap of resolve_and_install. If the old app was moved aside and the new one is not
+# in place, the old one goes back; then the backup, staging and download dirs go.
+install_cleanup() {
+  if [ -n "${backup:-}" ]; then
+    if [ -e "$backup/docuzen.app" ] && [ ! -e "$APP" ]; then
+      mv "$backup/docuzen.app" "$APP" ||
+        printf 'docuzen: could not restore %s; the previous app is in %s\n' "$APP" "$backup" >&2
+    fi
+    # Kept only while it holds the sole copy of the previous app (the restore failed).
+    if [ -e "$APP" ] || [ ! -e "$backup/docuzen.app" ]; then rm -rf "$backup"; fi
+  fi
+  if [ -n "${stage:-}" ]; then rm -rf "$stage"; fi
+  if [ -n "${tmp:-}" ]; then rm -rf "$tmp"; fi
 }
 
 latest_version() {   # best-effort; empty on any failure (offline etc.)
@@ -84,7 +118,7 @@ cmd_version() {
   [ -n "$lat" ] && printf 'latest:    %s\n' "$lat" || printf 'latest:    (unavailable)\n'
 }
 
-cmd_open() { open -a docuzen "$@"; }
+cmd_open() { open -a "$APP" "$@"; }
 
 cmd_doctor() {
   arch=$(detect_arch)
