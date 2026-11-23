@@ -47,6 +47,12 @@ const CASES: { name: string; md: string; directives: string[]; decoys: string[] 
     decoys: [],
   },
   { name: "escaped brackets", md: "Literal \\[\\[ alpha ]] text [[ bravo ]]\n", directives: ["alpha", "bravo"], decoys: [] },
+  {
+    name: "lists, with a fence inside an item",
+    md: "- first [[ alpha ]]\n- second\n\n  ```\n  [[ decoyone ]]\n  ```\n\n1. [[ bravo ]]\n2. done\n",
+    directives: ["alpha", "bravo"],
+    decoys: ["decoyone"],
+  },
 ];
 
 let ed: MountedEditor;
