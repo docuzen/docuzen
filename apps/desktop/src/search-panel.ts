@@ -13,7 +13,7 @@ import type { EditorView } from "@milkdown/kit/prose/view";
 import type { PluginKey } from "@milkdown/kit/prose/state";
 import { projectionOf, posRangeForOffsets } from "./anchor-map.js";
 import { findTextMatches, nextSearchIndex, type TextMatch } from "./doc-search.js";
-import { buildHtmlProjection, rangeForOffsets, wrapRange } from "./html-projection.js";
+import { buildHtmlProjection, rangeForOffsets, wrapRange, type HtmlProjection } from "./html-projection.js";
 import type { HtmlSurface } from "./html-surface.js";
 
 /** Mirrors editor.ts's `SearchDecorationMeta` shape — see file header. */
@@ -104,10 +104,52 @@ export function initSearch(deps: SearchDeps): SearchApi {
     });
   }
 
+  /**
+   * Remove the match highlights from both surfaces and forget the matches: the next
+   * refresh (a newly shown document, the panel reopened) starts again at the first match,
+   * and the count no longer describes a document that's gone.
+   */
   function clearSearchHighlights(): void {
     clearMarkdownSearch();
     const doc = deps.getHtmlSurface()?.doc;
     if (doc) unwrapHtmlSearch(doc);
+    searchState.matches = [];
+    searchState.activeIndex = -1;
+    syncSearchControls();
+  }
+
+  /** A selection endpoint as a projection offset — only a point in text can be put back. */
+  function offsetOfPoint(proj: HtmlProjection, node: Node | null, offset: number): number | null {
+    const run = proj.runs.find((r) => r.node === node);
+    return run ? run.from + Math.min(offset, run.to - run.from) : null;
+  }
+  /** The text point at projection `offset`, preferring text outside a match highlight at a boundary. */
+  function pointAtOffset(proj: HtmlProjection, offset: number): { node: Text; offset: number } | null {
+    const candidates = proj.runs.filter((r) => r.from <= offset && offset <= r.to);
+    const run = candidates.find((r) => !r.node.parentElement?.hasAttribute("data-had-search")) ?? candidates[0];
+    return run ? { node: run.node, offset: offset - run.from } : null;
+  }
+  /**
+   * Re-highlighting unwraps and re-wraps text around the caret, which drops it at a
+   * match's start (or loses it): keep the selection by its text offsets instead, so typing
+   * in Edit mode with the search open carries on where it was.
+   */
+  function preservingSelection(doc: Document, rewrap: () => void): void {
+    const sel = doc.getSelection();
+    const inBody = sel && sel.rangeCount > 0 && sel.anchorNode && doc.body.contains(sel.anchorNode);
+    let saved: { anchor: number; focus: number } | null = null;
+    if (inBody) {
+      const proj = buildHtmlProjection(doc.body);
+      const anchor = offsetOfPoint(proj, sel.anchorNode, sel.anchorOffset);
+      const focus = offsetOfPoint(proj, sel.focusNode, sel.focusOffset);
+      if (anchor !== null && focus !== null) saved = { anchor, focus };
+    }
+    rewrap();
+    if (!saved || !sel) return;
+    const proj = buildHtmlProjection(doc.body);
+    const a = pointAtOffset(proj, saved.anchor);
+    const f = pointAtOffset(proj, saved.focus);
+    if (a && f) sel.setBaseAndExtent(a.node, a.offset, f.node, f.offset);
   }
 
   function scrollActiveMarkdownMatch(): void {
@@ -163,12 +205,13 @@ export function initSearch(deps: SearchDeps): SearchApi {
       syncSearchControls();
       return;
     }
-    unwrapHtmlSearch(doc);
     const q = searchState.query;
-    const proj = buildHtmlProjection(doc.body);
-    const matches = findTextMatches(proj.text, q);
-    setSearchMatches(matches, resetActive);
-    if (q.trim()) {
+    preservingSelection(doc, () => {
+      unwrapHtmlSearch(doc);
+      const proj = buildHtmlProjection(doc.body);
+      const matches = findTextMatches(proj.text, q);
+      setSearchMatches(matches, resetActive);
+      if (!q.trim()) return;
       [...matches].reverse().forEach((m, reverseIndex) => {
         const index = matches.length - 1 - reverseIndex;
         const range = rangeForOffsets(doc, proj, m.start, m.end);
@@ -181,7 +224,7 @@ export function initSearch(deps: SearchDeps): SearchApi {
           return span;
         });
       });
-    }
+    });
     syncSearchControls();
     if (scroll && searchState.activeIndex >= 0) scrollActiveHtmlMatch(doc);
   }
