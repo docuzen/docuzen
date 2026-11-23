@@ -168,6 +168,23 @@ describe("CodexRunner process lifecycle", () => {
     expect(existsSync(terms) ? readFileSync(terms, "utf8").trim().split("\n") : []).toEqual(["term"]);
   });
 
+  it("a Stop pressed while the launch config is still resolving never spawns codex", async () => {
+    const ran = join(dir, "ran");
+    const codex = script("codex", `touch '${ran}'\n${message("too late")}`);
+    const runner = new CodexRunner({ command: codex });
+    const run = runner.start({ ...baseCtx, scopeDir: dir, cancelKey: "doc#c0001" });
+    await runner.cancel("doc#c0001");
+    await expect(run).rejects.toThrow(/cancelled/);
+    expect(existsSync(ran)).toBe(false);
+  });
+
+  it("a Stop with nothing running does not cancel the thread's next run", async () => {
+    const runner = new CodexRunner({ command: script("codex", message("fresh reply")) });
+    await runner.cancel("doc#c0001");
+    const { turn } = await runner.start({ ...baseCtx, scopeDir: dir, cancelKey: "doc#c0001" });
+    expect(turn.reply).toBe("fresh reply");
+  });
+
   it("leaves no temp dir behind when the launch config cannot be resolved", async () => {
     const tmp = mkdtempSync(join(tmpdir(), "docuzen-codex-tmp-"));
     const prev = process.env.TMPDIR;

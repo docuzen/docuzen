@@ -150,6 +150,9 @@ class UnavailableCodexRunner implements AgentRunner {
 export class CodexRunner implements AgentRunner {
   private sessionIds = new SessionCounter("codex");
   private live = new Map<string, LiveProcess>();
+  /** Runs still resolving their launch config (no child yet), by cancel key: a Stop
+   * pressed then is remembered here and honoured before the child is spawned. */
+  private starting = new Map<string, { cancelled: boolean }>();
 
   constructor(private cfg: CodexRunnerConfig = {}) {}
 
@@ -168,7 +171,11 @@ export class CodexRunner implements AgentRunner {
 
   async cancel(cancelKey: string): Promise<void> {
     const live = this.live.get(cancelKey);
-    live?.cancel(new Error("Codex run cancelled"));
+    if (live) live.cancel(new Error("Codex run cancelled"));
+    else {
+      const starting = this.starting.get(cancelKey);
+      if (starting) starting.cancelled = true;
+    }
   }
 
   hasSession(): boolean {
@@ -181,53 +188,73 @@ export class CodexRunner implements AgentRunner {
   ): Promise<{ reply: string; proposal?: ProposedEdit }> {
     const command = this.cfg.command ?? process.env.CODEX_BIN ?? "codex";
     const workDir = ctx.scopeDir ?? process.cwd();
-    // Resolve the launch config first: it can throw, and nothing needs cleaning up yet.
-    const launch = await this.codexLaunchConfig(ctx);
-    const tempDir = await mkdtemp(join(tmpdir(), "docuzen-codex-"));
+    const key = ctx.cancelKey;
+    const starting = { cancelled: false };
+    if (key) this.starting.set(key, starting);
     try {
-      const outputPath = join(tempDir, "last-message.txt");
-      const args = codexExecArgs({
-        workDir,
-        outputPath,
-        model: launch.model,
-        configOverrides: launch.configOverrides,
-      });
-      const { stdout, streamedToken } = await this.spawnCodex(
-        command,
-        args,
-        buildCodexPrompt(ctx),
-        ctx.cancelKey,
-        onToken,
-        launch.env,
-      );
-      let reply = "";
+      // Resolve the launch config first: it can throw, and nothing needs cleaning up yet.
+      const launch = await this.codexLaunchConfig(ctx);
+      const tempDir = await mkdtemp(join(tmpdir(), "docuzen-codex-"));
       try {
-        reply = (await readFile(outputPath, "utf8")).trim();
-      } catch {
-        reply = extractCodexText(stdout).trim();
+        // A Stop that arrived while the config was resolving: never spawn the child.
+        if (starting.cancelled) throw new Error("Codex run cancelled");
+        return await this.runCodexIn(tempDir, command, workDir, launch, ctx, onToken);
+      } finally {
+        await rm(tempDir, { recursive: true, force: true });
       }
-      if (!reply) reply = extractCodexText(stdout).trim();
-      if (!reply) throw new Error("Codex returned no final message");
-      // Only emit the one-shot final reply when nothing streamed live — otherwise the
-      // reviewer would see the whole reply a second time after already watching it stream.
-      // Emitted BEFORE the trailing-json-proposal strip below: the live stream (and this
-      // one-shot fallback) intentionally still shows the raw fenced block. Suppressing it
-      // from the stream is a follow-up (see buildCodexPrompt); the strip below only
-      // affects what gets persisted as the turn's reply.
-      if (!streamedToken) onToken?.({ type: "token", text: reply });
-
-      // Only the modes where buildCodexPrompt hands out the structured-edit contract
-      // (canProposeEdits) ever ask Codex for a trailing ```json block, so only those
-      // modes look for one here — reviewMode findings and replacementOnly raw text
-      // must never be reinterpreted as an edit proposal.
-      if (canProposeEdits(ctx)) {
-        const extracted = extractCodexProposal(reply);
-        if (extracted.proposal) return extracted;
-      }
-      return { reply };
     } finally {
-      await rm(tempDir, { recursive: true, force: true });
+      if (key && this.starting.get(key) === starting) this.starting.delete(key);
     }
+  }
+
+  private async runCodexIn(
+    tempDir: string,
+    command: string,
+    workDir: string,
+    launch: CodexLaunchConfig,
+    ctx: AgentContext,
+    onToken?: TokenSink,
+  ): Promise<{ reply: string; proposal?: ProposedEdit }> {
+    const outputPath = join(tempDir, "last-message.txt");
+    const args = codexExecArgs({
+      workDir,
+      outputPath,
+      model: launch.model,
+      configOverrides: launch.configOverrides,
+    });
+    const { stdout, streamedToken } = await this.spawnCodex(
+      command,
+      args,
+      buildCodexPrompt(ctx),
+      ctx.cancelKey,
+      onToken,
+      launch.env,
+    );
+    let reply = "";
+    try {
+      reply = (await readFile(outputPath, "utf8")).trim();
+    } catch {
+      reply = extractCodexText(stdout).trim();
+    }
+    if (!reply) reply = extractCodexText(stdout).trim();
+    if (!reply) throw new Error("Codex returned no final message");
+    // Only emit the one-shot final reply when nothing streamed live — otherwise the
+    // reviewer would see the whole reply a second time after already watching it stream.
+    // Emitted BEFORE the trailing-json-proposal strip below: the live stream (and this
+    // one-shot fallback) intentionally still shows the raw fenced block. Suppressing it
+    // from the stream is a follow-up (see buildCodexPrompt); the strip below only
+    // affects what gets persisted as the turn's reply.
+    if (!streamedToken) onToken?.({ type: "token", text: reply });
+
+    // Only the modes where buildCodexPrompt hands out the structured-edit contract
+    // (canProposeEdits) ever ask Codex for a trailing ```json block, so only those
+    // modes look for one here — reviewMode findings and replacementOnly raw text
+    // must never be reinterpreted as an edit proposal.
+    if (canProposeEdits(ctx)) {
+      const extracted = extractCodexProposal(reply);
+      if (extracted.proposal) return extracted;
+    }
+    return { reply };
   }
 
   private spawnCodex(
