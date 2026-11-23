@@ -12,3 +12,4 @@ export * from "./doc-store.js";
 export * from "./bundle.js";
 export * from "./comment.js";
 export * from "./assets.js";
+export * from "./inspect-path.js";

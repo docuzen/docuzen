@@ -20,6 +20,7 @@ const METHODS = [
   "listThreads", "getThread", "listVersions", "readVersion", "restoreVersion",
   "listModels", "saveModels", "listHarnesses", "getSettings", "setSettings",
   "listTasks", "exportHadz", "importHadz", "createDoc", "saveImage", "readImage",
+  "inspectPath",
 ] as const satisfies readonly RpcMethod[];
 
 export function makeApi(client: Pick<DocdClient, "call">, activeDocPath: () => string | undefined): DocdApi {

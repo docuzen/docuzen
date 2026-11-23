@@ -26,6 +26,7 @@ import {
   createDoc,
   saveImage,
   readImage,
+  inspectPath,
   saveComment,
   resolveComment,
 } from "../had/index.js";
@@ -174,6 +175,7 @@ export class RpcHandler {
       createDoc: (p) => createDoc(p.docPath),
       readImage: (p) => readImage(p.path),
       saveImage: (p) => saveImage(p.docPath, { name: p.name, dataBase64: p.dataBase64, sourcePath: p.sourcePath }),
+      inspectPath: (p) => inspectPath(p.path),
 
       // ---- annotations + comments ----
       createAnnotation: (p) => createAnnotation(p.docPath, p, { now: now(), defaultAuthor: this.deps.author }),
