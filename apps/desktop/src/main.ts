@@ -329,7 +329,11 @@ const shell = initShell({
   refreshMarkdownSearch: searchApi.refreshMarkdownSearch,
   renderProposal: (p) => proposals.renderProposal(p),
   openDiffPanel: (p) => proposals.openDiffPanel(p),
-  resetChat: chat.resetChat,
+  // A document switch also closes the previous document's full-rewrite panel.
+  resetChat: () => {
+    chat.resetChat();
+    proposals.closeDiffPanel();
+  },
   chatTurnWithAction: chat.chatTurnWithAction,
   modelName: chat.modelName,
 });
