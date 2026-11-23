@@ -22,7 +22,7 @@ import {
 import { createAnchor } from "../anchor/index.js";
 import { hadPaths } from "../had/paths.js";
 import type { Annotation, ThreadTurn } from "../had/types.js";
-import { ProposalService, documentBody } from "./proposal-service.js";
+import { ProposalService } from "./proposal-service.js";
 import {
   DOC_TEXT_BUDGET,
   buildAgentContext,

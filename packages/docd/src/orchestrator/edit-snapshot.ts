@@ -17,9 +17,8 @@ export interface WithEditSnapshotOptions {
    * The post-mutation content, if the caller already knows it in memory (applyLegacySpan
    * computes the exact bytes it's about to write). When provided, this is snapshotted
    * directly instead of `withEditSnapshot` re-reading disk after `mutate` runs.
-   * approveProposal's hunk/full-rewrite path omits this: its written bytes go through
-   * `matter.stringify`, so it doesn't hold the exact on-disk string and genuinely needs
-   * the re-read.
+   * approveProposal's hunk/full-rewrite path omits this and re-reads what was written
+   * (the document's own frontmatter is joined back on in `had/frontmatter.ts`).
    */
   after?: string;
 }
