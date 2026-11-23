@@ -65,7 +65,8 @@ function decode(s: string): string {
 export function localImagePath(docPath: string, src: string): string | null {
   const raw = src.trim();
   if (!raw || raw.startsWith("//")) return null;
-  if (/^file:/i.test(raw)) return normalizePath(decode(raw.replace(/^file:\/\/[^/]*/i, "").replace(/[?#].*$/, "")));
+  // file:///p, file://host/p and the single-slash file:/p all name the path /p.
+  if (/^file:/i.test(raw)) return normalizePath(decode(raw.replace(/^file:(\/\/[^/]*)?/i, "").replace(/[?#].*$/, "")));
   if (/^[a-z][a-z0-9+.-]*:/i.test(raw)) return null;
   const path = decode(raw.replace(/[?#].*$/, ""));
   if (!path) return null;
@@ -206,8 +207,12 @@ export function makeImageView(resolve: (src: string) => string, read?: ImageRead
   return $view(safeImageSchema.node, () => (initialNode) => {
     const dom = document.createElement("img");
     if (read) withImageFallback(dom, read);
+    let shown: string | null = null;
     const apply = (node: typeof initialNode): void => {
-      dom.src = resolve(String(node.attrs.src ?? ""));
+      // Only a changed link reloads the image: re-rendering the same node (any edit nearby)
+      // must not throw away an RPC fallback that is already showing it.
+      const src = resolve(String(node.attrs.src ?? ""));
+      if (src !== shown) dom.src = shown = src;
       dom.alt = String(node.attrs.alt ?? "");
       if (node.attrs.title) dom.title = String(node.attrs.title);
       else dom.removeAttribute("title");
@@ -226,12 +231,38 @@ export function makeImageView(resolve: (src: string) => string, read?: ImageRead
 
 const HTML_BLOCKS = "p,h1,h2,h3,h4,h5,h6,pre,blockquote,figure,table,ul,ol,dl,hr";
 const HTML_CONTAINERS = "table,ul,ol,dl,blockquote,figure,pre";
+const HTML_NS = "http://www.w3.org/1999/xhtml";
+/** HTML elements whose content is flow content, so a new paragraph may go inside one. */
+const FLOW_CONTAINERS = new Set([
+  "BODY", "DIV", "SECTION", "ARTICLE", "MAIN", "ASIDE", "HEADER", "FOOTER", "NAV", "LI", "TD", "TH", "DD",
+  "FIGURE", "BLOCKQUOTE", "DETAILS", "DIALOG", "FORM", "FIELDSET", "ADDRESS", "CENTER", "SEARCH",
+]);
+
+/**
+ * Whether a new image paragraph can live inside `el` and be saved: an HTML flow container
+ * (or a custom element), never a void or inline element (an `<img>`'s children are not
+ * drawn and not saved), never SVG or MathML, never one of docuzen's own overlays.
+ */
+function holdsBlocks(el: Element): boolean {
+  return (
+    el.namespaceURI === HTML_NS &&
+    !el.hasAttribute("data-had-overlay") &&
+    (FLOW_CONTAINERS.has(el.tagName) || el.tagName.includes("-"))
+  );
+}
 
 /** Where a drop at (x, y) should put a new block in an HTML document. */
 export function htmlDropTarget(doc: Document, x: number, y: number): { parent: Node; before: Node | null } {
   const body = doc.body;
-  const hit = doc.elementFromPoint?.(x, y) ?? null;
-  let block = hit && body.contains(hit) ? hit.closest(HTML_BLOCKS) : null;
+  let hit = doc.elementFromPoint?.(x, y) ?? null;
+  if (hit && !body.contains(hit)) hit = null;
+  // A drop on a comment badge or proposal card belongs next to the card (those are removed
+  // on save, and an image inside one would go with it); a drop on a diagram or a formula,
+  // even on an HTML label inside its SVG, belongs next to the whole diagram.
+  for (const unit of ["[data-had-overlay]", "svg, math"]) {
+    for (let el = hit?.closest(unit); el && hit; el = el.parentElement?.closest(unit)) hit = el;
+  }
+  let block = hit?.closest(HTML_BLOCKS) ?? null;
   // Never land inside a list, table or quote: use the outermost such container.
   for (let outer = block?.parentElement?.closest(HTML_CONTAINERS); outer && block; outer = block.parentElement?.closest(HTML_CONTAINERS)) {
     block = outer;
@@ -240,8 +271,19 @@ export function htmlDropTarget(doc: Document, x: number, y: number): { parent: N
     const r = block.getBoundingClientRect();
     return { parent: block.parentNode, before: y < r.top + r.height / 2 ? block : block.nextSibling };
   }
+  // Dropped on an image, a video, a diagram or inline text outside any block: climb to the
+  // container that holds it and go before or after the element that was hit.
+  let container: Element = hit ?? body;
+  let inner: Element | null = null;
+  while (container !== body && !holdsBlocks(container) && container.parentElement) {
+    inner = container;
+    container = container.parentElement;
+  }
+  if (inner) {
+    const r = inner.getBoundingClientRect();
+    return { parent: container, before: y < r.top + r.height / 2 ? inner : inner.nextSibling };
+  }
   // Dropped on a gap or a plain container: before the first child that starts below the pointer.
-  const container = hit && hit !== doc.documentElement && body.contains(hit) ? hit : body;
   for (const child of Array.from(container.children)) {
     if (child.hasAttribute("data-had-overlay")) continue;
     const r = child.getBoundingClientRect();
