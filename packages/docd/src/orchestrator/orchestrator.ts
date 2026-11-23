@@ -1,4 +1,4 @@
-import { readFile } from "node:fs/promises";
+import { readFile, rm } from "node:fs/promises";
 import { dirname } from "node:path";
 import matter from "gray-matter";
 import type { AgentContext, AgentRunner, AgentTurn, ProposedEdit, TokenSink } from "../agent/types.js";
@@ -16,13 +16,13 @@ import {
   updateThreadFrontmatter,
   snapshot,
   readVersion,
-  latestVersionId,
   readSettings,
   isHtmlDoc,
 } from "../had/index.js";
 import { createAnchor } from "../anchor/index.js";
+import { hadPaths } from "../had/paths.js";
 import type { Annotation, ThreadTurn } from "../had/types.js";
-import { ProposalService } from "./proposal-service.js";
+import { ProposalService, documentBody } from "./proposal-service.js";
 import {
   DOC_TEXT_BUDGET,
   buildAgentContext,
@@ -175,11 +175,91 @@ export interface TurnSpec {
   skipProposalPersist?: boolean;
 }
 
+/** A turn running in this process, from the moment it claims its thread until it settles. */
+interface LiveTurn {
+  /**
+   * Stop was pressed (or the comment deleted). A runner may still resolve the turn
+   * normally with a partial reply (PiRunner does), so this flag — not the runner's
+   * result — decides that the turn submits no edit and a multi-model turn stops early.
+   */
+  cancelled: boolean;
+  /** The thread's comment was deleted mid-turn: its task row is dropped when the turn settles. */
+  discarded: boolean;
+}
+
+/** Hands out claims on threads for one public call; see `Orchestrator.holding`. */
+type ClaimThread = (docPath: string, threadId: string) => LiveTurn;
+
 export class Orchestrator {
   constructor(private deps: OrchestratorDeps) {}
 
   /** The agent-edit lifecycle (submit → review → apply | reject), both edit modes. */
   private readonly proposals = new ProposalService({ now: () => this.deps.now() });
+
+  /** Turns running in this process, keyed like the runner's cancel key (docPath#threadId). */
+  private readonly live = new Map<string, LiveTurn>();
+
+  /** Documents with an inline-directive pass in flight. */
+  private readonly directivePasses = new Set<string>();
+
+  /**
+   * Threads (by cancel key) whose stance was changed by a live-session reply that then
+   * failed: the session never received the "(Your stance is now …)" steer, so the next
+   * live reply must carry it even though the stance on disk already matches.
+   */
+  private readonly unsteeredStance = new Set<string>();
+
+  /**
+   * Run `fn`, holding every thread it claims until it settles. A claim is refused when
+   * the thread already has a turn running in this process: two turns on one thread would
+   * interleave their transcript writes, wipe each other's thread file (discuss re-inits
+   * it) and fight over the runner's cancel key. The desktop already sends one turn per
+   * thread at a time (send-queue.ts and chat.ts's beginExclusiveTurn), so ordinary use
+   * never hits this; a client that does gets an error, not a queued turn. Claims are
+   * taken synchronously, before `fn`'s first await, so two calls can't both pass.
+   */
+  private async holding<T>(fn: (claim: ClaimThread) => Promise<T>): Promise<T> {
+    const held: { key: string; docPath: string; threadId: string; turn: LiveTurn }[] = [];
+    const claim: ClaimThread = (docPath, threadId) => {
+      const key = cancelKeyFor(docPath, threadId);
+      if (this.live.has(key)) {
+        throw new Error(`an agent turn is already running on ${threadId} — wait for it to finish or stop it`);
+      }
+      const turn: LiveTurn = { cancelled: false, discarded: false };
+      this.live.set(key, turn);
+      held.push({ key, docPath, threadId, turn });
+      return turn;
+    };
+    try {
+      return await fn(claim);
+    } finally {
+      for (const h of held) {
+        if (this.live.get(h.key) === h.turn) this.live.delete(h.key);
+        if (h.turn.discarded) await this.dropDiscardedThread(h.docPath, h.threadId);
+      }
+    }
+  }
+
+  /**
+   * A turn whose comment was deleted while it ran has settled: remove what it left
+   * behind. Its status writes recreate the task row, and a transcript write that read
+   * the thread file just before the delete removed it writes the file back.
+   */
+  private async dropDiscardedThread(docPath: string, threadId: string): Promise<void> {
+    this.deps.db.delete(threadId);
+    const paths = hadPaths(docPath);
+    try {
+      await rm(paths.threadFile(threadId), { force: true });
+      await rm(paths.sessionFile(threadId), { force: true });
+    } catch (err) {
+      console.warn(`could not remove the files of deleted thread ${threadId}:`, err);
+    }
+  }
+
+  /** The running turn on this thread, if any. */
+  private liveTurn(docPath: string, threadId: string): LiveTurn | undefined {
+    return this.live.get(cancelKeyFor(docPath, threadId));
+  }
 
   private registry(): HarnessRegistry {
     if (this.deps.registry) return this.deps.registry;
@@ -205,8 +285,14 @@ export class Orchestrator {
     return !r.hasSession || r.hasSession(sid) ? sid : null;
   }
 
-  /** Abort the in-flight agent turn for a thread, if the runner supports cancellation. */
+  /**
+   * Abort the in-flight agent turn for a thread. The turn is marked cancelled first (so
+   * it submits no edit however the runner settles it), then the runner is asked to abort,
+   * if it supports cancellation. A Stop with no turn running leaves nothing behind.
+   */
   async cancel(docPath: string, threadId: string): Promise<void> {
+    const live = this.liveTurn(docPath, threadId);
+    if (live) live.cancelled = true;
     let owner: string | undefined;
     try {
       owner = (await readThread(docPath, threadId)).frontmatter.harness;
@@ -215,6 +301,26 @@ export class Orchestrator {
     }
     const harness = await this.harnessForDoc(docPath, owner);
     await harness.runner.cancel?.(this.cancelKey(docPath, threadId));
+  }
+
+  /**
+   * The thread's comment is being deleted (call before its thread file goes): stop any
+   * turn running on it and drop its task row — now, and again when that turn settles,
+   * so nothing the turn writes on its way out leaves a row for a comment that's gone.
+   */
+  async discardThread(docPath: string, threadId: string): Promise<void> {
+    const live = this.liveTurn(docPath, threadId);
+    if (live) {
+      live.cancelled = true;
+      live.discarded = true;
+      try {
+        await this.cancel(docPath, threadId);
+      } catch (err) {
+        // Best effort: the delete goes ahead, and the turn's own outcome is discarded.
+        console.warn(`discardThread: could not stop the turn on ${threadId}:`, err);
+      }
+    }
+    this.deps.db.delete(threadId);
   }
 
   /**
@@ -256,8 +362,8 @@ export class Orchestrator {
    * load-bearing: branch(baseDoc:"at-turn") restores `turn.docVersion` to reconstruct
    * the doc the turn was reasoning about. Do not "fix" it to the post-edit version.
    */
-  private async currentDocVersion(docPath: string): Promise<string> {
-    const content = await readFile(docPath, "utf8");
+  private async currentDocVersion(docPath: string, content?: string): Promise<string> {
+    content ??= await readFile(docPath, "utf8");
     const v = await snapshot(docPath, content, { cause: "turn-base", at: this.deps.now() });
     return v.id;
   }
@@ -351,11 +457,14 @@ export class Orchestrator {
     const { threadId } = spec;
     const runner = (await this.harnessForDoc(docPath, spec.preferredHarness)).runner;
 
+    // The document as this turn starts: the version it is stamped with, the text its
+    // context is built from, and the base any proposal it returns is checked against.
+    const raw = await readFile(docPath, "utf8");
     const docVersionOverride = spec.docVersion;
     const docVersion: string | undefined =
       docVersionOverride !== undefined
         ? (docVersionOverride ?? undefined)
-        : await this.currentDocVersion(docPath);
+        : await this.currentDocVersion(docPath, raw);
 
     await appendTurn(docPath, threadId, {
       role: "you",
@@ -377,7 +486,7 @@ export class Orchestrator {
         threadId,
         agentMeta: spec.agentMeta,
         docVersion,
-        context: spec.context,
+        context: { ...spec.context, raw },
         invoke: spec.invoke,
         onToken: spec.onToken,
         afterContext: spec.afterContext,
@@ -397,16 +506,28 @@ export class Orchestrator {
       piSessionId: sessionId,
       frontmatter: true,
     });
-    if (!spec.skipProposalPersist && turn.proposal) {
+    if (!spec.skipProposalPersist && turn.proposal && !this.liveTurn(docPath, threadId)?.cancelled) {
       // Every runTurn caller is a conversation turn (discuss/reply/resume/branch). Runners
       // don't offer them an edit tool, but if one returns a proposal anyway it is only ever
-      // recorded for review — never applied, even in Editing mode.
-      await this.proposals.submit(docPath, spec.ann.id, turn.proposal, spec.onToken, { reviewOnly: true });
+      // recorded for review — never applied, even in Editing mode. A stopped turn records none.
+      await this.proposals.submit(docPath, spec.ann.id, turn.proposal, spec.onToken, {
+        reviewOnly: true,
+        baseBody: documentBody(raw, docPath),
+      });
     }
     return { turn, sessionId };
   }
 
-  async discuss(docPath: string, args: DiscussArgs, onToken?: TokenSink): Promise<void> {
+  discuss(docPath: string, args: DiscussArgs, onToken?: TokenSink): Promise<void> {
+    return this.holding(async (claim) => {
+      claim(docPath, args.threadId);
+      await this.discussTurn(docPath, args, onToken);
+      // A fresh session was told the thread's stance from the start.
+      this.unsteeredStance.delete(cancelKeyFor(docPath, args.threadId));
+    });
+  }
+
+  private async discussTurn(docPath: string, args: DiscussArgs, onToken?: TokenSink): Promise<void> {
     const harness = await this.harnessForDoc(docPath);
     const ann = (await readAnnotations(docPath)).annotations.find(
       (a) => a.id === args.annotationId,
@@ -454,9 +575,22 @@ export class Orchestrator {
    * one-you-turn-per-invoke shape `runTurn` assumes): it calls the shared `runAgentStep`
    * core directly, once per model, and owns its own running/responded/error bracketing
    * around the whole loop. The harness is resolved ONCE up front (not re-resolved per
-   * model), so every model's invoke shares the identical runner instance.
+   * model), so every model's invoke shares the identical runner instance. Stop ends the
+   * loop: the model that was answering keeps whatever it said, the rest are never asked.
    */
-  async panel(
+  panel(
+    docPath: string,
+    args: DiscussArgs,
+    modelIds: string[],
+    onToken?: TokenSink,
+  ): Promise<void> {
+    return this.holding(async (claim) => {
+      claim(docPath, args.threadId);
+      await this.panelTurn(docPath, args, modelIds, onToken);
+    });
+  }
+
+  private async panelTurn(
     docPath: string,
     args: DiscussArgs,
     modelIds: string[],
@@ -492,6 +626,7 @@ export class Orchestrator {
     let lastSessionId: string | null = null;
     try {
       for (const mid of modelIds) {
+        if (this.liveTurn(docPath, args.threadId)?.cancelled) break;
         const tagged: TokenSink | undefined = onToken
           ? (e) => onToken({ ...e, model: mid })
           : undefined;
@@ -543,8 +678,23 @@ export class Orchestrator {
    * so nothing exists yet for `runAgentStep`'s `appendTurn` to write into, and a failed pass
    * produces a wholly different system-note-only transcript (`recordAgentError`) instead of
    * transitioning an existing thread to "error" — see `runTurn`'s doc comment.
+   *
+   * The review session is not recorded on any thread: it runs with review-only tools
+   * (add_review_finding) over the whole doc. A reply to a finding, or to the umbrella
+   * thread, starts its own anchored conversation from the transcript instead.
    */
-  async review(
+  review(
+    docPath: string,
+    args: ReviewArgs,
+    onToken?: TokenSink,
+  ): Promise<{ batchId: string; findings: MaterializedFinding[] }> {
+    return this.holding(async (claim) => {
+      claim(docPath, "review");
+      return this.reviewPass(docPath, args, onToken);
+    });
+  }
+
+  private async reviewPass(
     docPath: string,
     args: ReviewArgs,
     onToken?: TokenSink,
@@ -552,8 +702,12 @@ export class Orchestrator {
     const { db, now } = this.deps;
     const harness = await this.harnessForDoc(docPath);
     const runner = harness.runner;
+    // The document the reviewer reads: every finding's proposal is checked against it.
+    const raw = await readFile(docPath, "utf8");
+    const baseBody = documentBody(raw, docPath);
     const context = await buildAgentContext({
       docPath,
+      raw,
       threadId: "review",
       stance: args.stance,
       comment: args.rubric?.trim()
@@ -575,8 +729,8 @@ export class Orchestrator {
       await this.recordAgentError(docPath, "review", "Review pass", e);
       throw e;
     }
-    const { sessionId, turn } = reviewStarted;
-    await transition({ db, docPath }, "review", "responded", { piSessionId: sessionId });
+    const { turn } = reviewStarted;
+    await transition({ db, docPath }, "review", "responded", { piSessionId: null });
     // Openable umbrella thread for the review pass (findings are also filed as comments).
     await initThread(docPath, {
       id: "review",
@@ -650,7 +804,7 @@ export class Orchestrator {
         meta: args.stance,
         body: f.comment,
       });
-      await transition({ db, docPath }, id, "responded", { piSessionId: sessionId });
+      await transition({ db, docPath }, id, "responded", { piSessionId: null });
 
       // If the finding proposes a concrete edit, persist it as a pending proposal on
       // this thread (reusing the normal proposal pipeline). Streamed as a finding event
@@ -663,7 +817,7 @@ export class Orchestrator {
           ...(f.edits && f.edits.length ? { hunks: f.edits } : {}),
           ...(f.fullRewrite !== undefined ? { fullRewrite: f.fullRewrite } : {}),
         };
-        const submitted = await this.proposals.submit(docPath, id, proposal, undefined, { silent: true });
+        const submitted = await this.proposals.submit(docPath, id, proposal, undefined, { silent: true, baseBody });
         proposalId = submitted.proposal.id;
         applied = submitted.applied;
       }
@@ -708,9 +862,30 @@ export class Orchestrator {
    * has never applied that fallback. A directive's failure is swallowed (`recordAgentError`)
    * and does not abort the other directives' jobs — this is why it can't route through
    * `runTurn`, which always rethrows.
+   *
+   * One pass per document at a time: a second would number its directives from 1 again
+   * and collide on the same directive-N threads. Each directive's proposal is checked
+   * against the body this pass read, so in Editing mode a full rewrite from one
+   * directive can't overwrite another's already-applied edit.
    */
   async resolveDirectives(
     docPath: string,
+    onToken?: TokenSink,
+  ): Promise<{ count: number; proposed: boolean; applied: number; reply: string }> {
+    if (this.directivePasses.has(docPath)) {
+      throw new Error("inline directives are already being resolved for this document");
+    }
+    this.directivePasses.add(docPath);
+    try {
+      return await this.holding((claim) => this.directivesPass(docPath, claim, onToken));
+    } finally {
+      this.directivePasses.delete(docPath);
+    }
+  }
+
+  private async directivesPass(
+    docPath: string,
+    claim: ClaimThread,
     onToken?: TokenSink,
   ): Promise<{ count: number; proposed: boolean; applied: number; reply: string }> {
     const { db, now } = this.deps;
@@ -719,6 +894,8 @@ export class Orchestrator {
     const body = matter(await readFile(docPath, "utf8")).content;
     const directives = findDirectives(body);
     if (directives.length === 0) return { count: 0, proposed: false, applied: 0, reply: "" };
+    // All of them up front: a reply still running in an earlier pass's directive-N refuses the pass.
+    directives.forEach((_, i) => claim(docPath, `directive-${i + 1}`));
 
     const settings = await readSettings(docPath);
     const folder = dirname(docPath);
@@ -791,14 +968,15 @@ export class Orchestrator {
           },
           onToken,
         });
-        const submitted = turn.proposal
-          ? await this.proposals.submit(docPath, threadId, turn.proposal, onToken)
-          : undefined;
+        const submitted =
+          turn.proposal && !this.liveTurn(docPath, threadId)?.cancelled
+            ? await this.proposals.submit(docPath, threadId, turn.proposal, onToken, { baseBody: body })
+            : undefined;
         await transition({ db, docPath }, threadId, "responded", {
           piSessionId: sessionId,
           frontmatter: true,
         });
-        return { proposed: turn.proposal !== undefined, applied: !!submitted?.applied, reply: rawReply };
+        return { proposed: submitted !== undefined, applied: !!submitted?.applied, reply: rawReply };
       } catch (e) {
         await transition({ db, docPath }, threadId, "error", {
           piSessionId: null,
@@ -818,7 +996,21 @@ export class Orchestrator {
     };
   }
 
-  async reply(
+  reply(
+    docPath: string,
+    threadId: string,
+    message: string,
+    onToken?: TokenSink,
+    stance?: string,
+    modelId?: string,
+  ): Promise<void> {
+    return this.holding(async (claim) => {
+      claim(docPath, threadId);
+      await this.replyTurn(docPath, threadId, message, onToken, stance, modelId);
+    });
+  }
+
+  private async replyTurn(
     docPath: string,
     threadId: string,
     message: string,
@@ -829,11 +1021,13 @@ export class Orchestrator {
     let thread = await readThread(docPath, threadId);
     const harness = await this.harnessForDoc(docPath, thread.frontmatter.harness);
     const sid = this.liveSessionId(threadId, harness);
-    if (!sid) {
+    if (!sid || (modelId && modelId !== thread.frontmatter.model)) {
       // The live pi session is gone — either after a doc reopen (the thread
       // transcript persists but the in-memory session does not) or because a
       // sidecar restart left a stale id the runner no longer holds. Rebuild a
       // fresh session seeded with the prior turns as replayable history, then continue.
+      // A reply asking for a different model does the same: a live session is bound to
+      // the model it was started with, so continuing it would silently ignore the ask.
       return this.resumeFromTranscript(docPath, threadId, message, onToken, stance, modelId);
     }
     // Directive/review-umbrella threads (and any other thread with no persisted
@@ -845,19 +1039,26 @@ export class Orchestrator {
     const ann = (await readAnnotations(docPath)).annotations.find((a) => a.id === threadId);
 
     // Mid-thread stance change: persist it and prepend the new instruction so the
-    // already-running agent session actually adopts the new stance.
+    // already-running agent session actually adopts the new stance. The steer is owed
+    // until a reply carrying it succeeds — a failed one leaves the stance on disk
+    // already switched, so without the flag the retry would never tell the session.
+    const steerKey = cancelKeyFor(docPath, threadId);
     let agentMessage = message;
     if (stance && stance !== thread.frontmatter.stance) {
       await this.switchStance(docPath, threadId, stance);
       thread = await readThread(docPath, threadId);
-      agentMessage = `(Your stance is now — ${stancePrompt(stance)})\n\n${message}`;
+      this.unsteeredStance.add(steerKey);
+    }
+    if (this.unsteeredStance.has(steerKey)) {
+      agentMessage = `(Your stance is now — ${stancePrompt(thread.frontmatter.stance)})\n\n${message}`;
     }
 
     // Deferred reject feedback: any earlier proposal the reviewer rejected rides along
-    // with this reply (once). Prepend it ahead of the stance prefix so the agent reads
-    // "don't repeat these rejected edits" before the new instruction.
-    const rejectPrefix = await this.proposals.rejectFeedbackPrefix(docPath, threadId);
-    if (rejectPrefix) agentMessage = rejectPrefix + agentMessage;
+    // with this reply (once — marked delivered only after the reply succeeds). Prepend it
+    // ahead of the stance prefix so the agent reads "don't repeat these rejected edits"
+    // before the new instruction.
+    const feedback = await this.proposals.pendingRejectFeedback(docPath, threadId);
+    if (feedback.prefix) agentMessage = feedback.prefix + agentMessage;
 
     await this.runTurn(docPath, {
       threadId,
@@ -883,6 +1084,8 @@ export class Orchestrator {
       }),
       onToken,
     });
+    this.unsteeredStance.delete(steerKey);
+    await this.proposals.markRejectFeedbackDelivered(docPath, feedback.proposalIds);
   }
 
   /**
@@ -918,10 +1121,11 @@ export class Orchestrator {
       effectiveStance = stance;
     }
 
-    // Deferred reject feedback rides along with this (resumed) reply, once. Prepend it
-    // to the comment so the fresh session reads it ahead of the new instruction.
-    const rejectPrefix = await this.proposals.rejectFeedbackPrefix(docPath, threadId);
-    const agentComment = rejectPrefix + message;
+    // Deferred reject feedback rides along with this (resumed) reply, once — marked
+    // delivered only after the reply succeeds. Prepend it to the comment so the fresh
+    // session reads it ahead of the new instruction.
+    const feedback = await this.proposals.pendingRejectFeedback(docPath, threadId);
+    const agentComment = feedback.prefix + message;
 
     await this.runTurn(docPath, {
       threadId,
@@ -949,6 +1153,14 @@ export class Orchestrator {
       invoke: (runner, ctx, tok) => runner.start(ctx, tok),
       onToken,
     });
+    // The fresh session was given the thread's current stance in its context.
+    this.unsteeredStance.delete(cancelKeyFor(docPath, threadId));
+    await this.proposals.markRejectFeedbackDelivered(docPath, feedback.proposalIds);
+    // A model named for this reply is now the thread's model: later replies, and a
+    // resume after a reopen or on Codex, keep using it.
+    if (modelId && modelId !== thread.frontmatter.model) {
+      await updateThreadFrontmatter(docPath, threadId, { model: modelId });
+    }
   }
 
   /**
@@ -971,8 +1183,12 @@ export class Orchestrator {
         : await readFile(docPath, "utf8");
       return { baseText, baseVersion: baseVersion ?? undefined };
     }
+    // Snapshot what is read (deduped against the latest version): the latest version on
+    // record may predate this text (an edit made outside the app) or not exist yet, and
+    // the branch must be stamped with exactly the text it reasoned about — a later
+    // "at-turn" fork of it restores this version.
     const baseText = await readFile(docPath, "utf8");
-    const baseVersion = (await latestVersionId(docPath)) ?? undefined;
+    const baseVersion = (await snapshot(docPath, baseText, { cause: "branch-base", at: this.deps.now() })).id;
     return { baseText, baseVersion };
   }
 
@@ -983,12 +1199,27 @@ export class Orchestrator {
    * "latest" (current doc) or "at-turn" (the doc version active when that turn was made).
    * Prior turns (before the edited one) are copied verbatim and replayed as history.
    */
-  async branch(
+  branch(
     docPath: string,
     parentThreadId: string,
     atTurnIndex: number,
     editedMessage: string,
     opts: { doc: "latest" | "at-turn"; modelId?: string },
+    onToken?: TokenSink,
+  ): Promise<{ branchThreadId: string }> {
+    // The parent is only read; the new thread is claimed once its id is allocated.
+    return this.holding((claim) =>
+      this.branchTurn(docPath, parentThreadId, atTurnIndex, editedMessage, opts, claim, onToken),
+    );
+  }
+
+  private async branchTurn(
+    docPath: string,
+    parentThreadId: string,
+    atTurnIndex: number,
+    editedMessage: string,
+    opts: { doc: "latest" | "at-turn"; modelId?: string },
+    claim: ClaimThread,
     onToken?: TokenSink,
   ): Promise<{ branchThreadId: string }> {
     const { now } = this.deps;
@@ -1031,6 +1262,7 @@ export class Orchestrator {
       ...(this.deps.author ? { author: this.deps.author } : {}),
     }));
     const branchId = branchAnn.id;
+    claim(docPath, branchId);
 
     // Effective model: explicit override, else the parent thread's model, else the
     // per-doc settings default; persisted on the branch and threaded into its context.
@@ -1177,7 +1409,18 @@ export class Orchestrator {
    * Ask the agent to rewrite the highlighted text using the discussion so far.
    * Returns the proposed replacement (not applied — the user reviews a diff first).
    */
-  async improve(
+  improve(
+    docPath: string,
+    threadId: string,
+    onToken?: TokenSink,
+  ): Promise<{ newText: string; proposalId?: string; applied?: boolean }> {
+    return this.holding(async (claim) => {
+      claim(docPath, threadId);
+      return this.improveTurn(docPath, threadId, onToken);
+    });
+  }
+
+  private async improveTurn(
     docPath: string,
     threadId: string,
     onToken?: TokenSink,
@@ -1203,8 +1446,11 @@ export class Orchestrator {
     const discussed = history.some((t) => t.role === "agent");
     const htmlDoc = isHtmlDoc(docPath);
 
+    // The text the rewrite is made from: an HTML proposal is checked against it.
+    const raw = await readFile(docPath, "utf8");
     const context = await buildAgentContext({
       docPath,
+      raw,
       ann,
       threadId,
       annotationId: threadId,
@@ -1233,6 +1479,15 @@ export class Orchestrator {
           : { ...context, replacementOnly: true, improveMode: true, conversationOnly: false },
         onToken,
       );
+      // Stop resolves a Pi turn normally with whatever had streamed — an empty or cut-off
+      // rewrite. Applying that in Editing mode would delete or truncate the passage, so a
+      // stopped Improve submits nothing, and neither does one that came back empty.
+      if (this.liveTurn(docPath, threadId)?.cancelled) {
+        throw new Error("Improve was stopped — nothing was changed");
+      }
+      if (!htmlDoc && !started.turn.reply.trim()) {
+        throw new Error("the agent returned no replacement text — nothing was changed");
+      }
       if (htmlDoc && !started.turn.proposal) {
         throw new Error(
           "HTML Improve requires a structured proposal so the edit can be validated before approval",
@@ -1241,7 +1496,9 @@ export class Orchestrator {
       return started;
     });
     if (htmlDoc && turn.proposal) {
-      const submitted = await this.proposals.submit(docPath, threadId, turn.proposal, onToken);
+      const submitted = await this.proposals.submit(docPath, threadId, turn.proposal, onToken, {
+        baseBody: documentBody(raw, docPath),
+      });
       return {
         newText: proposalPreview(turn.proposal),
         proposalId: submitted.proposal.id,
@@ -1257,7 +1514,18 @@ export class Orchestrator {
    * Ask the agent for a diagram (mermaid) that visualizes the highlighted text,
    * using the discussion so far. Returns the fenced code block (not applied).
    */
-  async visualize(
+  visualize(
+    docPath: string,
+    threadId: string,
+    onToken?: TokenSink,
+  ): Promise<{ diagram: string }> {
+    return this.holding(async (claim) => {
+      claim(docPath, threadId);
+      return this.visualizeTurn(docPath, threadId, onToken);
+    });
+  }
+
+  private async visualizeTurn(
     docPath: string,
     threadId: string,
     onToken?: TokenSink,
@@ -1325,17 +1593,24 @@ export class Orchestrator {
     const finalized: string[] = [];
     const errored: string[] = [];
     for (const row of this.deps.db.listByStatus("running")) {
+      // A turn running in this process right now is not stuck: openDoc runs on every
+      // tab switch and reload, often while turns are in flight.
+      if (this.liveTurn(docPath, row.threadId)) continue;
       try {
         const thread = await readThread(docPath, row.threadId);
         const last = thread.turns[thread.turns.length - 1];
+        // The thread file exists, so its frontmatter status is brought along too: it
+        // still says "running" after a crash, and the card's Retry keys off it.
         if (last && last.role === "agent") {
           await transition({ db: this.deps.db, docPath }, row.threadId, "responded", {
             piSessionId: row.piSessionId,
+            frontmatter: true,
           });
           finalized.push(row.threadId);
         } else {
           await transition({ db: this.deps.db, docPath }, row.threadId, "error", {
             piSessionId: row.piSessionId,
+            frontmatter: true,
             error: "interrupted — sidecar restarted",
           });
           errored.push(row.threadId);

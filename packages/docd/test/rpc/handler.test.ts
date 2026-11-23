@@ -1,6 +1,6 @@
-import { describe, it, expect, beforeEach, afterEach } from "vitest";
+import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import { mkdtemp, rm, writeFile, readFile, access } from "node:fs/promises";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { hadPaths } from "../../src/had/paths.js";
 import { tmpdir } from "node:os";
 import { join, basename } from "node:path";
@@ -18,6 +18,7 @@ import {
   initThread,
   appendTurn,
 } from "../../src/index.js";
+import type { AgentRunner } from "../../src/agent/types.js";
 
 let dir: string;
 let docPath: string;
@@ -734,5 +735,86 @@ describe("RpcHandler", () => {
     const zipCur = new AdmZip(outCur);
     const docEntryCur = zipCur.getEntries().find((e) => e.entryName === basename(docPath))!;
     expect(docEntryCur.getData().toString("utf8")).toContain("live doc body now");
+  });
+
+});
+
+/** A runner whose start() waits until the test finishes it; cancel() resolves it like PiRunner. */
+function gatedRunner() {
+  const parked: { key?: string; resolve: (r: { reply: string }) => void }[] = [];
+  const cancelled: string[] = [];
+  let seq = 0;
+  const runner: AgentRunner = {
+    async start(ctx) {
+      const turn = await new Promise<{ reply: string }>((resolve) => parked.push({ key: ctx.cancelKey, resolve }));
+      return { sessionId: `g-${++seq}`, turn };
+    },
+    async send() {
+      throw new Error("unused");
+    },
+    async cancel(key) {
+      cancelled.push(key);
+      for (const p of parked.splice(0)) {
+        if (p.key === key) p.resolve({ reply: "" });
+        else parked.push(p);
+      }
+    },
+  };
+  return { runner, parked, cancelled };
+}
+
+describe("RpcHandler — turns in flight", () => {
+  it("openDoc while a turn is running does not mark that turn interrupted", async () => {
+    const g = gatedRunner();
+    const h = new RpcHandler({ runner: g.runner, now: () => "t" });
+    try {
+      const turn = h.handle({
+        id: "d1",
+        method: "discuss",
+        params: { docPath, threadId: "c0001", annotationId: "c0001", stance: "none", comment: "q" },
+      });
+      await vi.waitFor(() => expect(g.parked).toHaveLength(1));
+      await h.handle({ id: "o1", method: "openDoc", params: { docPath } });
+      const mid = await h.handle({ id: "l1", method: "listTasks", params: { docPath } });
+      expect((mid.ok ? (mid.result as { threadId: string; status: string }[]) : []).find((t) => t.threadId === "c0001")?.status).toBe("running");
+
+      g.parked.shift()!.resolve({ reply: "a" });
+      expect((await turn).ok).toBe(true);
+      const after = await h.handle({ id: "l2", method: "listTasks", params: { docPath } });
+      expect((after.ok ? (after.result as { threadId: string; status: string }[]) : []).find((t) => t.threadId === "c0001")?.status).toBe("responded");
+    } finally {
+      h.closeAll();
+    }
+  });
+
+  it("deleteAnnotation stops the comment's running turn and drops its task", async () => {
+    const g = gatedRunner();
+    const h = new RpcHandler({ runner: g.runner, now: () => "t" });
+    try {
+      const turn = h.handle({
+        id: "d1",
+        method: "discuss",
+        params: { docPath, threadId: "c0001", annotationId: "c0001", stance: "none", comment: "q" },
+      });
+      await vi.waitFor(() => expect(g.parked).toHaveLength(1));
+      const del = await h.handle({ id: "x1", method: "deleteAnnotation", params: { docPath, id: "c0001" } });
+      expect(del.ok).toBe(true);
+      expect(g.cancelled).toEqual([`${docPath}#c0001`]);
+      await turn;
+
+      const tasks = await h.handle({ id: "l1", method: "listTasks", params: { docPath } });
+      expect(tasks.ok ? (tasks.result as { threadId: string }[]).map((t) => t.threadId) : ["?"]).not.toContain("c0001");
+      await expect(access(hadPaths(docPath).threadFile("c0001"))).rejects.toThrow();
+    } finally {
+      h.closeAll();
+    }
+  });
+
+  it("openDoc on a missing file fails without creating any sidecar state", async () => {
+    const ghost = join(dir, "moved-away.md");
+    const res = await handler.handle({ id: "g1", method: "openDoc", params: { docPath: ghost } });
+    expect(res.ok).toBe(false);
+    expect(res.ok ? "" : res.error).toMatch(/ENOENT|no such file/);
+    expect(existsSync(hadPaths(ghost).dir)).toBe(false);
   });
 });

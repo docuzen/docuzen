@@ -75,19 +75,24 @@ export class ProposalService {
    * themselves (a review finding rides its own "finding" event). `reviewOnly` keeps the
    * proposal pending even in Editing mode — for conversation turns, which must never
    * change the document whatever the mode and whatever the runner returned.
+   *
+   * `baseBody` is the document body the agent was given (see `documentBody`), captured
+   * BEFORE the agent ran. Its hash gates approval: if the user saved, or another edit
+   * was applied, while the agent worked, approving refuses instead of writing an edit
+   * made against text that is no longer there. Reading the body here, after the turn,
+   * would stamp the edit with the newer text and wave it through.
    */
   async submit(
     docPath: string,
     threadId: string,
     edit: ProposedEdit,
-    onToken?: TokenSink,
-    opts: { silent?: boolean; reviewOnly?: boolean } = {},
+    onToken: TokenSink | undefined,
+    opts: { baseBody: string; silent?: boolean; reviewOnly?: boolean },
   ): Promise<SubmittedEdit> {
     // Normalize to display/apply hunks: targeted edits ride through verbatim; a full
-    // rewrite is diffed against the CURRENT body for display, but the exact body is
-    // kept in fullText so apply writes it verbatim (no diff round-trip). The body's
-    // hash is the base the edit was made against: it gates approval (staleness).
-    const body = documentBody(await readFile(docPath, "utf8"), docPath);
+    // rewrite is diffed against the base body for display, but the exact body is
+    // kept in fullText so apply writes it verbatim (no diff round-trip).
+    const body = opts.baseBody;
     const fullText = edit.fullRewrite;
     const edits: EditHunk[] = fullText !== undefined ? diffToHunks(body, fullText) : (edit.hunks ?? []);
     const proposal = await appendProposal(docPath, threadId, (id) => ({
@@ -289,14 +294,19 @@ export class ProposalService {
   /**
    * Build the deferred reject-feedback prefix for a thread: any proposals the reviewer
    * REJECTED but that haven't yet been delivered to the agent. Mirrors the mid-thread
-   * stance re-injection — the prefix rides along with the NEXT agent message, and each
-   * rejection is marked delivered so it's sent exactly once. Returns "" when none pend.
+   * stance re-injection — the prefix rides along with the NEXT agent message. Nothing is
+   * marked delivered here: the caller does that with `markRejectFeedbackDelivered` once
+   * the turn carrying the prefix succeeds, so a failed turn sends it again on the retry.
+   * Returns an empty prefix (and no ids) when none pend.
    */
-  async rejectFeedbackPrefix(docPath: string, threadId: string): Promise<string> {
+  async pendingRejectFeedback(
+    docPath: string,
+    threadId: string,
+  ): Promise<{ prefix: string; proposalIds: string[] }> {
     const pending = (await listProposals(docPath, threadId)).filter(
       (p) => p.status === "rejected" && !p.delivered,
     );
-    if (pending.length === 0) return "";
+    if (pending.length === 0) return { prefix: "", proposalIds: [] };
     let prefix =
       "(The reviewer rejected your earlier proposed edit(s) — do not repeat them; reconsider:\n";
     for (const p of pending) {
@@ -314,8 +324,12 @@ export class ProposalService {
       }
     }
     prefix += ")\n\n";
-    for (const p of pending) await updateProposal(docPath, p.id, { delivered: true });
-    return prefix;
+    return { prefix, proposalIds: pending.map((p) => p.id) };
+  }
+
+  /** Record that a turn carrying these rejections' feedback reached the agent. */
+  async markRejectFeedbackDelivered(docPath: string, proposalIds: string[]): Promise<void> {
+    for (const id of proposalIds) await updateProposal(docPath, id, { delivered: true });
   }
 
   /**
