@@ -6,7 +6,8 @@
 // wires its own listeners lazily on first open (this module does no
 // module-scope `document.querySelector`, matching editor.ts/surface.ts/
 // shell.ts's own DOM-query-timing convention), and reuses ui.ts's wireModal for
-// backdrop-click-to-close — the one piece of shared modal plumbing this needs.
+// backdrop-click-to-close (routed through close(), like the button and Escape) — the
+// one piece of shared modal plumbing this needs.
 //
 // Not wired into surface.ts's own "Visualize" preview mermaid render (the
 // proposed-diagram box in the chat pane) or any other mermaid renderer — only
@@ -123,10 +124,13 @@ function zoomBy(factor: number, clientX?: number, clientY?: number): void {
   zoomTo(scale * factor, clientX, clientY);
 }
 
+/** Every way out (button, Escape, backdrop) comes through here: drop the clone, end any drag. */
 function close(): void {
   modalEl.hidden = true;
-  stageEl.replaceChildren();
+  stageEl.replaceChildren(); // the clone repeats the diagram's element ids
   contentEl = null;
+  dragging = false;
+  stageEl.classList.remove("dragging");
 }
 
 /** WebKit fires this proprietary event family alongside a synthetic ctrlKey
@@ -195,7 +199,7 @@ function ensureWired(): void {
   const resetBtn = document.querySelector<HTMLButtonElement>("#mermaidLbReset")!;
   const closeBtn = document.querySelector<HTMLButtonElement>("#mermaidLbClose")!;
 
-  wireModal(modalEl); // click the darkened backdrop (outside the surface) to close
+  wireModal(modalEl, close); // click the darkened backdrop (outside the surface) to close
   closeBtn.addEventListener("click", close);
   zoomInBtn.addEventListener("click", () => zoomBy(BUTTON_ZOOM_FACTOR));
   zoomOutBtn.addEventListener("click", () => zoomBy(1 / BUTTON_ZOOM_FACTOR));

@@ -94,7 +94,7 @@ describe("editor.ts wires the expand button as a DISTINCT affordance", () => {
 describe("mermaid-lightbox.ts reuses ui.ts's wireModal for backdrop-click-to-close", () => {
   it("imports and calls wireModal instead of hand-rolling its own backdrop listener", () => {
     expect(lightboxSource).toContain('import { wireModal } from "./ui.js";');
-    expect(lightboxSource).toContain("wireModal(modalEl);");
+    expect(lightboxSource).toContain("wireModal(modalEl, close);");
   });
 
   it("closes on Escape while open, and ignores it while already closed", () => {

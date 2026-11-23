@@ -43,18 +43,21 @@ export function el<K extends keyof HTMLElementTagNameMap>(
 
 /**
  * Wire a modal's backdrop-click-to-close behavior: clicking the modal element
- * itself (i.e. outside the dialog box it contains) hides it. Replaces the 5
- * near-identical `modal.addEventListener("click", (e) => { if (e.target ===
- * modal) modal.hidden = true; })` listeners.
+ * itself (i.e. outside the dialog box it contains) hides it — or, when the modal
+ * has its own close routine (state to reset on close), calls `close` instead.
+ * Replaces the 5 near-identical `modal.addEventListener("click", (e) => { if
+ * (e.target === modal) modal.hidden = true; })` listeners.
  *
  * NOT adopted at every modal: the version-picker modal's backdrop click calls
  * `closeVersionPicker(null)`, which ALSO resolves a pending Promise — a real
  * behavioral difference from "just hide it" that this helper deliberately does
  * not support (see task-1-report.md).
  */
-export function wireModal(modal: HTMLElement): void {
+export function wireModal(modal: HTMLElement, close?: () => void): void {
   modal.addEventListener("click", (e) => {
-    if (e.target === modal) modal.hidden = true;
+    if (e.target !== modal) return;
+    if (close) close();
+    else modal.hidden = true;
   });
 }
 
