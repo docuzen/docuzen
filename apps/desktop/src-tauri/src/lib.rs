@@ -45,15 +45,15 @@ pub fn run() {
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
         .setup(|app| {
-            // Packaged builds spawn the bundled sidecar and tell the webview
-            // its port. Dev builds keep the beforeDevCommand tsx sidecar and
-            // the VITE_DOCD_PORT path — state stays None.
+            // Packaged builds spawn the bundled sidecar and tell the webview its port and
+            // launch token. Dev builds keep the beforeDevCommand tsx sidecar and the
+            // VITE_DOCD_PORT / VITE_DOCD_TOKEN path — state stays None.
             let mut init_script = String::new();
             if !cfg!(debug_assertions) {
                 let dir = app.path().resource_dir()?.join("sidecar");
                 match sidecar::start(&dir) {
                     Ok(h) => {
-                        init_script = format!("window.__DOCD_PORT__ = {};", h.port());
+                        init_script = sidecar::init_script(h.port(), h.token());
                         app.manage(SidecarState(Mutex::new(Some(h))));
                     }
                     Err(e) => {

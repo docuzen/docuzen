@@ -21,4 +21,10 @@ tauri-build = { version = "2", features = [] }
 tauri = { version = "2", features = [] }
 tauri-plugin-opener = "2"
 tauri-plugin-dialog = "2"
+# The per-launch docd token comes from the OS RNG.
+getrandom = "0.3"
+
+[target.'cfg(unix)'.dependencies]
+# kill(2) on the sidecar's process group: std can only SIGKILL a single child.
+libc = "0.2"
 
