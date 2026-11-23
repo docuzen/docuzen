@@ -5,6 +5,7 @@
 import { resolveAnchor } from "@ai-native-doc/docd/anchor";
 import type { TextQuoteAnchor } from "@ai-native-doc/docd/anchor";
 import { buildHtmlProjection, rangeForOffsets } from "./html-projection.js";
+import { setInjectedAttr } from "./html-surface.js";
 
 /** Elements a figure can sit next to as a sibling. */
 const BLOCKS = new Set([
@@ -39,7 +40,7 @@ export function insertDiagramIntoHtmlDoc(doc: Document, anchor: TextQuoteAnchor,
   const figure = doc.createElement("figure");
   figure.className = "docuzen-diagram";
   figure.setAttribute("data-mermaid-source", mermaidSource);
-  figure.setAttribute("contenteditable", "false"); // one unit while editing; stripped on save
+  setInjectedAttr(figure, "contenteditable", "false"); // one unit while editing; stripped on save
   figure.setAttribute("style", "margin:1.5em 0;text-align:center;overflow-x:auto");
   figure.innerHTML = svg;
 
