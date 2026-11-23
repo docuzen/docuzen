@@ -19,6 +19,17 @@ export function shouldShowFirstRun(config: AppConfig): boolean {
   return config.harness === null;
 }
 
+/**
+ * The config to save for the harness picked in the modal: the existing config with the
+ * harness set (and, for pi, the picked model). Sections the user already has, such as a
+ * `[codex] command` or a `[pi] model` when no model is picked here, are kept.
+ */
+export function configWithHarness(current: AppConfig, harness: "pi" | "codex", piModel: string): AppConfig {
+  const config: AppConfig = { ...current, harness: { default: harness } };
+  if (harness === "pi" && piModel) config.pi = { ...current.pi, model: piModel };
+  return config;
+}
+
 /** Which harness the setup modal should preselect, given what is usable on this machine. */
 export function pickUsableHarness(
   models: { key: string; hasKey?: boolean }[],
@@ -34,7 +45,16 @@ async function restartSidecar(): Promise<void> {
   await tauri?.core?.invoke?.("restart_sidecar");
 }
 
-export async function maybeShowFirstRun(client: FirstRunClient, log: (line: string) => void): Promise<void> {
+export interface FirstRunOptions {
+  /** Called once the choice is saved and the sidecar restarted (main.ts refreshes the harness badge). */
+  onConfigured?: () => void;
+}
+
+export async function maybeShowFirstRun(
+  client: FirstRunClient,
+  log: (line: string) => void,
+  opts: FirstRunOptions = {},
+): Promise<void> {
   let state: { config: AppConfig; piUsable: boolean; codexUsable: boolean };
   try {
     state = (await client.call("getAppConfig", {})) as typeof state;
@@ -98,10 +118,7 @@ export async function maybeShowFirstRun(client: FirstRunClient, log: (line: stri
   saveBtn.addEventListener("click", () => {
     void (async () => {
       saveBtn.disabled = true;
-      const config: AppConfig =
-        harnessSel.value === "codex"
-          ? { harness: { default: "codex" } }
-          : { harness: { default: "pi" }, pi: modelSel.value ? { model: modelSel.value } : {} };
+      const config = configWithHarness(state.config, harnessSel.value === "codex" ? "codex" : "pi", modelSel.value);
       try {
         await client.call("setAppConfig", { config });
       } catch (e) {
@@ -116,6 +133,7 @@ export async function maybeShowFirstRun(client: FirstRunClient, log: (line: stri
       } catch (e) {
         log(`sidecar restart failed (config saved — restart the app to apply): ${String(e)}`);
       }
+      opts.onConfigured?.();
     })();
   });
 
