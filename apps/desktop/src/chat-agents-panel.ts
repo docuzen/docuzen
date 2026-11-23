@@ -20,14 +20,16 @@ export interface AgentsPanelDeps {
 }
 
 export interface AgentsPanelApi {
-  /** Show a task as live before the backend's TaskDB row exists (autosave/model-start latency). */
-  setOptimisticTask: (threadId: string, status: TaskRow["status"]) => void;
-  clearOptimisticTask: (threadId: string) => void;
+  /** Show a task on `docPath` (default: the active document) as live before the backend's TaskDB row exists (autosave/model-start latency). */
+  setOptimisticTask: (threadId: string, status: TaskRow["status"], docPath?: string) => void;
+  clearOptimisticTask: (threadId: string, docPath?: string) => void;
   refreshAgents: () => Promise<void>;
   /** Human label for a task's thread id (comment quote, or a name for pseudo-threads). */
   taskTitle: (threadId: string) => string;
   /** Instant "something started" feedback on the button; the poll reconciles the real count. */
   markStarting: () => void;
+  /** The active document changed: show its tasks, not the previous document's. */
+  reset: () => void;
 }
 
 export function initAgentsPanel(deps: AgentsPanelDeps): AgentsPanelApi {
@@ -35,20 +37,38 @@ export function initAgentsPanel(deps: AgentsPanelDeps): AgentsPanelApi {
   const agentsPanel = document.querySelector<HTMLDivElement>("#agentsPanel")!;
   let agentsPoll: number | null = null;
 
-  // Tasks started from the UI before the backend's TaskDB poll catches up. This keeps the
-  // dropdown honest during autosave/model-start latency instead of showing only old rows.
-  const optimisticTasks = new Map<string, TaskRow>();
+  // Tasks started from the UI before the backend's TaskDB poll catches up, per document
+  // (thread ids like "review" repeat across documents). This keeps the dropdown honest
+  // during autosave/model-start latency instead of showing only old rows.
+  const optimisticTasks = new Map<string, Map<string, TaskRow>>();
+  const optimisticFor = (docPath: string): Map<string, TaskRow> => {
+    let m = optimisticTasks.get(docPath);
+    if (!m) optimisticTasks.set(docPath, (m = new Map()));
+    return m;
+  };
 
-  function setOptimisticTask(threadId: string, status: TaskRow["status"]): void {
+  function setOptimisticTask(threadId: string, status: TaskRow["status"], docPath = deps.getDocPath()): void {
+    if (!docPath) return;
     // piSessionId is unknown until the backend's TaskDB row exists; null is the
     // canonical "no session yet" value (matches the real row's shape once it lands).
-    optimisticTasks.set(threadId, { threadId, status, piSessionId: null, updatedAt: new Date().toISOString() });
+    optimisticFor(docPath).set(threadId, { threadId, status, piSessionId: null, updatedAt: new Date().toISOString() });
     void refreshAgents();
   }
 
-  function clearOptimisticTask(threadId: string): void {
-    optimisticTasks.delete(threadId);
+  function clearOptimisticTask(threadId: string, docPath = deps.getDocPath()): void {
+    if (docPath) optimisticTasks.get(docPath)?.delete(threadId);
     void refreshAgents();
+  }
+
+  // Listings come back out of order (the open panel polls every 1.5s, the badge every 2s)
+  // and can outlive a document switch: render one only if it is for the document on
+  // screen and newer than the last one rendered.
+  let listingSeq = 0;
+  let renderedSeq = 0;
+  function isFresh(seq: number, docPath: string): boolean {
+    if (seq < renderedSeq || deps.getDocPath() !== docPath) return false;
+    renderedSeq = seq;
+    return true;
   }
 
   /** Human label for a task's thread id (comment quote, or a name for pseudo-threads). */
@@ -74,13 +94,14 @@ export function initAgentsPanel(deps: AgentsPanelDeps): AgentsPanelApi {
    * — they used to be computed two different ways (badge from raw server rows, panel from
    * the merge), which is exactly how the badge and panel fell out of sync in practice.
    */
-  async function mergedTasks(): Promise<TaskRow[]> {
-    const tasks = await deps.api.listTasks({});
+  async function mergedTasks(docPath: string): Promise<TaskRow[]> {
+    const tasks = await deps.api.listTasks({ docPath });
     const byId = new Map(tasks.map((t) => [t.threadId, t]));
     const now = Date.now();
-    for (const [id, t] of optimisticTasks) {
+    const optimistic = optimisticFor(docPath);
+    for (const [id, t] of optimistic) {
       if (now - Date.parse(t.updatedAt) > OPTIMISTIC_TASK_TTL_MS) {
-        optimisticTasks.delete(id); // stale placeholder — its RPC never settled
+        optimistic.delete(id); // stale placeholder — its RPC never settled
         continue;
       }
       // If the real backend task exists, it wins; otherwise show the optimistic task.
@@ -92,8 +113,12 @@ export function initAgentsPanel(deps: AgentsPanelDeps): AgentsPanelApi {
   }
 
   async function refreshAgents(): Promise<void> {
-    if (!deps.getDocPath()) {
+    const docPath = deps.getDocPath();
+    const seq = ++listingSeq;
+    if (!docPath) {
+      renderedSeq = seq;
       agentsPanel.replaceChildren();
+      updateAgentsBadge([]);
       const empty = document.createElement("div");
       empty.className = "agentsempty";
       empty.textContent = "No document open.";
@@ -102,11 +127,13 @@ export function initAgentsPanel(deps: AgentsPanelDeps): AgentsPanelApi {
     }
     let tasks: TaskRow[];
     try {
-      tasks = await mergedTasks();
+      tasks = await mergedTasks(docPath);
     } catch (e) {
       reportError("agents load", e, deps.log);
       return;
     }
+    if (!isFresh(seq, docPath)) return;
+    const optimistic = optimisticFor(docPath);
     agentsPanel.replaceChildren();
     updateAgentsBadge(tasks);
 
@@ -155,7 +182,7 @@ export function initAgentsPanel(deps: AgentsPanelDeps): AgentsPanelApi {
         // us THIS row object is the placeholder rather than a same-id real row that already
         // won the merge (a real row always wins — mergedTasks never overwrites one with its
         // optimistic counterpart), so real rows stay clickable throughout their lifecycle.
-        if (optimisticTasks.get(t.threadId) === t) {
+        if (optimistic.get(t.threadId) === t) {
           row.title = "Starting…";
         } else {
           row.classList.add("clickable");
@@ -202,13 +229,16 @@ export function initAgentsPanel(deps: AgentsPanelDeps): AgentsPanelApi {
     // The open panel's own (faster) poll already updates the badge, and nobody can see
     // it while the window is hidden — skip the duplicate listTasks round-trip.
     if (agentsPoll !== null || document.hidden) return;
-    if (!deps.getDocPath()) {
-      agentsBtn.textContent = "Agents";
-      agentsBtn.classList.remove("busy");
+    const docPath = deps.getDocPath();
+    const seq = ++listingSeq;
+    if (!docPath) {
+      renderedSeq = seq;
+      updateAgentsBadge([]);
       return;
     }
     try {
-      updateAgentsBadge(await mergedTasks());
+      const tasks = await mergedTasks(docPath);
+      if (isFresh(seq, docPath)) updateAgentsBadge(tasks);
     } catch {
       /* ignore transient poll errors */
     }
@@ -249,5 +279,10 @@ export function initAgentsPanel(deps: AgentsPanelDeps): AgentsPanelApi {
     agentsBtn.classList.add("busy");
   }
 
-  return { setOptimisticTask, clearOptimisticTask, refreshAgents, taskTitle, markStarting };
+  function reset(): void {
+    if (!agentsPanel.hidden) void refreshAgents();
+    else void refreshAgentsBadge();
+  }
+
+  return { setOptimisticTask, clearOptimisticTask, refreshAgents, taskTitle, markStarting, reset };
 }

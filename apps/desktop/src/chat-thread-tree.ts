@@ -16,7 +16,8 @@ export interface ThreadTreeDeps {
   getActiveChatId: () => string | null;
   /** Every comment thread currently in the rail, in rail order. */
   comments: () => Iterable<{ id: string; quoted: string; parent?: string }>;
-  promoteToChat: (id: string) => Promise<void>;
+  /** Open a thread in the chat pane — a comment thread with its highlight, any other (a directive's branch) as a plain conversation. */
+  openThread: (id: string) => Promise<void>;
   /** Append an element at the end of the transcript (the pager sits under its turn). */
   appendToTurns: (el: HTMLElement) => void;
   /** Called with every fresh (non-stale) thread listing — the rail restores card state from it. */
@@ -57,7 +58,7 @@ export function initThreadTree(deps: ThreadTreeDeps): ThreadTreeApi {
   let treeRefreshQueued = false;
 
   chatThreadSelectEl.addEventListener("change", () => {
-    if (chatThreadSelectEl.value) void deps.promoteToChat(chatThreadSelectEl.value);
+    if (chatThreadSelectEl.value) void deps.openThread(chatThreadSelectEl.value);
   });
 
   function refreshThreadSelect(): void {
@@ -84,6 +85,7 @@ export function initThreadTree(deps: ThreadTreeDeps): ThreadTreeApi {
     if (treeRefreshQueued) return;
     treeRefreshQueued = true;
     queueMicrotask(() => {
+      if (!treeRefreshQueued) return; // a direct refreshThreadTree() already took its place
       treeRefreshQueued = false;
       void refreshThreadTree();
     });
@@ -92,25 +94,31 @@ export function initThreadTree(deps: ThreadTreeDeps): ThreadTreeApi {
   /**
    * Fetch the discussion-thread lineage from the server and render it as a nested
    * branch tree into `#threadTree`. Roots are nodes with no parent (or whose parent
-   * isn't in the set); children indent by depth. Each row promotes its thread into
-   * the chat pane on click; the 📄 chip opens the version preview.
+   * isn't in the set); children indent by depth. Each row opens its thread in the
+   * chat pane on click; the 📄 chip opens the version preview.
    */
   async function refreshThreadTree(): Promise<void> {
     const gen = ++treeGen;
-    if (!deps.getDocPath()) {
+    // A direct refresh is the newest listing: a scheduled one would only supersede it
+    // (and make a caller awaiting this one — runBranch, before it shows the pager —
+    // resolve on a discarded result).
+    treeRefreshQueued = false;
+    const docPath = deps.getDocPath();
+    if (!docPath) {
       threadNodes = [];
       threadTreeEl.innerHTML = "";
       return;
     }
     let nodes: ThreadNode[];
     try {
-      nodes = await deps.api.listThreads({});
+      nodes = await deps.api.listThreads({ docPath });
     } catch (e) {
       if (gen !== treeGen) return; // stale: a newer call took over, discard
       reportError("thread tree load", e, deps.log);
       return;
     }
     if (gen !== treeGen) return; // stale: a newer call took over, discard
+    if (deps.getDocPath() !== docPath) return; // the document changed under it (belt and braces: resetChat bumps treeGen too)
     threadNodes = nodes;
     deps.onNodes(nodes);
     renderThreadTree();
@@ -167,7 +175,7 @@ export function initThreadTree(deps: ThreadTreeDeps): ThreadTreeApi {
         row.appendChild(chip);
       }
 
-      row.addEventListener("click", () => void deps.promoteToChat(node.id));
+      row.addEventListener("click", () => void deps.openThread(node.id));
       threadTreeEl.appendChild(row);
       for (const kid of kids) renderNode(kid, depth + 1);
     };
@@ -212,7 +220,7 @@ export function initThreadTree(deps: ThreadTreeDeps): ThreadTreeApi {
 
   /**
    * A ChatGPT-style version pager rendered under a forked "you" turn: `‹ k / n › ⑂`.
-   * Flipping the arrows promotes the previous/next sibling thread into the chat pane
+   * Flipping the arrows opens the previous/next sibling thread in the chat pane
    * (which re-renders and recomputes the pager, keeping it in sync).
    */
   function renderVersionPager(sibs: ThreadNode[], currentId: string): void {
@@ -233,10 +241,10 @@ export function initThreadTree(deps: ThreadTreeDeps): ThreadTreeApi {
     label.className = "vp-label";
     label.textContent = ` ${k + 1} / ${sibs.length}  ⑂`;
     prev.addEventListener("click", () => {
-      if (k > 0) void deps.promoteToChat(sibs[k - 1].id);
+      if (k > 0) void deps.openThread(sibs[k - 1].id);
     });
     next.addEventListener("click", () => {
-      if (k < sibs.length - 1) void deps.promoteToChat(sibs[k + 1].id);
+      if (k < sibs.length - 1) void deps.openThread(sibs[k + 1].id);
     });
     row.append(prev, label, next);
     deps.appendToTurns(row); // sits right under the just-rendered turn

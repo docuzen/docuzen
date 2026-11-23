@@ -38,7 +38,7 @@ export function insertBlockAfterQuote(
   return `${before}\n\n${block}\n${after}`;
 }
 
-export type SelectionAgentActionsDeps = Pick<HtmlSurfaceDeps, "activateChatPane" | "api" | "appendCustomTurn" | "beginExclusiveTurn" | "chatTurn" | "endExclusiveTurn" | "getCurrentMarkdown" | "getDocPath" | "getFormat" | "getHtmlSurface" | "getModelId" | "getStance" | "log" | "markDiscussed" | "modelName" | "nextMermaidSeq" | "reloadActiveDoc" | "routeProposal" | "scrollTurnsToBottom" | "setChatBusy" | "setChip" | "streamingAgentTurn">;
+export type SelectionAgentActionsDeps = Pick<HtmlSurfaceDeps, "activateChatPane" | "api" | "appendCustomTurn" | "beginExclusiveTurn" | "chatTurn" | "getCurrentMarkdown" | "getDocPath" | "getFormat" | "getHtmlSurface" | "getModelId" | "getStance" | "log" | "markDiscussed" | "modelName" | "nextMermaidSeq" | "reloadActiveDoc" | "routeProposal" | "scrollTurnsToBottom" | "setChip">;
 
 export interface SelectionAgentActionsApi {
   runBrainstorm: (id: string, quoted: string) => Promise<void>;
@@ -46,46 +46,56 @@ export interface SelectionAgentActionsApi {
 }
 
 export function initSelectionAgentActions(deps: SelectionAgentActionsDeps): SelectionAgentActionsApi {
-  /** See ui.ts's lastAgentReply (shared with the other pane module). */
-  const fetchLastAgentReply = (threadId: string) => lastAgentReply(deps.api, deps.getDocPath, threadId);
+  /** See ui.ts's lastAgentReply — read from the turn's own document, whatever is active now. */
+  const fetchLastAgentReply = (docPath: string, threadId: string) =>
+    lastAgentReply({ getThread: (p) => deps.api.getThread({ ...p, docPath }) }, () => docPath, threadId);
 
-  /** Stream a one-shot discuss turn into the chat pane (used by Brainstorm). */
+  /**
+   * Stream a one-shot discuss turn into the chat pane (used by Brainstorm). Like every
+   * agent turn it is bound to the document it started on (see send-queue.ts's
+   * ExclusiveTurn): after the user switches tabs it touches nothing on screen.
+   */
   async function runBrainstorm(id: string, quoted: string): Promise<void> {
     if (!deps.getDocPath()) return;
-    if (!deps.beginExclusiveTurn(id, "brainstorm")) return;
+    const turn = deps.beginExclusiveTurn(id, "brainstorm"); // also shows Stop: cancelKey docPath#<id>
+    if (!turn) return;
     let ok = false;
     deps.activateChatPane(id, quoted);
     deps.chatTurn("you", "Brainstorm options for this passage.");
-    const bubble = deps.streamingAgentTurn(deps.getStance());
+    const stance = deps.getStance();
+    const bubble = turn.bubble(stance);
     const modelId = deps.getModelId();
     deps.setChip(id, "running");
-    deps.setChatBusy(id); // show Stop; cancelKey for discuss is docPath#<id>
     try {
       await deps.api.discuss(
         {
+          docPath: turn.docPath,
           threadId: id,
           annotationId: id,
-          stance: deps.getStance(),
+          stance,
           comment:
             "Brainstorm options, alternatives, and improvements for this passage. Give a concise bulleted list.",
           ...(modelId ? { modelId } : {}),
         },
         (e: RpcEvent) => {
+          if (!turn.isCurrent()) return;
           if (deps.routeProposal(e)) return;
           bubble.onEvent(e);
         },
       );
-      bubble.done(await fetchLastAgentReply(id));
+      const finalText = await fetchLastAgentReply(turn.docPath, id);
+      if (!turn.isCurrent()) return; // persisted; the document re-reads it when reopened
+      bubble.done(finalText);
       deps.markDiscussed(id);
       deps.setChip(id, "responded");
       ok = true;
     } catch (e) {
+      reportError("brainstorm", e, deps.log);
+      if (!turn.isCurrent()) return;
       bubble.fail(String(e));
       deps.setChip(id, "error");
-      reportError("brainstorm", e, deps.log);
     } finally {
-      deps.setChatBusy(null);
-      deps.endExclusiveTurn(id, ok);
+      turn.end(ok);
     }
   }
 
@@ -122,7 +132,9 @@ export function initSelectionAgentActions(deps: SelectionAgentActionsDeps): Sele
   /** Stream a visualize turn into a proposal-style box; offer Insert into doc. */
   async function runVisualize(id: string, quoted: string, anchor: TextQuoteAnchor): Promise<void> {
     if (!deps.getDocPath()) return;
-    if (!deps.beginExclusiveTurn(id, "visualize")) return;
+    const turn = deps.beginExclusiveTurn(id, "visualize"); // also shows Stop: cancelKey docPath#<id>
+    if (!turn) return;
+    const docPath = turn.docPath;
     deps.activateChatPane(id, quoted);
     const box = document.createElement("div");
     box.className = "proposal";
@@ -135,14 +147,15 @@ export function initSelectionAgentActions(deps: SelectionAgentActionsDeps): Sele
     const insertBtn = box.querySelector<HTMLButtonElement>(".papply")!;
     box.querySelector<HTMLButtonElement>(".preject")!.addEventListener("click", () => box.remove());
     deps.appendCustomTurn(box);
+    turn.track(box); // re-shown if the thread is re-opened while the diagram streams
 
-    deps.setChatBusy(id); // show Stop; cancelKey for visualize is docPath#<id>
     let result: { diagram: string };
     // Until the diagram source starts streaming, say what is happening and for how long.
     const status = startWaitStatus(pre, "Waiting for the model…");
     let streaming = false;
     try {
-      result = await deps.api.visualize({ threadId: id }, (e) => {
+      result = await deps.api.visualize({ docPath, threadId: id }, (e) => {
+        if (!turn.isCurrent()) return;
         if (e.event === "thinking") status.set("The agent is thinking…");
         if (e.event === "token") {
           if (!streaming) {
@@ -151,7 +164,7 @@ export function initSelectionAgentActions(deps: SelectionAgentActionsDeps): Sele
             pre.textContent = "";
           }
           pre.textContent += String(e.data);
-          deps.scrollTurnsToBottom();
+          if (box.isConnected) deps.scrollTurnsToBottom();
         }
       });
     } catch (e) {
@@ -159,9 +172,9 @@ export function initSelectionAgentActions(deps: SelectionAgentActionsDeps): Sele
       return;
     } finally {
       status.stop();
-      deps.setChatBusy(null);
-      deps.endExclusiveTurn(id, true); // adds no conversation turn; queued messages may proceed
+      turn.end(true); // adds no conversation turn; queued messages may proceed
     }
+    if (!turn.isCurrent()) return; // its box went with its document's pane
 
     const block = extractFencedBlock(result.diagram);
     if (!block.trim()) {
@@ -176,8 +189,10 @@ export function initSelectionAgentActions(deps: SelectionAgentActionsDeps): Sele
     void renderMermaidInto(preview, mermaidSource(block)); // show the actual diagram
     insertBtn.disabled = false;
     insertBtn.addEventListener("click", async () => {
-      const docPath = deps.getDocPath();
-      if (!docPath) return;
+      // The diagram goes into the document it was made for, read from the surface on
+      // screen — so only while that document is the one on screen.
+      const stillHere = (): boolean => deps.getDocPath() === docPath;
+      if (!stillHere()) return;
       insertBtn.disabled = true;
       try {
         let newText: string;
@@ -190,15 +205,16 @@ export function initSelectionAgentActions(deps: SelectionAgentActionsDeps): Sele
           // A document-unique id: mermaid scopes the SVG's styles to it.
           const svgId = `docuzen-diagram-${Date.now().toString(36)}-${deps.nextMermaidSeq()}`;
           const { svg } = await mermaid.render(svgId, mermaidSource(block));
+          if (!stillHere()) throw new Error("the document was switched — open it again to insert the diagram");
           insertDiagramIntoHtmlDoc(doc, anchor, svg, mermaidSource(block));
           newText = surface.getHtml();
         } else {
           newText = insertBlockAfterQuote(deps.getCurrentMarkdown(), anchor, block);
         }
-        await deps.api.saveDoc({ text: newText });
+        await deps.api.saveDoc({ docPath, text: newText });
         deps.log(`inserted diagram for ${id}`);
         box.remove();
-        await deps.reloadActiveDoc();
+        if (stillHere()) await deps.reloadActiveDoc();
       } catch (e) {
         reportError("diagram insert", e, deps.log);
         // Say so in the box: the log is not somewhere a reviewer looks.

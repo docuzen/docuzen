@@ -25,7 +25,7 @@ function sourceBetween(source: string, start: string, end: string): string {
 
 const streamingAgentTurnSource = sourceBetween(
   chatSource,
-  "function streamingAgentTurn(meta?: string, modelId?: string): {",
+  "function streamingAgentTurn(meta?: string, modelId?: string",
   "\n  /**\n   * True while `threadId` has a turn actually in flight",
 );
 
@@ -72,9 +72,9 @@ describe("streamingAgentTurn's fail()/empty-reply bubbles: real detail prominent
 
 describe("streamingAgentTurn call sites pass the actual model driving each bubble", () => {
   it("dispatchQueuedTurn (discuss/reply) passes item.modelId alongside item.stance", () => {
-    expect(chatSource).toContain(
-      "const bubble = isActive ? streamingAgentTurn(item.stance, item.modelId) : null;",
-    );
+    expect(chatSource).toContain("const bubble = turnBubble(t, item.stance, item.modelId);");
+    // turnBubble hands both straight to the transcript's streamingAgentTurn.
+    expect(chatSource).toContain("const bubble = streamingAgentTurn(meta, modelId, { detached: !isShown(t) });");
   });
 
   it("runBranch passes its resolved modelId alongside the stance", () => {
@@ -84,7 +84,7 @@ describe("streamingAgentTurn call sites pass the actual model driving each bubbl
       "latestBtn.addEventListener",
     );
     expect(runBranchSource).toContain("const modelId = chatModelEl.value || undefined;");
-    expect(runBranchSource).toContain("const bubble = streamingAgentTurn(chatStanceEl.value, modelId);");
+    expect(runBranchSource).toContain("const bubble = turn.bubble(chatStanceEl.value, modelId);");
   });
 
   it("runCardAskAgent passes its resolved modelId alongside the stance", () => {
@@ -97,10 +97,10 @@ describe("streamingAgentTurn call sites pass the actual model driving each bubbl
     expect(cardSource).toContain("modelId: modelSel.value || undefined");
     // ...and the pane-side flow labels the bubble with that stance + model.
     const flowSource = sourceBetween(chatSource, "async function askAgentFromCard(", "async function resendFromCard(");
-    expect(flowSource).toContain("const bubble = streamingAgentTurn(ask.stance, ask.modelId);");
+    expect(flowSource).toContain("const bubble = turn.bubble(ask.stance, ask.modelId);");
   });
 
   it("the panel fan-out passes the same per-bubble model id it already uses as meta", () => {
-    expect(chatSource).toContain("b = streamingAgentTurn(modelName(model) || model, model);");
+    expect(chatSource).toContain("b = turn.bubble(modelName(model) || model, model);");
   });
 });

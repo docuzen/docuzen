@@ -67,8 +67,8 @@ export interface CommentCardsApi {
     reviewMeta?: { origin?: string; severity?: string; kind?: string },
   ) => void;
   registerBranchEntry: (branchId: string, quoted: string, parentId: string) => void;
-  /** Drop a thread's entry, its card, and its branch children. False if it wasn't registered. */
-  removeEntry: (id: string) => boolean;
+  /** Drop a thread's entry, its card, and every branch forked from it (at any depth). Returns the ids dropped — none if it wasn't registered. */
+  removeEntry: (id: string) => string[];
   setChip: (id: string, status: CardStatus) => void;
   /** Chip + Ask-agent button label/enabled state for one card. */
   setCommentActionState: (entry: CommentEntry, status: CardStatus) => void;
@@ -166,6 +166,9 @@ export function initCommentCards(deps: CommentCardsDeps): CommentCardsApi {
     const discussBtn = card.querySelector<HTMLButtonElement>(".discuss")!;
     const chip = card.querySelector<HTMLSpanElement>(".chip")!;
     input.value = body;
+    // The card belongs to the document it was drawn for: a blur that lands after a tab
+    // switch (the card is being torn down) still saves the draft to ITS document.
+    const docPath = deps.getDocPath();
 
     const entry: CommentEntry = {
       id,
@@ -201,8 +204,8 @@ export function initCommentCards(deps: CommentCardsDeps): CommentCardsApi {
     });
 
     input.addEventListener("blur", () => {
-      if (deps.getDocPath() && !entry.discussed) {
-        void deps.api.saveComment({ id, anchorExact: quoted, body: input.value }).catch(() => {});
+      if (docPath && !entry.discussed) {
+        void deps.api.saveComment({ docPath, id, anchorExact: quoted, body: input.value }).catch(() => {});
       }
     });
 
@@ -266,15 +269,23 @@ export function initCommentCards(deps: CommentCardsDeps): CommentCardsApi {
     deps.onRegistryChanged();
   }
 
-  function removeEntry(id: string): boolean {
+  function removeEntry(id: string): string[] {
     const entry = comments.get(id);
-    if (!entry) return false;
+    if (!entry) return [];
     entry.card.remove();
     comments.delete(id);
-    // Drop registry-only branch entries forked from this thread (no card/decoration).
-    for (const [bid, e] of comments) if (e.parent === id) comments.delete(bid);
+    // Drop the registry-only branch entries forked from this thread (no card/decoration),
+    // and the branches forked from those.
+    const removed = [id];
+    for (let i = 0; i < removed.length; i++) {
+      for (const [bid, e] of comments) {
+        if (e.parent !== removed[i]) continue;
+        comments.delete(bid);
+        removed.push(bid);
+      }
+    }
     deps.onRegistryChanged();
-    return true;
+    return removed;
   }
 
   function applyThreadNodes(nodes: ThreadNode[]): void {

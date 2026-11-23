@@ -37,18 +37,20 @@ describe("Agents badge/panel single source of truth (item 5)", () => {
   );
 
   it("refreshAgents (the panel) renders from mergedTasks, not a raw listTasks call", () => {
-    expect(refreshAgentsSource).toContain("await mergedTasks()");
+    expect(refreshAgentsSource).toContain("await mergedTasks(docPath)");
     expect(refreshAgentsSource).not.toContain("await deps.api.listTasks(");
   });
 
   it("refreshAgentsBadge (the 2s poll) renders from the SAME mergedTasks function as the panel", () => {
-    expect(refreshAgentsBadgeSource).toContain("updateAgentsBadge(await mergedTasks())");
+    expect(refreshAgentsBadgeSource).toContain("const tasks = await mergedTasks(docPath);");
+    expect(refreshAgentsBadgeSource).toContain("updateAgentsBadge(tasks)");
     expect(refreshAgentsBadgeSource).not.toContain("await deps.api.listTasks(");
   });
 
   it("mergedTasks is the one place that merges server rows with optimistic placeholders", () => {
-    expect(mergedTasksSource).toContain("await deps.api.listTasks({})");
-    expect(mergedTasksSource).toContain("optimisticTasks");
+    // Both for ONE document — rows and placeholders of another document never mix in (M30).
+    expect(mergedTasksSource).toContain("await deps.api.listTasks({ docPath })");
+    expect(mergedTasksSource).toContain("const optimistic = optimisticFor(docPath);");
     // A real backend row wins over a same-id optimistic placeholder.
     expect(mergedTasksSource).toContain("if (!byId.has(id)) byId.set(id, t);");
   });
@@ -63,7 +65,7 @@ describe("Optimistic task lifecycle (item 6)", () => {
 
   it("sweeps optimistic placeholders past a TTL even if their RPC never settled", () => {
     expect(mergedTasksSource).toContain("OPTIMISTIC_TASK_TTL_MS");
-    expect(mergedTasksSource).toContain("optimisticTasks.delete(id)");
+    expect(mergedTasksSource).toContain("optimistic.delete(id)");
   });
 
   it("defines the TTL as roughly 5 minutes", () => {
@@ -81,9 +83,9 @@ describe("Optimistic task lifecycle (item 6)", () => {
       "async function runReview(",
       "reviewRunEl.addEventListener",
     );
-    expect(runReviewSource).toContain("setOptimisticTask(\"review\", \"running\")");
+    expect(runReviewSource).toContain("setOptimisticTask(\"review\", \"running\", docPath)");
     const finallyBlock = sourceBetween(runReviewSource, "} finally {", "\n  }");
-    expect(finallyBlock).toContain('clearOptimisticTask("review")');
+    expect(finallyBlock).toContain('clearOptimisticTask("review", docPath)');
   });
 
   it("clears the directives optimistic task via runStreamingTurn's onSettled (fires on rejection too)", () => {
@@ -92,9 +94,9 @@ describe("Optimistic task lifecycle (item 6)", () => {
       "async function runResolveDirectives(",
       "resolveDirectivesBtn.addEventListener",
     );
-    expect(runResolveSource).toContain('setOptimisticTask("directives", "running")');
+    expect(runResolveSource).toContain('setOptimisticTask("directives", "running", docPath)');
     const onSettled = sourceBetween(runResolveSource, "onSettled: () => {", "},");
-    expect(onSettled).toContain('clearOptimisticTask("directives")');
+    expect(onSettled).toContain('clearOptimisticTask("directives", docPath)');
   });
 });
 
@@ -142,15 +144,15 @@ describe("Agents panel row click respects optimistic vs real rows", () => {
 
   it("gates clickability on referential identity against the live optimisticTasks entry", () => {
     // A real backend TaskRow always wins the mergedTasks() merge over a same-id
-    // optimistic placeholder, so `optimisticTasks.get(t.threadId) === t` is true ONLY
-    // while `t` is still the un-reconciled placeholder object itself.
-    expect(renderGroupSource).toContain("optimisticTasks.get(t.threadId) === t");
+    // optimistic placeholder, so `optimistic.get(t.threadId) === t` (this document's
+    // placeholders) is true ONLY while `t` is still the un-reconciled placeholder object itself.
+    expect(renderGroupSource).toContain("optimistic.get(t.threadId) === t");
   });
 
   it("does not add the clickable class or a click listener to an optimistic-only row", () => {
     const optimisticBranch = sourceBetween(
       renderGroupSource,
-      "if (optimisticTasks.get(t.threadId) === t) {",
+      "if (optimistic.get(t.threadId) === t) {",
       "} else {",
     );
     expect(optimisticBranch).not.toContain("clickable");
@@ -198,7 +200,9 @@ describe("Directive/review pseudo-thread footer is repliable", () => {
   it("openThreadById shows the footer and tracks the opened thread as activeChatId", () => {
     expect(openThreadByIdSource).not.toContain("chatFootEl.hidden = true");
     expect(openThreadByIdSource).toContain("chatFootEl.hidden = false");
-    expect(openThreadByIdSource).toContain("activeChatId = id;");
+    // setPaneSubject is what sets activeChatId (and re-derives Stop, the tree and the labels).
+    expect(openThreadByIdSource).toContain("const gen = setPaneSubject(id);");
+    expect(chatSource).toContain("activeChatId = id;");
   });
 
   it("showDirectiveResult shows the footer only when a single directive thread is addressable", () => {
@@ -206,7 +210,7 @@ describe("Directive/review pseudo-thread footer is repliable", () => {
     // Conditional: visible for the 1-directive case (real reply target), hidden for
     // the N≠1 summary banner where Send would have no thread to address.
     expect(showDirectiveResultSource).toContain("chatFootEl.hidden = threadId === undefined;");
-    expect(showDirectiveResultSource).toContain("activeChatId = threadId ?? null;");
+    expect(showDirectiveResultSource).toContain("setPaneSubject(threadId ?? null);");
   });
 
   it("the single-directive no-proposal outcome passes that directive's threadId through", () => {
@@ -232,7 +236,8 @@ describe("Directive/review pseudo-thread footer is repliable", () => {
     // pseudo-thread; it's gone, and discuss() only fires for a real, undiscussed entry.
     expect(dispatchSource).not.toContain("if (!entry) return;");
     expect(dispatchSource).toContain("if (entry && !entry.discussed) {");
-    expect(dispatchSource).toContain("if (entry) setCommentActionState(entry, \"responded\");");
+    expect(dispatchSource).toContain("if (entry) {");
+    expect(dispatchSource).toContain("setCommentActionState(entry, \"responded\");");
   });
 
   it("Improve and Panel refuse a thread with no CommentEntry — their server calls still require an annotation", () => {
@@ -253,7 +258,7 @@ describe("Directive/review pseudo-thread footer is repliable", () => {
 });
 
 describe("Directive-pass proposal events reach routeProposal unfiltered (Phase-8 T2)", () => {
-  it("resolveDirectives' onEvent forwards every event to routeProposal, gated on nothing", () => {
+  it("resolveDirectives' onEvent forwards every event to routeProposal, gated only on its document being on screen", () => {
     const runResolveSource = sourceBetween(
       chatSource,
       "async function runResolveDirectives(",
@@ -265,14 +270,16 @@ describe("Directive-pass proposal events reach routeProposal unfiltered (Phase-8
     // annotation) and proposals.ts's routeProposal/renderProposal (which already special-
     // cases `/^directive-\d+$/` thread ids for fallback placement). No filter drops
     // proposal events here; this pins that so a future refactor can't silently add one.
-    expect(runResolveSource).toContain("(e) => void deps.routeProposal(e)");
+    // The one gate (H30): a pass whose document is no longer on screen must not render
+    // its edits into the document that is — they're pending on disk for when it's reopened.
+    expect(runResolveSource).toContain("if (onScreen(docPath)) void deps.routeProposal(e);");
   });
 });
 
 describe("Streamed bubbles re-render to the persisted reply on done() (Phase-8 T2)", () => {
   const streamingAgentTurnSource = sourceBetween(
     chatSource,
-    "function streamingAgentTurn(meta?: string, modelId?: string): {",
+    "function streamingAgentTurn(meta?: string, modelId?: string",
     "  /**\n   * Replace a \"you\" turn's body with an inline editor",
   );
 
@@ -282,7 +289,10 @@ describe("Streamed bubbles re-render to the persisted reply on done() (Phase-8 T
   });
 
   it("fetchLastAgentReply delegates to ui.ts's shared lastAgentReply (behaviour tested in last-agent-reply.test.ts)", () => {
-    expect(chatSource).toContain("lastAgentReply(deps.api, deps.getDocPath, threadId)");
+    // ...reading the turn's OWN document, whatever is active by then (H27).
+    expect(chatSource).toContain(
+      "lastAgentReply({ getThread: (p) => deps.api.getThread({ ...p, docPath }) }, () => docPath, threadId)",
+    );
   });
 
   it("dispatchQueuedTurn wires fetchLastAgentReply into bubble.done() on success", () => {
@@ -293,7 +303,8 @@ describe("Streamed bubbles re-render to the persisted reply on done() (Phase-8 T
       "async function dispatchQueuedTurn(",
       "function commitSend(",
     );
-    expect(dispatchSource).toContain("bubble?.done(await fetchLastAgentReply(threadId));");
+    expect(dispatchSource).toContain("const finalText = await fetchLastAgentReply(docPath, threadId);");
+    expect(dispatchSource).toContain("bubble.done(finalText);");
   });
 
   it("the comment card's Ask-agent flow wires fetchLastAgentReply into bubble.done() too", () => {
@@ -304,7 +315,8 @@ describe("Streamed bubbles re-render to the persisted reply on done() (Phase-8 T
       "async function askAgentFromCard(",
       "async function resendFromCard(",
     );
-    expect(runCardAskAgentSource).toContain("bubble.done(await fetchLastAgentReply(id));");
+    expect(runCardAskAgentSource).toContain("const finalText = await fetchLastAgentReply(turn.docPath, id);");
+    expect(runCardAskAgentSource).toContain("bubble.done(finalText);");
   });
 
   it("the panel fan-out resolves each model's final text from ONE getThread, keyed by turn.meta", () => {
@@ -313,7 +325,9 @@ describe("Streamed bubbles re-render to the persisted reply on done() (Phase-8 T
       'chatPanelEl.addEventListener("click"',
       "// --- document-wide Agent Review Pass",
     );
-    expect(panelSource).toContain('const finalTurns = await deps.api.getThread({ threadId: id }).catch(() => null);');
+    expect(panelSource).toContain(
+      "const finalTurns = await deps.api.getThread({ docPath: turn.docPath, threadId: id }).catch(() => null);",
+    );
     expect(panelSource).toContain('tn.role === "agent" && tn.meta === model');
     expect(panelSource).toContain("bubbles.forEach((b, model) => b.done(lastReplyFor(model)));");
   });

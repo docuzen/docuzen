@@ -49,7 +49,7 @@ describe("jumpToDirective (meta/ctrl+click on a [[ ]] directive marker)", () => 
   });
 
   it("checks the thread actually exists before opening the pane", () => {
-    expect(fn).toContain("await deps.api.getThread({ threadId: id });");
+    expect(fn).toContain("await deps.api.getThread({ docPath, threadId: id });");
   });
 
   it("logs the exact hint instead of opening an empty pane when the directive was never resolved", () => {

@@ -61,7 +61,10 @@ describe("selection popover layout", () => {
 // in surface.ts, so it needs the identical fetchLastAgentReply round-trip.
 describe("Brainstorm's bubble re-renders to the persisted reply on done()", () => {
   it("uses the same shared lastAgentReply round-trip chat.ts uses (one implementation, in ui.ts)", () => {
-    expect(surfaceSource).toContain("lastAgentReply(deps.api, deps.getDocPath, threadId)");
+    // ...reading the turn's OWN document, whatever is active by then (H27).
+    expect(surfaceSource).toContain(
+      "lastAgentReply({ getThread: (p) => deps.api.getThread({ ...p, docPath }) }, () => docPath, threadId)",
+    );
   });
 
   it("runBrainstorm wires fetchLastAgentReply into bubble.done()", () => {
@@ -70,7 +73,8 @@ describe("Brainstorm's bubble re-renders to the persisted reply on done()", () =
       "async function runBrainstorm(",
       "/**\n   * Extract a fenced code block",
     );
-    expect(runBrainstormSource).toContain("bubble.done(await fetchLastAgentReply(id));");
+    expect(runBrainstormSource).toContain("const finalText = await fetchLastAgentReply(turn.docPath, id);");
+    expect(runBrainstormSource).toContain("bubble.done(finalText);");
   });
 
   it("HtmlSurfaceDeps.streamingAgentTurn's done() type accepts the optional finalText", () => {

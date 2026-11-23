@@ -16,6 +16,7 @@ import type { TextQuoteAnchor } from "@ai-native-doc/docd/anchor";
 import type { Annotation, EditHunk, RpcEvent } from "@ai-native-doc/docd/protocol";
 import { projectionOf, offsetForPos, posRangeForOffsets } from "./anchor-map.js";
 import type { SearchState } from "./search-panel.js";
+import type { ExclusiveTurn } from "./send-queue.js";
 import { initSelectionAgentActions } from "./selection-agent-actions.js";
 import { buildHtmlProjection, offsetsForRange, rangeForOffsets, wrapRange, unwrapAnno } from "./html-projection.js";
 import type { HtmlSurface } from "./html-surface.js";
@@ -121,9 +122,7 @@ export interface HtmlSurfaceDeps {
     fail: (msg: string) => void;
   };
   setChip: (id: string, status: "idle" | "running" | "responded" | "error") => void;
-  setChatBusy: (threadId: string | null) => void;
-  beginExclusiveTurn: (threadId: string, label: string) => boolean;
-  endExclusiveTurn: (threadId: string, drain: boolean) => void;
+  beginExclusiveTurn: (threadId: string, label: string) => ExclusiveTurn | null;
   markDiscussed: (id: string) => void;
   focusCommentInput: (id: string) => void;
   runImprove: (id: string) => Promise<void>;

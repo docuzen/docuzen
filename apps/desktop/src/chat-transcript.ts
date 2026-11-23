@@ -28,6 +28,10 @@ export interface StreamingTurn {
    */
   done: (finalText?: string) => void;
   fail: (msg: string) => void;
+  /** The bubble itself — in #chatTurns, or kept aside while its thread isn't the one shown. */
+  el: HTMLDivElement;
+  /** Put the bubble (back) at the end of the transcript; its phase clock carries on from the turn's start. */
+  attach: () => void;
 }
 
 export interface TranscriptApi {
@@ -41,7 +45,8 @@ export interface TranscriptApi {
     turnIndex?: number,
   ) => HTMLDivElement;
   chatTurnWithAction: (label: string, onClick: () => void) => void;
-  streamingAgentTurn: (meta?: string, modelId?: string) => StreamingTurn;
+  /** `detached`: build the bubble without putting it in the pane (its thread isn't the one shown). */
+  streamingAgentTurn: (meta?: string, modelId?: string, opts?: { detached?: boolean }) => StreamingTurn;
 }
 
 export function initTranscript(deps: TranscriptDeps): TranscriptApi {
@@ -169,12 +174,7 @@ export function initTranscript(deps: TranscriptDeps): TranscriptApi {
    * panel run, `meta` is already the model name, which is also a fine "who" — see the
    * panel call site, which passes the same value for both).
    */
-  function streamingAgentTurn(meta?: string, modelId?: string): {
-    onEvent: (e: RpcEvent) => void;
-    done: (finalText?: string) => void;
-    fail: (msg: string) => void;
-  } {
-    chatEmptyEl.hidden = true;
+  function streamingAgentTurn(meta?: string, modelId?: string, opts: { detached?: boolean } = {}): StreamingTurn {
     const t = document.createElement("div");
     t.className = "turn turn-agent working";
     // Structure via innerHTML, but the role label (meta) is user-derived (model
@@ -189,11 +189,24 @@ export function initTranscript(deps: TranscriptDeps): TranscriptApi {
     const thinkBody = t.querySelector<HTMLDivElement>(".thinkbody")!;
     const toolsEl = t.querySelector<HTMLDivElement>(".tools")!;
     const body = t.querySelector<HTMLDivElement>(".tbody")!;
-    chatTurnsEl.appendChild(t);
-    chatTurnsEl.scrollTop = chatTurnsEl.scrollHeight;
+    const spin = t.querySelector<HTMLSpanElement>(".spin")!;
+    // A bubble kept aside must not scroll (or un-empty) whatever the pane shows instead.
+    const scroll = (): void => {
+      if (t.isConnected) chatTurnsEl.scrollTop = chatTurnsEl.scrollHeight;
+    };
+    const attach = (): void => {
+      chatEmptyEl.hidden = true;
+      chatTurnsEl.appendChild(t);
+      scroll();
+    };
+    if (!opts.detached) attach();
     // Phase + elapsed seconds, so the silent stretch before the first byte isn't a bare spinner.
-    const status = startWaitStatus(t.querySelector<HTMLSpanElement>(".spin")!, WAIT_PHASE.waiting);
-    const scroll = () => (chatTurnsEl.scrollTop = chatTurnsEl.scrollHeight);
+    // The clock stops by itself while the bubble is out of the document; re-attaching restarts
+    // it from the turn's own start time and current phase.
+    const t0 = Date.now();
+    let phase: string = WAIT_PHASE.waiting;
+    let settled = false;
+    let status = startWaitStatus(spin, phase, t0);
     let replyText = "";
     // While streaming, tokens are appended to one text node — O(token), not a re-render
     // of the whole reply. The HTML-aware preview (regex scans + a sandboxed iframe per
@@ -218,8 +231,11 @@ export function initTranscript(deps: TranscriptDeps): TranscriptApi {
     return {
       onEvent: (e) => {
         const d = String(e.data);
-        const phase = phaseForEvent(e.event);
-        if (phase) status.set(phase);
+        const next = phaseForEvent(e.event);
+        if (next) {
+          phase = next;
+          status.set(next);
+        }
         if (e.event === "token") {
           replyText += d;
           if (!streamNode) {
@@ -240,7 +256,15 @@ export function initTranscript(deps: TranscriptDeps): TranscriptApi {
         }
         scroll();
       },
+      el: t,
+      attach: () => {
+        attach();
+        if (settled) return;
+        status.stop();
+        status = startWaitStatus(spin, phase, t0);
+      },
       done: (finalText) => {
+        settled = true;
         status.stop();
         t.classList.remove("working");
         t.querySelector(".spin")?.remove();
@@ -262,6 +286,7 @@ export function initTranscript(deps: TranscriptDeps): TranscriptApi {
         }
       },
       fail: (msg) => {
+        settled = true;
         body.className = "tbody agent-fail";
         renderFailBody(msg);
         status.stop();

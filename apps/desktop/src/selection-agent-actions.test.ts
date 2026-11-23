@@ -28,7 +28,10 @@ function setup(format: "markdown" | "html" = "markdown") {
     getThread: vi.fn(async () => ({ turns: [{ role: "you", body: "q" }, { role: "agent", body: "persisted list" }] })),
     saveDoc: vi.fn(async () => ({ saved: true, version: "v1" })),
   };
+  // A stand-in for chat.ts's exclusive-turn claim: one turn per thread; the bubble it
+  // hands out is the scripted one above.
   let claimed = false;
+  const turnEnd = vi.fn((_drain: boolean) => void (claimed = false));
   const deps = {
     api,
     log: vi.fn(),
@@ -41,19 +44,28 @@ function setup(format: "markdown" | "html" = "markdown") {
     nextMermaidSeq: () => 1,
     activateChatPane: vi.fn(),
     chatTurn: vi.fn(),
-    streamingAgentTurn: vi.fn(() => bubble),
     setChip: vi.fn(),
-    setChatBusy: vi.fn(),
     markDiscussed: vi.fn(),
     routeProposal: vi.fn(() => false),
     reloadActiveDoc: vi.fn(async () => {}),
     appendCustomTurn: (box: HTMLElement) => void turns.appendChild(box),
     scrollTurnsToBottom: vi.fn(),
-    beginExclusiveTurn: vi.fn(() => (claimed ? false : (claimed = true))),
-    endExclusiveTurn: vi.fn(() => void (claimed = false)),
+    beginExclusiveTurn: vi.fn((threadId: string) => {
+      if (claimed) return null;
+      claimed = true;
+      return {
+        threadId,
+        docPath: "/d/a.md",
+        isCurrent: () => true,
+        isShown: () => true,
+        bubble: vi.fn(() => bubble),
+        track: vi.fn(),
+        end: turnEnd,
+      };
+    }),
   };
   const actions = initSelectionAgentActions(deps as unknown as SelectionAgentActionsDeps);
-  return { actions, deps, api, bubble, turns, discussCall: () => discuss, visualizeCall: () => visualize };
+  return { actions, deps, api, bubble, turns, turnEnd, discussCall: () => discuss, visualizeCall: () => visualize };
 }
 const settle = async () => {
   for (let i = 0; i < 10; i++) await new Promise((r) => setTimeout(r, 0));
@@ -62,12 +74,12 @@ const anchor = { exact: "First passage here.", prefix: "", suffix: "" };
 
 describe("Brainstorm", () => {
   it("runs a discuss turn with the footer stance + model and settles the bubble on the persisted reply", async () => {
-    const { actions, deps, bubble, discussCall } = setup();
+    const { actions, deps, bubble, turnEnd, discussCall } = setup();
     const done = actions.runBrainstorm("c0001", "First passage here.");
     await settle();
 
     expect(deps.activateChatPane).toHaveBeenCalledWith("c0001", "First passage here.");
-    expect(discussCall().params).toMatchObject({ threadId: "c0001", annotationId: "c0001", stance: "critiquer", modelId: "p/m1" });
+    expect(discussCall().params).toMatchObject({ docPath: "/d/a.md", threadId: "c0001", annotationId: "c0001", stance: "critiquer", modelId: "p/m1" });
     expect(deps.setChip).toHaveBeenLastCalledWith("c0001", "running");
     discussCall().emit({ event: "token", data: "- idea" });
     expect(bubble.onEvent).toHaveBeenCalledWith({ event: "token", data: "- idea" });
@@ -77,12 +89,11 @@ describe("Brainstorm", () => {
     expect(bubble.done).toHaveBeenCalledWith("persisted list");
     expect(deps.markDiscussed).toHaveBeenCalledWith("c0001"); // the next message is a reply
     expect(deps.setChip).toHaveBeenLastCalledWith("c0001", "responded");
-    expect(deps.endExclusiveTurn).toHaveBeenCalledWith("c0001", true);
-    expect(deps.setChatBusy).toHaveBeenLastCalledWith(null);
+    expect(turnEnd).toHaveBeenCalledWith(true); // releases the thread (and its Stop)
   });
 
   it("a failure is shown in the bubble and does not drain messages queued behind it", async () => {
-    const { actions, deps, bubble, discussCall } = setup();
+    const { actions, deps, bubble, turnEnd, discussCall } = setup();
     const done = actions.runBrainstorm("c0001", "q");
     await settle();
     discussCall().reject(new Error("gateway down"));
@@ -90,7 +101,7 @@ describe("Brainstorm", () => {
     expect(bubble.fail).toHaveBeenCalledWith("Error: gateway down");
     expect(deps.setChip).toHaveBeenLastCalledWith("c0001", "error");
     expect(deps.markDiscussed).not.toHaveBeenCalled();
-    expect(deps.endExclusiveTurn).toHaveBeenCalledWith("c0001", false);
+    expect(turnEnd).toHaveBeenCalledWith(false);
   });
 
   it("does nothing while another turn is running on the thread", async () => {
@@ -106,7 +117,7 @@ describe("Visualize", () => {
   const DIAGRAM = "Here you go:\n```mermaid\nflowchart LR\n  A --> B\n```\nHope that helps.";
 
   it("renders the diagram, shows only the fenced block, and Insert writes it after the passage", async () => {
-    const { actions, api, deps, turns, visualizeCall } = setup("markdown");
+    const { actions, api, deps, turns, turnEnd, visualizeCall } = setup("markdown");
     const done = actions.runVisualize("c0001", "First passage here.", anchor);
     await settle();
     const box = turns.querySelector(".proposal")!;
@@ -123,11 +134,12 @@ describe("Visualize", () => {
     insert.click();
     await settle();
     expect(api.saveDoc).toHaveBeenCalledWith({
+      docPath: "/d/a.md",
       text: "# Title\n\nFirst passage here.\n\n```mermaid\nflowchart LR\n  A --> B\n```\n\n\nSecond paragraph.\n",
     });
     expect(deps.reloadActiveDoc).toHaveBeenCalled();
     expect(turns.querySelector(".proposal")).toBeNull();
-    expect(deps.endExclusiveTurn).toHaveBeenCalledWith("c0001", true);
+    expect(turnEnd).toHaveBeenCalledWith(true);
   });
 
   it("HTML document: Insert puts the rendered diagram in a figure after the selected block and saves the HTML", async () => {
@@ -173,13 +185,12 @@ describe("Visualize", () => {
   });
 
   it("a failed call releases the thread and shows the error", async () => {
-    const { actions, deps, turns, visualizeCall } = setup();
+    const { actions, turns, turnEnd, visualizeCall } = setup();
     const done = actions.runVisualize("c0001", "q", anchor);
     await settle();
     visualizeCall().reject(new Error("no model"));
     await done;
     expect(turns.querySelector(".pnew")!.textContent).toContain("no model");
-    expect(deps.setChatBusy).toHaveBeenLastCalledWith(null);
-    expect(deps.endExclusiveTurn).toHaveBeenCalled();
+    expect(turnEnd).toHaveBeenCalled(); // releases the thread (and its Stop)
   });
 });

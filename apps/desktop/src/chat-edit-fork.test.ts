@@ -78,7 +78,7 @@ describe("beginEditBranch: the pre-existing inline editor + Fork flow (now reach
 
   it("Fork calls the existing branchThread RPC with the turn's own persisted turns-array index — the pre-existing plumbing this task exposes, unchanged", () => {
     expect(fnSource).toContain(
-      "{ threadId: parentId, atTurnIndex: turnIndex, message, doc, ...(modelId ? { modelId } : {}) }",
+      "{ docPath: turn.docPath, threadId: parentId, atTurnIndex: turnIndex, message, doc, ...(modelId ? { modelId } : {}) }",
     );
   });
 
@@ -103,7 +103,7 @@ describe("fork disabled while the thread is busy or has queued messages (task-2-
       "function refreshEditLocks(",
     );
     expect(forkLockedSource).toContain(
-      "return sendQueue.isInFlight(threadId) || sendQueue.list(threadId).length > 0;",
+      "return scope.queue.isInFlight(threadId) || scope.queue.list(threadId).length > 0;",
     );
   });
 
@@ -128,42 +128,36 @@ describe("fork disabled while the thread is busy or has queued messages (task-2-
     expect(refreshSource).toContain("if (!activeChatId) return;");
   });
 
-  it("is recomputed at every point that can flip busy/queue state for the active thread: setChatBusy, commitSend (both branches), the queued-chip ✕ removal, and after a thread's turns render", () => {
-    const setChatBusySource = sourceBetween(
-      chatSource,
-      "function setChatBusy(threadId: string | null): void {",
-      "function clearBusyIfCurrent(",
-    );
-    expect(setChatBusySource).toContain("refreshEditLocks();");
+  it("is recomputed at every point that can flip busy/queue state for the active thread: refreshBusy, commitSend (both branches), the queued-chip ✕ removal, and after a thread's turns render", () => {
+    const refreshBusySource = sourceBetween(chatSource, "function refreshBusy(): void {", "// scope.stopped:");
+    expect(refreshBusySource).toContain("refreshEditLocks();");
 
     const commitSendSource = sourceBetween(
       chatSource,
-      "function commitSend(threadId: string, text: string): void {",
+      "function commitSend(threadId: string, text: string",
       'chatSendEl.addEventListener("click"',
     );
     // both the busy (enqueue) branch and the free (dispatch) branch refresh locks
     expect(commitSendSource.match(/refreshEditLocks\(\);/g)?.length).toBe(2);
 
-    const queuedChipSource = sourceBetween(
-      chatSource,
-      "function queuedChip(item: QueuedTurn): HTMLSpanElement {",
-      "function renderYouTurn(",
-    );
-    expect(queuedChipSource).toContain("refreshEditLocks();");
+    const removePendingSource = sourceBetween(chatSource, "function removePending(", "function pendingChip(");
+    expect(removePendingSource).toContain("refreshEditLocks();");
 
+    // promoteToChat and openThreadById both finish through renderOpenedThread.
+    const renderOpenedSource = sourceBetween(chatSource, "function renderOpenedThread(", "async function promoteToChat(");
+    expect(renderOpenedSource).toContain("refreshEditLocks();");
     const promoteToChatSource = sourceBetween(
       chatSource,
       "async function promoteToChat(id: string): Promise<void> {",
-      "chatThreadSelectEl.addEventListener",
+      'chatImproveEl.addEventListener("click"',
     );
-    expect(promoteToChatSource).toContain("refreshEditLocks();");
-
+    expect(promoteToChatSource).toContain("renderOpenedThread(id,");
     const openThreadByIdSource = sourceBetween(
       chatSource,
       "async function openThreadById(id: string, title: string): Promise<void> {",
       "async function jumpToAnnotation(",
     );
-    expect(openThreadByIdSource).toContain("refreshEditLocks();");
+    expect(openThreadByIdSource).toContain("renderOpenedThread(id,");
   });
 });
 
@@ -181,9 +175,9 @@ describe("fork affordance reaches directive-N/review pseudo-threads too (Phase 9
       "async function openThreadById(id: string, title: string): Promise<void> {",
       "async function jumpToAnnotation(",
     );
-    expect(openThreadByIdSource).toContain(
-      "thread.turns.forEach((tn, i) => chatTurn(tn.role, tn.body, tn.meta, tn.thinking, i));",
-    );
+    // Both openers render through renderThreadTurns, which passes the loop index.
+    expect(openThreadByIdSource).toContain("renderThreadTurns(id, thread, (tn) => tn.meta);");
+    expect(chatSource).toContain("chatTurn(tn.role, tn.body, agentMeta(tn), tn.thinking, i);");
     // Would break in lockstep if the shared gate ever changed shape.
     const renderTurnSource = sourceBetween(chatSource, "function renderTurn(", "function chatTurn(");
     expect(renderTurnSource).toContain('if (role === "you" && turnIndex != null) {');
