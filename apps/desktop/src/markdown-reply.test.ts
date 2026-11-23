@@ -46,4 +46,38 @@ describe("agent replies render as markdown", () => {
     expect(into.textContent).toBe("Looks fine.");
     expect(into.classList.contains("md")).toBe(true);
   });
+
+  it("renders inline and block LaTeX math in agent replies while leaving currency and code alone", () => {
+    const into = document.createElement("div");
+    renderMarkdownReply(
+      into,
+      [
+        "Latency is $T_{\\text{e2e}}$ (costs $5 and $10, code `$z$`).",
+        "",
+        "$$T_{\\text{e2e}} = \\underbrace{T_{\\text{detect}}}_{\\text{event}} + T_{\\text{prove}}$$",
+        "",
+        "Also \\(x^2 + 1\\) and:",
+        "",
+        "```math",
+        "\\sum_{i=1}^n i",
+        "```",
+      ].join("\n"),
+    );
+    expect(into.querySelectorAll(".math-reply-inline .katex").length).toBe(2);
+    expect(into.querySelectorAll(".math-reply-block .katex-display").length).toBe(2);
+    expect(into.querySelector(".katex-error")).toBeNull();
+    expect(into.textContent).toContain("$5 and $10");
+    expect(into.querySelector("code")?.textContent).toBe("$z$");
+  });
+
+  it("blocks untrusted LaTeX commands and raw HTML alongside math in agent replies", () => {
+    const into = document.createElement("div");
+    renderMarkdownReply(
+      into,
+      'See $\\href{javascript:alert(1)}{x}$ and <script>window.pwned = 1</script> and <img src=x onerror="1">.',
+    );
+    expect(into.querySelector("a, script, img")).toBeNull();
+    expect(into.querySelector(".math-reply-inline .katex")).not.toBeNull();
+    expect(into.textContent).toContain("<script>");
+  });
 });

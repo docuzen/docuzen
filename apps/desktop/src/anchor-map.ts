@@ -21,7 +21,7 @@ export interface Projection {
  * "RolloutWe enable…"), corrupting the anchor's `exact` and the agent's input.
  */
 export function assembleProjection(
-  nodes: { text: string; pos: number }[],
+  nodes: { text: string; pos: number; span?: number }[],
 ): Projection {
   let text = "";
   const posOfOffset: number[] = [];
@@ -31,17 +31,29 @@ export function assembleProjection(
       posOfOffset.push(lastEnd); // separator anchors to the block boundary
       text += "\n";
     }
-    for (let i = 0; i < node.text.length; i++) posOfOffset.push(node.pos + i);
+    const isAtom = node.span !== undefined;
+    for (let i = 0; i < node.text.length; i++) {
+      posOfOffset.push(isAtom ? node.pos : node.pos + i);
+    }
     text += node.text;
-    lastEnd = node.pos + node.text.length;
+    lastEnd = node.pos + (node.span ?? node.text.length);
   }
   return { text, posOfOffset };
 }
 
 export function buildProjection(doc: ProseNode): Projection {
-  const nodes: { text: string; pos: number }[] = [];
+  const nodes: { text: string; pos: number; span?: number }[] = [];
   doc.descendants((node: ProseNode, pos: number) => {
-    if (node.isText && node.text) nodes.push({ text: node.text, pos });
+    if (node.isText && node.text) {
+      nodes.push({ text: node.text, pos });
+    } else if (node.type.name === "math_inline") {
+      const val = String(node.attrs.value ?? "");
+      const delim = node.attrs.doubleDollar ? "$$" : "$";
+      if (val) nodes.push({ text: `${delim}${val}${delim}`, pos, span: node.nodeSize });
+    } else if (node.type.name === "math_block") {
+      const val = String(node.attrs.value ?? "");
+      if (val) nodes.push({ text: val, pos, span: node.nodeSize });
+    }
     return true;
   });
   return assembleProjection(nodes);

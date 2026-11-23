@@ -12,13 +12,16 @@ function normalizeLineEndings(text: string): string {
 export function markdownHunkToProjectionText(markdown: string): string {
   return normalizeLineEndings(markdown)
     .split("\n")
-    .map((line) =>
-      line
+    .filter((line) => !/^\s*\${2,}\s*$/.test(line))
+    .map((line) => {
+      const singleLineMath = /^\s*\$\$(.+)\$\$\s*$/.exec(line);
+      if (singleLineMath) return singleLineMath[1].trim();
+      return line
         .replace(/^\s{0,3}#{1,6}\s+/, "")
         .replace(/^\s{0,3}>\s?/, "")
         .replace(/^\s{0,3}[-*+]\s+/, "")
-        .replace(/^\s{0,3}\d+[.)]\s+/, ""),
-    )
+        .replace(/^\s{0,3}\d+[.)]\s+/, "");
+    })
     .join("\n")
     .replace(/\n{2,}/g, "\n")
     .trim();

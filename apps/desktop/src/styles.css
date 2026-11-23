@@ -2122,3 +2122,176 @@ textarea {
   pointer-events: none;
 }
 .docnotice[hidden] { display: none; }
+
+/* ===== LaTeX math rendering (doc-math.ts + markdown-reply.ts) ===== */
+.editor .ProseMirror .katex {
+  /* KaTeX's stock 1.21em is tuned for small sans-serif body text and reads
+     oversized beside the sheet's editorial serif; 1.06em matches x-height cleanly. */
+  font-size: 1.06em;
+}
+.editor .ProseMirror .math-block {
+  position: relative;
+  margin: 0.9rem 0;
+  padding: 0.4rem 0;
+  border-radius: var(--radius-md, 8px);
+  border: 1px solid transparent;
+  transition: border-color 0.12s ease, background-color 0.12s ease;
+}
+.editor .ProseMirror .math-block:hover {
+  border-color: var(--line, var(--border));
+  background: rgba(242, 238, 229, 0.35);
+}
+.editor .ProseMirror .math-block.ProseMirror-selectednode {
+  outline: 2px solid var(--accent, #7c2d33);
+  outline-offset: 2px;
+}
+.editor .ProseMirror .math-block-render {
+  overflow-x: auto;
+  overflow-y: hidden;
+  padding: 0.15rem 0.25rem;
+  scrollbar-width: thin;
+}
+.editor .ProseMirror .math-block-render .katex-display {
+  margin: 0.2em 0;
+}
+.editor .ProseMirror .math-edit-btn {
+  position: absolute;
+  top: 0.35rem;
+  right: 0.35rem;
+  width: 1.55rem;
+  height: 1.55rem;
+  line-height: 1;
+  border: 1px solid var(--line, var(--border));
+  background: var(--surface-strong, var(--bg));
+  color: var(--ink-soft, var(--muted));
+  border-radius: var(--radius-sm, 6px);
+  font-size: 0.8rem;
+  cursor: pointer;
+  opacity: 0;
+  transition: opacity 0.12s ease, color 0.12s ease, border-color 0.12s ease;
+}
+.editor .ProseMirror .math-block:hover .math-edit-btn,
+.editor .ProseMirror .math-edit-btn:focus-visible {
+  opacity: 1;
+}
+.editor .ProseMirror .math-edit-btn:hover {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+.editor .ProseMirror .math-block.editing {
+  border-color: var(--accent-line, var(--border));
+  background: var(--surface, #fbf8f2);
+  padding: 0.6rem 0.75rem;
+}
+.math-editor {
+  display: flex;
+  flex-direction: column;
+  gap: 0.45rem;
+}
+.math-editor-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  font: 600 0.68rem/1 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  color: var(--ink-faint, var(--muted));
+}
+.math-delim {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  color: var(--ink-faint, var(--muted));
+  user-select: none;
+}
+.math-editor-hint {
+  font-family: ui-sans-serif, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  font-weight: 500;
+}
+.math-source {
+  width: 100%;
+  resize: vertical;
+  border: 1px solid var(--line-strong, var(--border));
+  border-radius: var(--radius-sm, 6px);
+  background: var(--surface-strong, #fffdf8);
+  color: var(--ink, #1f1b15);
+  padding: 0.45rem 0.6rem;
+  font: 0.84rem/1.45 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+}
+.math-source:focus {
+  outline: none;
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px var(--accent-ring, rgba(124, 45, 51, 0.16));
+}
+.math-preview {
+  overflow-x: auto;
+  overflow-y: hidden;
+  padding: 0.35rem 0.25rem 0.1rem;
+  border-top: 1px dashed var(--line, var(--border));
+}
+.math-preview .katex-display {
+  margin: 0.2em 0;
+}
+.editor .ProseMirror .math-inline {
+  display: inline-block;
+  vertical-align: baseline;
+  padding: 0 0.1em;
+  border-radius: 4px;
+  cursor: default;
+}
+.editor .ProseMirror .math-inline:hover {
+  background: rgba(242, 238, 229, 0.65);
+}
+.editor .ProseMirror .math-inline.ProseMirror-selectednode {
+  outline: 2px solid var(--accent, #7c2d33);
+  outline-offset: 1px;
+}
+.editor .ProseMirror .math-inline-display .katex-display {
+  display: inline-block;
+  margin: 0 0.15em;
+  vertical-align: middle;
+}
+.editor .ProseMirror .math-inline.editing {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.15rem;
+  padding: 0.05rem 0.25rem;
+  background: var(--surface, #fbf8f2);
+  border: 1px solid var(--accent-line, var(--border));
+  border-radius: var(--radius-sm, 6px);
+}
+.math-inline-input {
+  border: none;
+  background: transparent;
+  color: var(--ink, #1f1b15);
+  font: 0.86em/1.3 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  padding: 0;
+  min-width: 3ch;
+}
+.math-inline-input:focus {
+  outline: none;
+}
+.math-empty {
+  font: italic 0.8rem/1.4 ui-sans-serif, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  color: var(--ink-faint, var(--muted));
+}
+.math-error {
+  display: inline-block;
+  background: #fff4f4;
+  border: 1px solid #f3c0c0;
+  border-radius: 6px;
+  padding: 0.2rem 0.45rem;
+  white-space: pre-wrap;
+  font: 0.82em/1.4 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  color: #a02020;
+}
+.tbody.md .math-reply-block {
+  margin: 0.45em 0;
+  overflow-x: auto;
+  overflow-y: hidden;
+}
+.tbody.md .math-reply-block .katex-display {
+  margin: 0.2em 0;
+}
+.tbody.md .math-reply-inline {
+  display: inline-block;
+  max-width: 100%;
+  overflow-x: auto;
+  vertical-align: baseline;
+}
