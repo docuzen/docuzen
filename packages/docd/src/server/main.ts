@@ -2,6 +2,7 @@ import { userInfo } from "node:os";
 import { startServer } from "./ws-server.js";
 import { selectRunner } from "./select-runner.js";
 import { setupHarnesses } from "./harness-setup.js";
+import { newLaunchToken } from "./access.js";
 import { createCodexHarness } from "../agent/codex-runner.js";
 import { listModels } from "../agent/index.js";
 import { PiRunner } from "../agent/pi-runner.js";
@@ -14,6 +15,13 @@ import { loadShellEnvIfRequested } from "./shell-env.js";
 async function main(): Promise<void> {
   const portArg = process.argv.indexOf("--port");
   const port = portArg !== -1 ? Number(process.argv[portArg + 1]) : 0;
+
+  // The launch token: the app shell (or a dev tool) passes the one it gave the webview.
+  // Taken out of the environment before anything is spawned — harness CLIs, MCP servers
+  // and the login-shell probe have no business holding it.
+  const givenToken = process.env.DOCD_TOKEN;
+  delete process.env.DOCD_TOKEN;
+  const token = givenToken || newLaunchToken();
 
   // Before anything reads the environment (harness detection, key references).
   await loadShellEnvIfRequested();
@@ -48,8 +56,13 @@ async function main(): Promise<void> {
     registry,
     now: () => new Date().toISOString(),
     author,
+    token,
   });
 
+  // A launcher that didn't supply a token reads the generated one from here (always
+  // before the port line). A token that came from the environment is never echoed: the
+  // packaged app logs this stdout to ~/.docuzen/logs/docd.log.
+  if (!givenToken) console.log(`DOCD_TOKEN=${token}`);
   // The launcher reads this line from stdout to discover the chosen port.
   console.log(`DOCD_PORT=${server.port}`);
 

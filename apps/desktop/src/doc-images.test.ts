@@ -12,7 +12,9 @@ import {
   localImagePath,
   resolveImageSrc,
   rewriteHtmlImages,
+  sidecarImageUrl,
   storedImageName,
+  withImageFallback,
   type DocImagesDeps,
 } from "./doc-images.js";
 import { serializeDocument } from "./html-surface.js";
@@ -41,6 +43,27 @@ describe("resolving image links", () => {
     expect(resolveImageSrc(DOC, "pics/a b.png", PORT)).toBe(served("/Users/me/notes/pics/a b.png"));
     expect(resolveImageSrc(DOC, "secrets.txt", PORT)).toBe("secrets.txt");
     expect(resolveImageSrc(undefined, "pics/a.png", PORT)).toBe("pics/a.png");
+  });
+});
+
+describe("the sidecar's image URL", () => {
+  it("carries the launch token, and the fallback still finds the file path in it", async () => {
+    (globalThis as { __DOCD_TOKEN__?: string }).__DOCD_TOKEN__ = "s3cret+/";
+    try {
+      const url = resolveImageSrc(DOC, "pics/a b.png", PORT);
+      expect(url).toBe(`${served("/Users/me/notes/pics/a b.png")}&token=s3cret%2B%2F`);
+      expect(sidecarImageUrl("/x/y.png", PORT)).toBe(`${served("/x/y.png")}&token=s3cret%2B%2F`);
+      // A load failure falls back to reading the file over RPC: by its path, not the token.
+      const img = document.createElement("img");
+      const read = vi.fn(async () => ({ mime: "image/png", dataBase64: "AAAA" }));
+      withImageFallback(img, read);
+      img.setAttribute("src", url);
+      img.dispatchEvent(new Event("error"));
+      await vi.waitFor(() => expect(img.getAttribute("src")).toBe("data:image/png;base64,AAAA"));
+      expect(read).toHaveBeenCalledWith("/Users/me/notes/pics/a b.png");
+    } finally {
+      delete (globalThis as { __DOCD_TOKEN__?: string }).__DOCD_TOKEN__;
+    }
   });
 });
 

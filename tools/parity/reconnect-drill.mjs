@@ -8,6 +8,7 @@
 // starts its own Vite dev server — nothing has to be running beforehand.
 import { chromium } from "playwright";
 import { spawn } from "node:child_process";
+import { randomBytes } from "node:crypto";
 import { mkdtemp, copyFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -19,11 +20,14 @@ const WT = new URL("../..", import.meta.url).pathname;
 const configDir = await mkdtemp(join(tmpdir(), "reconnect-drill-config-"));
 await writeFile(join(configDir, "config.toml"), "[harness]\ndefault = \"pi\"\n");
 const SIDECAR_PORT = 8337;
+// One launch token for both sidecar incarnations, as the app shell keeps it across respawns:
+// the page reconnects with the token it was given.
+const TOKEN = randomBytes(32).toString("hex");
 const VITE_PORT = 4600; // distinct from parity (4501/4502), visual (4610), demo (4620)
 
 function startSidecar() {
   const child = spawn("npx", ["tsx", "packages/docd/src/server/main.ts", "--port", String(SIDECAR_PORT)],
-    { cwd: WT, env: { ...process.env, LLM_API_KEY: "", DOCUZEN_CONFIG_DIR: configDir }, stdio: ["ignore", "pipe", "inherit"], detached: true });
+    { cwd: WT, env: { ...process.env, LLM_API_KEY: "", DOCUZEN_CONFIG_DIR: configDir, DOCD_TOKEN: TOKEN }, stdio: ["ignore", "pipe", "inherit"], detached: true });
   return new Promise((res, rej) => {
     let buf = "";
     child.stdout.on("data", d => { buf += d; if (buf.includes("DOCD_PORT=")) res(child); });
@@ -44,7 +48,7 @@ async function waitForHttp(url, timeoutMs = 30_000) {
 async function startVite(docPath) {
   const child = spawn("npx", ["vite", "--port", String(VITE_PORT), "--strictPort"], {
     cwd: join(WT, "apps/desktop"),
-    env: { ...process.env, VITE_DOCD_PORT: String(SIDECAR_PORT), VITE_DOC_PATH: docPath, TAURI_DEV_HOST: "127.0.0.1" },
+    env: { ...process.env, VITE_DOCD_PORT: String(SIDECAR_PORT), VITE_DOCD_TOKEN: TOKEN, VITE_DOC_PATH: docPath, TAURI_DEV_HOST: "127.0.0.1" },
     stdio: ["ignore", "ignore", "inherit"],
     detached: true,
   });
@@ -65,7 +69,7 @@ const vite = await startVite(docPath);
 const browser = await chromium.launch();
 try {
   const page = await (await browser.newContext()).newPage();
-  await page.goto(`http://127.0.0.1:${VITE_PORT}/?docdPort=${SIDECAR_PORT}`);
+  await page.goto(`http://127.0.0.1:${VITE_PORT}/?docdPort=${SIDECAR_PORT}&docdToken=${TOKEN}`);
   await page.waitForFunction(() => (document.querySelector("#log")?.textContent ?? "").includes("editor mounted"), null, { timeout: 20000 });
   // Docname readiness comes from the active tab label (the topbar's separate
   // `#docname` subtitle was removed as redundant with the tab strip).

@@ -29,7 +29,7 @@ import {
   saveComment,
   resolveComment,
 } from "../had/index.js";
-import type { RpcRequest, RpcResponse, RpcEmit } from "./types.js";
+import { parseRpcRequest, rpcRequestId, type RpcResponse, type RpcEmit } from "./types.js";
 import type { RpcMethod, RpcParams, RpcResult } from "../protocol/rpc.js";
 
 /** pi's default model registry location. */
@@ -108,18 +108,25 @@ export class RpcHandler {
     return this.resourcesFor(docPath).orch;
   }
 
-  async handle(req: RpcRequest, emit?: RpcEmit): Promise<RpcResponse> {
+  /**
+   * Never throws: `req` is whatever came off the wire (null, a number, an array…), and
+   * anything that is not a request object with a string method is answered with an error.
+   */
+  async handle(req: unknown, emit?: RpcEmit): Promise<RpcResponse> {
+    const parsed = parseRpcRequest(req);
+    if (!parsed.ok) return { id: rpcRequestId(req), ok: false, error: parsed.error };
+    const { id, method, params } = parsed.req;
     try {
       // The single cast point: the wire gives us an unknown method name and params; the
-      // schema says what each method expects. Compile-time contract, no runtime
-      // validation (local-only sidecar — see spec §1).
+      // schema says what each method expects. The envelope is checked above; params
+      // themselves are a compile-time contract (local-only sidecar — see spec §1).
       // (hasOwn, not `in`: a method named "constructor" or "toString" must be unknown.)
-      if (!Object.hasOwn(this.handlers, req.method)) throw new Error(`unknown method: ${req.method}`);
-      const handler = (this.handlers as Record<string, (p: unknown, e?: RpcEmit) => unknown>)[req.method];
-      const result = await handler(req.params, emit);
-      return { id: req.id, ok: true, result };
+      if (!Object.hasOwn(this.handlers, method)) throw new Error(`unknown method: ${method}`);
+      const handler = (this.handlers as Record<string, (p: unknown, e?: RpcEmit) => unknown>)[method];
+      const result = await handler(params, emit);
+      return { id, ok: true, result };
     } catch (err) {
-      return { id: req.id, ok: false, error: err instanceof Error ? err.message : String(err) };
+      return { id, ok: false, error: err instanceof Error ? err.message : String(err) };
     }
   }
 

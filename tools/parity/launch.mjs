@@ -2,6 +2,7 @@
 // The sidecar picks its own port (--port 0) and announces it on stdout;
 // Vite gets an explicit port so the two trees never collide.
 import { spawn, execFile } from "node:child_process";
+import { randomBytes } from "node:crypto";
 import { promisify } from "node:util";
 import { mkdtemp, mkdir, writeFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -106,8 +107,12 @@ async function hermeticHome() {
  * only tools/demo wants that (it records a live agent turn).
  */
 export async function launchTree(tree, { vitePort, docPath, realConfig = false }) {
+  // docd refuses clients without its launch token. Generated here and handed to both sides
+  // (the sidecar in DOCD_TOKEN, the page as ?docdToken=), so a tree whose docd predates the
+  // token still launches: it ignores both.
+  const token = randomBytes(32).toString("hex");
   const env = { ...process.env, VITE_DOCD_PORT: "0", VITE_DOC_PATH: docPath };
-  const sidecarEnv = { ...env };
+  const sidecarEnv = { ...env, DOCD_TOKEN: token };
   if (!realConfig) {
     delete sidecarEnv.LLM_API_KEY; // deterministic: agent harness unavailable on both sides
     delete sidecarEnv.DOCUZEN_CONFIG_DIR;
@@ -137,7 +142,7 @@ export async function launchTree(tree, { vitePort, docPath, realConfig = false }
   }
 
   return {
-    url: `http://127.0.0.1:${vitePort}/?docdPort=${port}`,
+    url: `http://127.0.0.1:${vitePort}/?docdPort=${port}&docdToken=${token}`,
     stop() { return Promise.all([terminate(sidecar), terminate(vite)]); },
   };
 }

@@ -7,6 +7,7 @@
 //
 //   node tools/perf/agent-latency.mjs [--model litellm/aws/claude-opus-5-5]
 import { spawn } from "node:child_process";
+import { randomBytes } from "node:crypto";
 import { mkdtemp, mkdir, readFile, writeFile, rm } from "node:fs/promises";
 import { homedir, tmpdir } from "node:os";
 import { join, resolve, dirname } from "node:path";
@@ -51,7 +52,9 @@ const DOC = "# Plan\n\nLimits are stored in Redis with a TTL.\n\n" + "Filler par
 const docPath = join(work, "plan.md");
 await writeFile(docPath, DOC);
 
-const env = { ...process.env, DOCUZEN_CONFIG_DIR: cfg, DOCUZEN_GIT_EXCLUDES_FILE: join(work, "ignore") };
+// docd refuses clients without its launch token; hand it one, as the app shell does.
+const token = randomBytes(32).toString("hex");
+const env = { ...process.env, DOCD_TOKEN: token, DOCUZEN_CONFIG_DIR: cfg, DOCUZEN_GIT_EXCLUDES_FILE: join(work, "ignore") };
 delete env.LLM_API_KEY;
 const sidecar = spawn("npx", ["tsx", "packages/docd/src/server/main.ts", "--port", "0"], { cwd: repoRoot, env, stdio: ["ignore", "pipe", "ignore"], detached: true });
 const port = await new Promise((res, rej) => {
@@ -63,7 +66,7 @@ const port = await new Promise((res, rej) => {
   });
   setTimeout(() => rej(new Error("sidecar start timeout")), 30_000);
 });
-const ws = new WebSocket(`ws://127.0.0.1:${port}`);
+const ws = new WebSocket(`ws://127.0.0.1:${port}/?token=${token}`);
 await new Promise((r) => ws.on("open", r));
 let seq = 0;
 const pending = new Map();

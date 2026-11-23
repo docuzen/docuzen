@@ -10,6 +10,7 @@
 // assertion is structural — a reply exists, a proposal was persisted, the file changed —
 // never about what the model said.
 import { spawn } from "node:child_process";
+import { randomBytes } from "node:crypto";
 import { mkdtemp, mkdir, readFile, writeFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve, dirname } from "node:path";
@@ -49,7 +50,9 @@ async function main() {
   await mkdir(cfg, { recursive: true });
   await writeFile(join(cfg, "config.toml"), `[harness]\ndefault = "pi"\n\n[pi]\nmodel = "${MODEL}"\n`);
 
-  const env = { ...process.env, DOCUZEN_CONFIG_DIR: cfg, DOCUZEN_AUTHOR: "reviewer", DOCUZEN_GIT_EXCLUDES_FILE: join(work, "git-ignore") };
+  // docd refuses clients without its launch token; hand it one, as the app shell does.
+  const token = randomBytes(32).toString("hex");
+  const env = { ...process.env, DOCD_TOKEN: token, DOCUZEN_CONFIG_DIR: cfg, DOCUZEN_AUTHOR: "reviewer", DOCUZEN_GIT_EXCLUDES_FILE: join(work, "git-ignore") };
   delete env.LLM_API_KEY;
   const sidecar = spawn("npx", ["tsx", "packages/docd/src/server/main.ts", "--port", "0"], {
     cwd: repoRoot, env, stdio: ["ignore", "pipe", "pipe"], detached: true,
@@ -66,7 +69,7 @@ async function main() {
     setTimeout(() => rej(new Error(`sidecar start timeout\n${log}`)), 30_000);
   });
 
-  const ws = new WebSocket(`ws://127.0.0.1:${port}`);
+  const ws = new WebSocket(`ws://127.0.0.1:${port}/?token=${token}`);
   await new Promise((res, rej) => { ws.on("open", res); ws.on("error", rej); });
   let seq = 0;
   const pending = new Map();

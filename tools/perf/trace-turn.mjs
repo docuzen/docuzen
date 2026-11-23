@@ -4,6 +4,7 @@
 //
 //   set -a; . ~/.secrets; set +a; node tools/perf/trace-turn.mjs [--model litellm/aws/claude-opus-5-5]
 import { spawn } from "node:child_process";
+import { randomBytes } from "node:crypto";
 import { createServer } from "node:http";
 import { mkdtemp, mkdir, readFile, writeFile, rm } from "node:fs/promises";
 import { homedir, tmpdir } from "node:os";
@@ -72,7 +73,9 @@ await mkdir(join(work, "doc"));
 const docPath = join(work, "doc", "plan.md");
 await writeFile(docPath, DOC);
 
-const env = { ...process.env, HOME: work, DOCUZEN_GIT_EXCLUDES_FILE: join(work, "ignore") };
+// docd refuses clients without its launch token; hand it one, as the app shell does.
+const token = randomBytes(32).toString("hex");
+const env = { ...process.env, DOCD_TOKEN: token, HOME: work, DOCUZEN_GIT_EXCLUDES_FILE: join(work, "ignore") };
 delete env.LLM_API_KEY; delete env.DOCUZEN_CONFIG_DIR; delete env.PI_CODING_AGENT_DIR;
 const sidecar = spawn(process.execPath, [join(repoRoot, "node_modules/tsx/dist/cli.mjs"), "packages/docd/src/server/main.ts", "--port", "0"], { cwd: repoRoot, env, stdio: ["ignore", "pipe", "pipe"], detached: true });
 let slog = "";
@@ -85,7 +88,7 @@ const port = await new Promise((res, rej) => {
   });
   setTimeout(() => rej(new Error("sidecar start timeout\n" + slog)), 30_000);
 });
-const ws = new WebSocket(`ws://127.0.0.1:${port}`);
+const ws = new WebSocket(`ws://127.0.0.1:${port}/?token=${token}`);
 await new Promise((r) => ws.on("open", r));
 let seq = 0;
 const pending = new Map();

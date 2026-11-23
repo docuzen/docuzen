@@ -84,6 +84,20 @@ afterEach(() => {
 });
 
 describe("rpc reconnect", () => {
+  it("presents the launch token on the first socket and on every reconnect", async () => {
+    (globalThis as { __DOCD_TOKEN__?: string }).__DOCD_TOKEN__ = "tok/+=";
+    try {
+      makeClient();
+      expect(latest().url).toBe("ws://127.0.0.1:8137/?token=tok%2F%2B%3D");
+      latest().triggerClose();
+      await vi.advanceTimersByTimeAsync(500);
+      expect(FakeWebSocket.instances).toHaveLength(2);
+      expect(latest().url).toBe("ws://127.0.0.1:8137/?token=tok%2F%2B%3D");
+    } finally {
+      delete (globalThis as { __DOCD_TOKEN__?: string }).__DOCD_TOKEN__;
+    }
+  });
+
   it("resolves a call sent once the socket is open", async () => {
     const client = makeClient();
     latest().triggerOpen();
