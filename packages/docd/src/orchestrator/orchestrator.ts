@@ -1,6 +1,6 @@
 import { readFile, rm } from "node:fs/promises";
 import { dirname } from "node:path";
-import matter from "gray-matter";
+import { documentBody } from "../had/frontmatter.js";
 import type { AgentContext, AgentRunner, AgentTurn, ProposedEdit, TokenSink } from "../agent/types.js";
 import { HarnessRegistry, type AgentHarness } from "../agent/harness-registry.js";
 import type { TaskDB } from "../state/task-db.js";
@@ -756,7 +756,7 @@ export class Orchestrator {
     for (const f of findings) {
       // Re-read per finding: in Editing mode an earlier finding's edit has already
       // changed the document, and this finding must anchor against what is there now.
-      const body = matter(await readFile(docPath, "utf8")).content;
+      const body = documentBody(await readFile(docPath, "utf8"), docPath);
       const at = body.indexOf(f.anchorText);
       const anchor =
         at >= 0
@@ -891,7 +891,7 @@ export class Orchestrator {
     const { db, now } = this.deps;
     const harness = await this.harnessForDoc(docPath);
     const runner = harness.runner;
-    const body = matter(await readFile(docPath, "utf8")).content;
+    const body = documentBody(await readFile(docPath, "utf8"), docPath);
     const directives = findDirectives(body);
     if (directives.length === 0) return { count: 0, proposed: false, applied: 0, reply: "" };
     // All of them up front: a reply still running in an earlier pass's directive-N refuses the pass.
@@ -1291,7 +1291,7 @@ export class Orchestrator {
       .slice(0, atTurnIndex)
       .filter((t) => t.role !== "system")
       .map((t) => ({ role: t.role as "you" | "agent", body: t.body }));
-    const baseBody = matter(baseText).content;
+    const baseBody = documentBody(baseText, docPath);
     const baseDocText =
       baseBody.length > DOC_TEXT_BUDGET
         ? baseBody.slice(0, DOC_TEXT_BUDGET) + "\n…[truncated]"

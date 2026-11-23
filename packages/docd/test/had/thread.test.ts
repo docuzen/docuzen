@@ -207,3 +207,34 @@ describe("thread file I/O", () => {
     expect(back.turns).toHaveLength(1);
   });
 });
+
+describe("thread reasoning edge cases (M21)", () => {
+  it("reasoning containing a --> line stays reasoning, and the reply stays the reply", () => {
+    const t: ThreadFile = {
+      frontmatter: thread.frontmatter,
+      turns: [
+        {
+          role: "agent",
+          timestamp: "t2",
+          meta: "critiquer · m",
+          thinking: "An HTML comment ends with\n-->\nso does an arrow like a --> b, and an escaped one: --\\>",
+          body: "The visible reply.",
+        },
+      ],
+    };
+    const back = parseThread(serializeThread(t));
+    expect(back).toEqual(t);
+  });
+
+  it("a <!--think line inside a reply body is body text, not reasoning", () => {
+    const t: ThreadFile = {
+      frontmatter: thread.frontmatter,
+      turns: [
+        { role: "you", timestamp: "t1", body: "How do I mark reasoning?\n\n<!--think\nlike this\n-->\n\nRight?" },
+      ],
+    };
+    const back = parseThread(serializeThread(t));
+    expect(back).toEqual(t);
+    expect(back.turns[0].thinking).toBeUndefined();
+  });
+});

@@ -4,7 +4,6 @@
 // rules can be read (and tested) apart from the turn engine that invokes agents.
 import { readFile } from "node:fs/promises";
 import { dirname } from "node:path";
-import matter from "gray-matter";
 import type { AgentContext } from "../agent/types.js";
 import { resolveDocToolchain } from "../agent/mcp.js";
 import { readAnnotations, readSettings, readThread, isHtmlDoc, type HadSettings } from "../had/index.js";
@@ -224,7 +223,7 @@ export async function buildAgentContext(opts: BuildContextOpts): Promise<AgentCo
     ({ docText, scopeDir, settings } = opts.shared);
   } else {
     raw = opts.raw ?? (await readFile(docPath, "utf8"));
-    const body = opts.reviewMode ? matter(raw).content : documentBody(raw, docPath);
+    const body = documentBody(raw, docPath);
     docText =
       body.length > DOC_TEXT_BUDGET ? body.slice(0, DOC_TEXT_BUDGET) + "\n…[truncated]" : body;
     settings = await readSettings(docPath);
