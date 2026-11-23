@@ -142,6 +142,19 @@ describe("fuzzy scan — exact equivalence with the pre-rewrite dense scan", () 
   }, SLOW_REFERENCE_MS);
 });
 
+describe("fuzzy scan — acceptance boundary", () => {
+  it("accepts a window scoring exactly the threshold even when (1 - threshold) rounds down", () => {
+    // (1 - 0.9) is 0.09999999999999998 in binary floating point, so (1 - t) * (w + 1)
+    // lands just under 1 for a 9-char needle. A one-insertion window of length 10 scores
+    // exactly 0.9 and the dense scan accepts it; the edit-distance cap must too.
+    const text = "xx abcdeXfghi yy";
+    const exact = "abcdefghi";
+    const want = fuzzyFindRef(text, exact, 0.9);
+    expect(want).toEqual({ start: 3, end: 13 });
+    expect(resolveAnchor(text, { exact, prefix: "", suffix: "" }, { threshold: 0.9 })).toEqual(want);
+  });
+});
+
 describe("fuzzy scan — complexity guard (operation counts, not wall clock)", () => {
   // A ~130KB doc of varied prose, the shape that hung the UI. The dense scan
   // evaluated ~3 windows per character: ~390k DP evaluations of an
