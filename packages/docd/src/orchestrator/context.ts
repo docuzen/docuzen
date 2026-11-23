@@ -10,6 +10,7 @@ import { resolveDocToolchain } from "../agent/mcp.js";
 import { readAnnotations, readSettings, readThread, isHtmlDoc, type HadSettings } from "../had/index.js";
 import { findRepoRoot } from "../had/resolve.js";
 import type { Annotation } from "../had/types.js";
+import { similarity, type TextQuoteAnchor } from "../anchor/index.js";
 import { documentBody } from "./proposal-service.js";
 import { stancePrompt } from "./stance.js";
 
@@ -86,9 +87,56 @@ export function improvePrompt(
   );
 }
 
+/** Rendered-text approximation of an HTML fragment: tags dropped, whitespace collapsed. */
+function visibleText(fragment: string): string {
+  return fragment.replace(/<[^>]*>/g, "").replace(/\s+/g, " ");
+}
+
+/** How far around a raw occurrence to look for its visible prefix/suffix (tags take room). */
+const HTML_CONTEXT_REACH = 1000;
+
+/** How well the visible text around raw offset `at` matches the anchor's prefix and suffix. */
+function htmlContextScore(raw: string, at: number, anchor: TextQuoteAnchor): number {
+  const prefix = anchor.prefix.replace(/\s+/g, " ");
+  const suffix = anchor.suffix.replace(/\s+/g, " ");
+  const end = at + anchor.exact.length;
+  const before = visibleText(raw.slice(Math.max(0, at - HTML_CONTEXT_REACH), at)).slice(-prefix.length);
+  const after = visibleText(raw.slice(end, end + HTML_CONTEXT_REACH)).slice(0, suffix.length);
+  const p = prefix.length === 0 ? 1 : similarity(before, prefix);
+  const q = suffix.length === 0 ? 1 : similarity(after, suffix);
+  return (p + q) / 2;
+}
+
+/**
+ * Raw-source offset of the highlighted occurrence in an HTML doc, or -1. HTML anchors
+ * come from the rendered text, and the highlighted words often also appear earlier in
+ * the source (the <title>, a nav link, an earlier paragraph). Occurrences inside
+ * <body> win over ones before it; among those, the one whose visible surroundings best
+ * match the anchor's prefix and suffix (first on a tie).
+ */
+function htmlSourceOffset(raw: string, anchor: TextQuoteAnchor): number {
+  const hits: number[] = [];
+  for (let i = raw.indexOf(anchor.exact); i >= 0; i = raw.indexOf(anchor.exact, i + 1)) hits.push(i);
+  if (hits.length <= 1) return hits[0] ?? -1;
+  const bodyAt = raw.search(/<body[\s>]/i);
+  const inBody = bodyAt >= 0 ? hits.filter((h) => h > bodyAt) : [];
+  const pool = inBody.length > 0 ? inBody : hits;
+  let best = pool[0];
+  let bestScore = -1;
+  for (const h of pool) {
+    const score = htmlContextScore(raw, h, anchor);
+    if (score > bestScore) {
+      bestScore = score;
+      best = h;
+      if (score === 1) break;
+    }
+  }
+  return best;
+}
+
 function localSourceContext(raw: string, docPath: string, ann: Annotation): string {
   if (!isHtmlDoc(docPath)) return ann.anchor.prefix + ann.anchor.exact + ann.anchor.suffix;
-  const at = raw.indexOf(ann.anchor.exact);
+  const at = ann.anchor.exact ? htmlSourceOffset(raw, ann.anchor) : -1;
   if (at < 0) return ann.anchor.prefix + ann.anchor.exact + ann.anchor.suffix;
   const start = Math.max(0, at - 500);
   const end = Math.min(raw.length, at + ann.anchor.exact.length + 500);
@@ -136,6 +184,12 @@ export interface BuildContextOpts {
    */
   directiveMode?: boolean;
   shared?: { docText: string; scopeDir: string; settings: HadSettings };
+  /**
+   * The document text as the caller already read it. The context is built from exactly
+   * this text, so a proposal from the turn can be stamped with the base the agent saw
+   * (see ProposalService.submit). Omit to read the doc here. Ignored with `shared`.
+   */
+  raw?: string;
 }
 
 /**
@@ -169,7 +223,7 @@ export async function buildAgentContext(opts: BuildContextOpts): Promise<AgentCo
   if (opts.shared) {
     ({ docText, scopeDir, settings } = opts.shared);
   } else {
-    raw = await readFile(docPath, "utf8");
+    raw = opts.raw ?? (await readFile(docPath, "utf8"));
     const body = opts.reviewMode ? matter(raw).content : documentBody(raw, docPath);
     docText =
       body.length > DOC_TEXT_BUDGET ? body.slice(0, DOC_TEXT_BUDGET) + "\n…[truncated]" : body;

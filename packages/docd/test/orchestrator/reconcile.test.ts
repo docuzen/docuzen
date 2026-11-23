@@ -6,7 +6,7 @@ import { Orchestrator } from "../../src/orchestrator/orchestrator.js";
 import { FakePiRunner } from "../../src/agent/fake-runner.js";
 import { TaskDB } from "../../src/state/task-db.js";
 import { hadPaths } from "../../src/had/paths.js";
-import { initThread, appendTurn } from "../../src/index.js";
+import { initThread, appendTurn, readThread } from "../../src/index.js";
 
 let dir: string;
 let docPath: string;
@@ -162,6 +162,34 @@ describe("Orchestrator.reconcile", () => {
     // and it isn't reported as errored since the transition never landed.
     expect(db.get("missing2")?.status).toBe("running");
     expect(result.errored).not.toContain("missing2");
+  });
+
+  it("mirrors the reconciled status into the thread's frontmatter, so the card offers Retry after a crash", async () => {
+    await initThread(docPath, {
+      id: "c0006",
+      anchorExact: "x",
+      stance: "none",
+      status: "running",
+      piSession: "sessions/c0006.session.jsonl",
+    });
+    await appendTurn(docPath, "c0006", { role: "you", timestamp: "t1", body: "q" });
+    await initThread(docPath, {
+      id: "c0007",
+      anchorExact: "x",
+      stance: "none",
+      status: "running",
+      piSession: "sessions/c0007.session.jsonl",
+    });
+    await appendTurn(docPath, "c0007", { role: "you", timestamp: "t1", body: "q" });
+    await appendTurn(docPath, "c0007", { role: "agent", timestamp: "t2", meta: "none", body: "a" });
+    db.upsert({ threadId: "c0006", status: "running", piSessionId: null });
+    db.upsert({ threadId: "c0007", status: "running", piSessionId: null });
+
+    const orch = new Orchestrator({ runner: new FakePiRunner([]), db, now: () => "t3" });
+    await orch.reconcile(docPath);
+
+    expect((await readThread(docPath, "c0006")).frontmatter.status).toBe("error");
+    expect((await readThread(docPath, "c0007")).frontmatter.status).toBe("responded");
   });
 
   it("leaves already-responded tasks alone", async () => {

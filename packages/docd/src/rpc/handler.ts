@@ -1,5 +1,6 @@
 import { join } from "node:path";
 import { homedir } from "node:os";
+import { stat } from "node:fs/promises";
 import type { AgentRunner, TokenSink } from "../agent/types.js";
 import { HarnessRegistry, listModels, saveModels } from "../agent/index.js";
 import { readAppConfig, writeAppConfig } from "../config/app-config.js";
@@ -127,11 +128,16 @@ export class RpcHandler {
     return {
       // ---- document lifecycle ----
       openDoc: async (p) => {
+        // A tab restored for a file that has since moved or been deleted fails here,
+        // before anything is created for it: the per-doc TaskDB below would otherwise
+        // leave a stray .docuzen/<name>.had/state.db (and an open handle) behind.
+        if (!(await stat(p.docPath)).isFile()) throw new Error(`not a document file: ${p.docPath}`);
         // Crash recovery: a killed sidecar can leave TaskDB rows stuck "running" forever
         // (the process died mid-turn, so nothing ever transitioned them). Reconcile on
         // every open so a reopened doc's Agents panel doesn't show a phantom live task —
-        // layering: the handler orchestrates the call, doc-store itself stays
-        // orchestrator-free (see Orchestrator.reconcile's doc comment).
+        // turns still running in this process are left alone. Layering: the handler
+        // orchestrates the call, doc-store itself stays orchestrator-free (see
+        // Orchestrator.reconcile's doc comment).
         await this.orch(p.docPath).reconcile(p.docPath);
         return openDoc(p.docPath);
       },
@@ -148,6 +154,9 @@ export class RpcHandler {
       // ---- annotations + comments ----
       createAnnotation: (p) => createAnnotation(p.docPath, p, { now: now(), defaultAuthor: this.deps.author }),
       deleteAnnotation: async (p) => {
+        // Stop the comment's running turn and drop its task first (cancel reads the
+        // thread file for its harness, so this must precede deleting the files).
+        await this.orch(p.docPath).discardThread(p.docPath, p.id);
         await deleteAnnotation(p.docPath, p.id);
         return { ok: true };
       },
