@@ -20,16 +20,21 @@ export function appConfigPath(): string {
   return join(base, "config.toml");
 }
 
+/** A trimmed non-empty string, or undefined: a blank value means "not set", never "run ''". */
+function nonBlank(v: unknown): string | undefined {
+  return typeof v === "string" && v.trim() ? v.trim() : undefined;
+}
+
 export function readAppConfig(): AppConfig {
   try {
     const raw = parse(readFileSync(appConfigPath(), "utf8")) as Record<string, unknown>;
     const def = (raw.harness as { default?: unknown } | undefined)?.default;
-    const piModel = (raw.pi as { model?: unknown } | undefined)?.model;
-    const codexCommand = (raw.codex as { command?: unknown } | undefined)?.command;
+    const piModel = nonBlank((raw.pi as { model?: unknown } | undefined)?.model);
+    const codexCommand = nonBlank((raw.codex as { command?: unknown } | undefined)?.command);
     return {
       harness: def === "pi" || def === "codex" ? { default: def } : null,
-      pi: typeof piModel === "string" ? { model: piModel } : undefined,
-      codex: typeof codexCommand === "string" ? { command: codexCommand } : undefined,
+      pi: piModel ? { model: piModel } : undefined,
+      codex: codexCommand ? { command: codexCommand } : undefined,
     };
   } catch (e) {
     if (existsSync(appConfigPath())) {
