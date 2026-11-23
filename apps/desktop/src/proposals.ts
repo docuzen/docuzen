@@ -85,7 +85,7 @@ export interface ProposalsDeps {
   /** editor.ts's singleton proposal-decoration PluginKey — passed by value (see file header). */
   proposalKey: PluginKey;
   /** editor.ts's [[ ... ]] offset finder — passed by value (see file header). */
-  findDirectiveOffsets: (text: string) => { start: number; end: number }[];
+  findDirectiveOffsets: (text: string, code?: { start: number; end: number }[]) => { start: number; end: number }[];
 }
 
 export interface ProposalsApi {
@@ -393,7 +393,7 @@ export function initProposals(deps: ProposalsDeps): ProposalsApi {
         const directiveN = /^directive-(\d+)$/.exec(p.threadId);
         if (fallbackAt === view.state.doc.content.size && directiveN) {
           // directive-N is the N-th `[[ … ]]` in document order (1-based).
-          const directive = deps.findDirectiveOffsets(proj.text)[Number(directiveN[1]) - 1];
+          const directive = deps.findDirectiveOffsets(proj.text, proj.code)[Number(directiveN[1]) - 1];
           if (directive) {
             const range = posRangeForOffsets(proj, directive.start, directive.end);
             if (range) fallbackAt = range.to;
