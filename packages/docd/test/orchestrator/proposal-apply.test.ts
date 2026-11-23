@@ -4,7 +4,8 @@ import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import { lstat, mkdir, mkdtemp, readFile, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { ProposalService } from "../../src/orchestrator/proposal-service.js";
+import { ProposalService, documentBody } from "../../src/orchestrator/proposal-service.js";
+import type { ProposedEdit } from "../../src/agent/types.js";
 import { addAnnotation, listProposals, readAnnotations, saveDoc } from "../../src/had/index.js";
 import { withDocLock } from "../../src/had/io.js";
 import { createAnchor } from "../../src/anchor/index.js";
@@ -20,6 +21,13 @@ beforeEach(async () => {
 afterEach(async () => {
   await rm(dir, { recursive: true, force: true });
 });
+
+/** Submit an edit made against the document as it stands now (the orchestrator reads the
+ * base before the turn starts and passes it in). */
+async function submitNow(threadId: string, edit: ProposedEdit) {
+  const baseBody = documentBody(await readFile(docPath, "utf8"), docPath);
+  return svc.submit(docPath, threadId, edit, undefined, { baseBody });
+}
 
 async function annotate(body: string, exact: string, from = 0, anchor?: { exact: string; prefix: string; suffix: string }) {
   const start = body.indexOf(exact, from);
@@ -56,7 +64,7 @@ describe("single-span apply works on the body, never the frontmatter (H12)", () 
   it("a hunk apply keeps the frontmatter byte for byte (comments and quoting included)", async () => {
     const head = "---\n# owner: me\ntitle:   \"Plan\"\n---\n";
     await writeFile(docPath, `${head}# Plan\n\nUse Redis.\n`, "utf8");
-    const p = await svc.submit(docPath, "c0001", { rationale: "", hunks: [{ oldText: "Redis", newText: "Postgres" }] });
+    const p = await submitNow("c0001", { rationale: "", hunks: [{ oldText: "Redis", newText: "Postgres" }] });
     await svc.approve(docPath, "c0001", p.proposal.id);
     expect(await readFile(docPath, "utf8")).toBe(`${head}# Plan\n\nUse Postgres.\n`);
   });
@@ -66,7 +74,7 @@ describe("single-span apply works on the body, never the frontmatter (H12)", () 
     const target = join(dir, "real", "plan.md");
     await writeFile(target, "# Plan\n\nUse Redis.\n", "utf8");
     await symlink(join("real", "plan.md"), docPath);
-    const p = await svc.submit(docPath, "c0001", { rationale: "", hunks: [{ oldText: "Redis", newText: "Postgres" }] });
+    const p = await submitNow("c0001", { rationale: "", hunks: [{ oldText: "Redis", newText: "Postgres" }] });
     await svc.approve(docPath, "c0001", p.proposal.id);
     expect((await lstat(docPath)).isSymbolicLink()).toBe(true);
     expect(await readFile(target, "utf8")).toBe("# Plan\n\nUse Postgres.\n");
@@ -76,8 +84,8 @@ describe("single-span apply works on the body, never the frontmatter (H12)", () 
 describe("approve and reject take the document lock (H18, M7)", () => {
   it("approve and reject wait for the document lock that saveDoc also holds", async () => {
     await writeFile(docPath, "# Plan\n\nUse Redis.\n", "utf8");
-    const a = await svc.submit(docPath, "c0001", { rationale: "", hunks: [{ oldText: "Redis", newText: "Postgres" }] });
-    const b = await svc.submit(docPath, "c0001", { rationale: "", hunks: [{ oldText: "Plan", newText: "Draft" }] });
+    const a = await submitNow("c0001", { rationale: "", hunks: [{ oldText: "Redis", newText: "Postgres" }] });
+    const b = await submitNow("c0001", { rationale: "", hunks: [{ oldText: "Plan", newText: "Draft" }] });
 
     let release!: () => void;
     const held = withDocLock(docPath, () => new Promise<void>((r) => (release = r)));
@@ -95,7 +103,7 @@ describe("approve and reject take the document lock (H18, M7)", () => {
 
   it("a reject racing an approve of the same proposal loses cleanly; the record matches the document", async () => {
     await writeFile(docPath, "# Plan\n\nUse Redis.\n", "utf8");
-    const { proposal } = await svc.submit(docPath, "c0001", {
+    const { proposal } = await submitNow("c0001", {
       rationale: "",
       hunks: [{ oldText: "Redis", newText: "Postgres" }],
     });
@@ -113,7 +121,7 @@ describe("approve and reject take the document lock (H18, M7)", () => {
   it("a save racing an approve never leaves the manifest out of step with the document", async () => {
     const { readManifest, contentHash } = await import("../../src/had/manifest.js");
     await writeFile(docPath, "# Plan\n\nUse Redis.\n", "utf8");
-    const { proposal } = await svc.submit(docPath, "c0001", {
+    const { proposal } = await submitNow("c0001", {
       rationale: "",
       hunks: [{ oldText: "Redis", newText: "Postgres" }],
     });

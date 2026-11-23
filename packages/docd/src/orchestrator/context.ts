@@ -170,8 +170,8 @@ export interface BuildContextOpts {
   /** Thread id the cancelKey is keyed on: `${docPath}#${threadId}`. */
   threadId: string;
   /**
-   * Whole-document Review Pass: doc text is always frontmatter-stripped via `matter()`
-   * (NOT html-aware, unlike the anchored passes), the digest covers every annotation
+   * Whole-document Review Pass: doc text is the document body (`documentBody`: markdown
+   * without its frontmatter, HTML verbatim), the digest covers every annotation
    * with a 200-char agent-reply slice (vs. 300 elsewhere), and `reviewMode: true` is set
    * on the resulting context.
    */
@@ -199,8 +199,8 @@ export interface BuildContextOpts {
  *    defaults to true (see below) — improve() is the one anchored caller that flips it
  *    back to false on the context it hands the runner, since Improve is an explicit
  *    edit flow, not a conversation turn.
- *  - `reviewMode` (whole-document Review Pass): no anchor; doc text is always
- *    frontmatter-stripped via `matter()` regardless of doc type; digest of EVERY
+ *  - `reviewMode` (whole-document Review Pass): no anchor; doc text is the
+ *    document body (`documentBody`, as for the anchored passes); digest of EVERY
  *    annotation (200-char agent-reply slice); `conversationOnly` forced off.
  *  - `directiveMode` (inline `[[ … ]]` directives): no digest at all; doc text/scope/
  *    settings come from `opts.shared` (resolveDirectives reads the doc once and fans
