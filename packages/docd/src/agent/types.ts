@@ -90,7 +90,10 @@ export interface AgentContext {
   htmlMode?: boolean;
   /** "provider/modelId" key selecting which configured model answers; falls back to the runner default. */
   modelId?: string;
-  /** Opaque key the runner indexes the live session by, so cancel() can abort it; set to docPath#threadId by the orchestrator. */
+  /**
+   * Opaque key naming the thread a session answers for, so cancel() can stop its runs
+   * (this one and later send()s on the same session); set to docPath#threadId by the orchestrator.
+   */
   cancelKey?: string;
   /**
    * Prior conversation turns to replay into a fresh session's first prompt. Used to
@@ -129,7 +132,10 @@ export interface AgentRunner {
     onToken?: TokenSink,
   ): Promise<{ sessionId: string; turn: AgentTurn }>;
   send(sessionId: string, message: string, onToken?: TokenSink): Promise<AgentTurn>;
-  /** Abort the live session indexed by `cancelKey`, if one exists. Optional: not all runners support cancellation. */
+  /**
+   * Stop whatever is running for `cancelKey`'s thread, including a turn whose session is
+   * still being created. Optional: not all runners support cancellation.
+   */
   cancel?(cancelKey: string): Promise<void>;
   /** Whether the runner still holds this live session; false after a restart. Optional. */
   hasSession?(sessionId: string): boolean;

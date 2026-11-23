@@ -50,4 +50,9 @@ export class SessionStore<V> {
   has(id: string): boolean {
     return this.map.has(id);
   }
+
+  /** Forgets the session `id`; its id is never reused. */
+  delete(id: string): boolean {
+    return this.map.delete(id);
+  }
 }

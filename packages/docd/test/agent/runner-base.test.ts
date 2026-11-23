@@ -40,4 +40,13 @@ describe("SessionStore", () => {
     const store = new SessionStore<string>("pi");
     expect(store.get("pi-1")).toBeUndefined();
   });
+
+  it("delete() forgets a session, and its id is never handed out again", () => {
+    const store = new SessionStore<string>("pi");
+    const id = store.start("entry");
+    expect(store.delete(id)).toBe(true);
+    expect(store.has(id)).toBe(false);
+    expect(store.delete(id)).toBe(false);
+    expect(store.start("next")).toBe("pi-2");
+  });
 });
