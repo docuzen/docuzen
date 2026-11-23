@@ -123,8 +123,11 @@ function fuzzyFind(
   if (w === 0 || text.length === 0) return null;
 
   // Max edit distance an accepted window can have: score = 1 - d/maxLen >=
-  // threshold with maxLen <= w+1  =>  d <= (1 - threshold) * (w + 1).
-  const kAccept = Math.max(0, Math.floor((1 - threshold) * (w + 1)));
+  // threshold with maxLen <= w+1  =>  d <= (1 - threshold) * (w + 1). The epsilon
+  // keeps float rounding (1 - 0.9 is 0.09999999999999998) from flooring an exact
+  // integer bound down by one and dropping windows that score exactly the threshold;
+  // an over-wide bound is harmless, since the final score check still applies.
+  const kAccept = Math.max(0, Math.floor((1 - threshold) * (w + 1) + 1e-9));
   const minDistByEnd = sellersMinDistByEnd(text, exact);
 
   // Bucket candidate window ends by their lower-bound distance.
