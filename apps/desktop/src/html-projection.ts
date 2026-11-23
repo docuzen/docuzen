@@ -3,18 +3,42 @@
 // this builds that projection from the rendered DOM and maps projection offsets back
 // to DOM Ranges (for decorating) and DOM selections forward to offsets (for creating
 // anchors). Build and resolve use the SAME walk, so anchors stay self-consistent.
+import { HTML_NS, isBlockElement } from "./html-blocks.js";
 import { clearRangeBlocks } from "./long-range.js";
 
-/** Tags whose text is structural/non-content and must not appear in the projection. */
-const SKIP_TAGS = new Set(["SCRIPT", "STYLE", "NOSCRIPT", "TEMPLATE"]);
+const SVG_NS = "http://www.w3.org/2000/svg";
+/**
+ * Elements whose text is structural/non-content and must not appear in the projection.
+ * Compared by lower-case local name: inside an inline SVG, `<style>` and `<script>` keep a
+ * lower-case tagName, so an upper-case tagName check let a diagram's stylesheet through.
+ */
+const SKIP_TAGS = new Set(["script", "style", "noscript", "template"]);
+/** SVG elements that draw no text: definitions, metadata, the tooltip title. */
+const SVG_NO_TEXT = new Set(["defs", "title", "desc", "metadata"]);
+/** Form controls that show their text as a value: a mark span inside one would empty or hide it. */
+const TEXT_ONLY = new Set(["textarea", "option"]);
+/** Structure whose own whitespace children are layout, not text (a span there becomes a stray table cell or list box). */
+const STRUCTURE = new Set(["TABLE", "THEAD", "TBODY", "TFOOT", "TR", "COLGROUP", "UL", "OL", "DL", "SELECT", "OPTGROUP"]);
 
-/** Block-level tags: a boundary between them inserts a single "\n" separator. */
-const BLOCK_TAGS = new Set([
-  "P", "DIV", "SECTION", "ARTICLE", "HEADER", "FOOTER", "MAIN", "NAV", "ASIDE",
-  "H1", "H2", "H3", "H4", "H5", "H6", "UL", "OL", "LI", "TABLE", "THEAD", "TBODY",
-  "TR", "TD", "TH", "PRE", "BLOCKQUOTE", "FIGURE", "FIGCAPTION", "HR", "BR", "DL",
-  "DT", "DD",
-]);
+/** Whether `el` and everything inside it stays out of the projection. */
+function excludesText(el: Element): boolean {
+  const name = el.localName.toLowerCase();
+  if (SKIP_TAGS.has(name) || el.hasAttribute("data-had-overlay")) return true;
+  return el.namespaceURI === SVG_NS ? SVG_NO_TEXT.has(name) : el.namespaceURI === HTML_NS && TEXT_ONLY.has(name);
+}
+
+/**
+ * Whether a text node is document text the surface can mark: in an HTML element (drawn SVG
+ * or MathML text cannot hold an HTML span — the label would vanish), not in an excluded
+ * element or one of docuzen's own controls, and not layout whitespace inside a table or list.
+ */
+function isMarkableText(t: Text): boolean {
+  const parent = t.parentElement;
+  if (!parent || parent.namespaceURI !== HTML_NS) return false;
+  if (STRUCTURE.has(parent.tagName) && !(t.nodeValue ?? "").trim()) return false;
+  for (let el: Element | null = parent; el; el = el.parentElement) if (excludesText(el)) return false;
+  return true;
+}
 
 /** One contiguous run of a single text node within the projection. */
 export interface TextRun {
@@ -33,8 +57,9 @@ export interface HtmlProjection {
 /**
  * Walk `root` in document order, concatenating visible text. Text nodes within one
  * block are contiguous; a block boundary inserts a single "\n" (mirrors the markdown
- * projection so cross-block selections don't glue words together). Script/style text
- * and overlay nodes are excluded.
+ * projection so cross-block selections don't glue words together). Script/style text,
+ * SVG metadata, drawn SVG/MathML text (which cannot be marked) and overlay nodes are
+ * excluded; HTML inside an SVG foreignObject is included.
  */
 export function buildHtmlProjection(root: HTMLElement): HtmlProjection {
   const runs: TextRun[] = [];
@@ -44,7 +69,7 @@ export function buildHtmlProjection(root: HTMLElement): HtmlProjection {
   const visit = (node: Node): void => {
     if (node.nodeType === Node.TEXT_NODE) {
       const value = node.nodeValue ?? "";
-      if (!value) return;
+      if (!value || node.parentElement?.namespaceURI !== HTML_NS) return;
       if (pendingSep && text.length) text += "\n";
       pendingSep = false;
       const from = text.length;
@@ -54,9 +79,8 @@ export function buildHtmlProjection(root: HTMLElement): HtmlProjection {
     }
     if (node.nodeType !== Node.ELEMENT_NODE) return;
     const el = node as Element;
-    if (SKIP_TAGS.has(el.tagName)) return;
-    if (el.hasAttribute("data-had-overlay")) return;
-    const isBlock = BLOCK_TAGS.has(el.tagName);
+    if (excludesText(el)) return;
+    const isBlock = isBlockElement(el);
     if (isBlock && text.length) pendingSep = true;
     for (const child of Array.from(el.childNodes)) visit(child);
     if (isBlock) pendingSep = true;
@@ -144,7 +168,9 @@ export function offsetsForRange(
 /**
  * Wrap every text-node segment within `range` in a marker span (so highlights survive
  * cross-element ranges). Spans carry `data-had-mark` + `data-anno` and are stripped on
- * serialization. Returns the created spans.
+ * serialization. Only document text is wrapped (see isMarkableText): never style/script,
+ * docuzen's overlay controls, SVG text, or whitespace between table rows and list items.
+ * Returns the created spans.
  */
 export function wrapRange(
   doc: Document,
@@ -155,6 +181,7 @@ export function wrapRange(
   const container = range.commonAncestorContainer;
 
   if (container.nodeType === Node.TEXT_NODE) {
+    if (!isMarkableText(container as Text)) return spans;
     const span = makeSpan();
     try {
       range.surroundContents(span);
@@ -169,7 +196,7 @@ export function wrapRange(
   const texts: Text[] = [];
   let n = walker.nextNode();
   while (n) {
-    if (range.intersectsNode(n)) texts.push(n as Text);
+    if (range.intersectsNode(n) && isMarkableText(n as Text)) texts.push(n as Text);
     n = walker.nextNode();
   }
   for (const t of texts) {
