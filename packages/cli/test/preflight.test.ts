@@ -42,3 +42,46 @@ describe("launch preflight", () => {
     expect(res.status).toBe(0);
   });
 });
+
+describe("doctor", () => {
+  test("reports a missing node instead of crashing, and fails", () => {
+    const binDir = mkdtempSync(join(tmpdir(), "docuzen-doctor-"));
+    makeShim(binDir, "cargo", 'echo "cargo 1.0.0 (shim)"');
+    const res = runCli(["doctor"], binDir); // no node on PATH (the CLI itself runs on process.execPath)
+
+    expect(res.stderr).not.toContain("TypeError");
+    expect(res.stdout).toContain("✗ node: not found");
+    expect(res.status).toBe(1);
+  });
+
+  test("fails when cargo is missing", () => {
+    const binDir = mkdtempSync(join(tmpdir(), "docuzen-doctor-"));
+    makeShim(binDir, "node", 'echo "v22.0.0"');
+    const res = runCli(["doctor"], binDir);
+
+    expect(res.stdout).toContain("✓ node: v22.0.0");
+    expect(res.stdout).toContain("✗ cargo: not found");
+    expect(res.status).toBe(1);
+  });
+
+  test("fails when node is on PATH but broken", () => {
+    const binDir = mkdtempSync(join(tmpdir(), "docuzen-doctor-"));
+    makeShim(binDir, "node", "exit 3");
+    makeShim(binDir, "cargo", 'echo "cargo 1.0.0 (shim)"');
+    const res = runCli(["doctor"], binDir);
+
+    expect(res.stdout).toContain("✗ node");
+    expect(res.status).toBe(1);
+  });
+
+  test("passes when everything is there", () => {
+    const binDir = mkdtempSync(join(tmpdir(), "docuzen-doctor-"));
+    makeShim(binDir, "node", 'echo "v22.0.0"');
+    makeShim(binDir, "cargo", 'echo "cargo 1.0.0 (shim)"');
+    const res = runCli(["doctor"], binDir);
+
+    expect(res.stdout).toContain("✓ node: v22.0.0");
+    expect(res.stdout).toContain("✓ cargo: cargo 1.0.0 (shim)");
+    expect(res.status).toBe(0);
+  });
+});

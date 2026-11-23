@@ -75,10 +75,14 @@ function doctor(): void {
     ok &&= pass;
     console.log(`${pass ? "✓" : "✗"} ${label}: ${detail}`);
   }
+  // A missing binary leaves stdout unset (spawn error), so read it defensively.
   const node = spawnSync("node", ["--version"], { encoding: "utf8" });
-  console.log(`${node.status === 0 ? "✓" : "✗"} node: ${node.stdout.trim() || "not found"}`);
+  const nodeOk = node.status === 0;
+  const nodeDetail = node.error ? "not found" : (node.stdout ?? "").trim() || `exited ${node.status ?? node.signal}`;
+  console.log(`${nodeOk ? "✓" : "✗"} node: ${nodeDetail}`);
   const cargo = cargoVersion();
   console.log(`${cargo ? "✓" : "✗"} cargo: ${cargo ?? "not found"}`);
+  ok &&= nodeOk && cargo !== null;
   if (!process.env.LLM_API_KEY) {
     console.log(
       "! LLM_API_KEY is not set; live agents need a harness configured in ~/.docuzen/config.toml (first-launch modal).",
