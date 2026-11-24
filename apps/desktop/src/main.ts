@@ -313,6 +313,8 @@ const shell = initShell({
   refreshThreadModels: chat.refreshThreadModels,
   setDefaultModelKey: chat.setDefaultModelKey,
   setHarnessContext: chat.setHarnessContext,
+  hasOpenDiscussion: chat.hasOpenDiscussion,
+  selectDiscussionRoute: chat.selectDiscussionRoute,
   getThreadNodes: chat.getThreadNodes,
   refreshThreadTree: chat.refreshThreadTree,
   truncTitle,

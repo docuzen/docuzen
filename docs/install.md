@@ -140,6 +140,12 @@ tools. Improve and Resolve return proposals, and Editing applies them through
 document version history. Use Pi for document-wide review findings and Docuzen
 MCP tools in this build.
 
+**Continuing with another harness or model.** In a discussion, open **Options**,
+choose **Reply with** and a model, then send your next message. You can also choose
+**Use for current discussion** in Settings. The destination receives the prior
+conversation and current document context. Long histories include the opening
+request, recent turns and a reference to the full saved transcript.
+
 **Which harness is the default** for documents that don't pick one?
 
 - The `[harness] default` in `config.toml`, when set.
@@ -270,10 +276,10 @@ review-state directory and travel with a `.hadz` export.
 
 Available settings:
 
-- **Default model.** Uses a `provider/modelId` key from `~/.pi/agent/models.json`.
+- **Default model.** Pi lists configured providers from `~/.pi/agent/models.json`. Claude Code and Codex list the models reported by their installed harnesses.
 - **Agent tool scope.** `folder` limits file tools to the document folder and
   its `.docuzen/` review state; `repo` walks up to the nearest `.git` root.
-- **Harness.** Which agent harness (Pi or Codex) answers for this document.
+- **Harness.** Which agent harness answers for this document.
 - **Agent edits.** *Suggesting* (default): every edit from Improve, Resolve
   `[[ ]]` or Review is a proposal you approve or reject. *Editing*: those edits
   apply as the agent produces them. In both modes each applied edit is recorded

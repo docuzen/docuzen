@@ -99,6 +99,7 @@ export interface AgentContext {
    * Prior conversation turns to replay into a fresh session's first prompt. Used to
    * resume a thread whose live session is gone (reopen) or to seed a branched thread.
    */
+  handoffNote?: string;
   history?: { role: "you" | "agent"; body: string }[];
 }
 
@@ -139,6 +140,7 @@ export interface AgentRunner {
   cancel?(cancelKey: string): Promise<void>;
   /** Whether the runner still holds this live session; false after a restart. Optional. */
   hasSession?(sessionId: string, owner?: string): boolean;
+  listModels?(cwd: string): Promise<{ key: string; name: string }[]>;
   permissionModes?(cwd: string): Promise<{ selected: string; modes: { id: string; name: string }[] }>;
   answerPermission?(requestId: string, allow: boolean): boolean;
   /**

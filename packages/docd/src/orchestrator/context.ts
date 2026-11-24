@@ -142,12 +142,37 @@ function localSourceContext(raw: string, docPath: string, ann: Annotation): stri
   return raw.slice(start, end);
 }
 
+/** Carry visible discussion only. Keep the opening request and recent turns within the prompt budget. */
+export function handoffTranscript(prior: NonNullable<AgentContext["history"]>, threadPath: string) {
+  const budget = 48_000;
+  if (prior.reduce((sum, turn) => sum + turn.body.length + 16, 0) <= budget) {
+    return { history: prior, note: "The prior user and agent messages below are conversation history." };
+  }
+  const first = { ...prior[0], body: prior[0].body.slice(0, 4000) };
+  let remaining = budget - first.body.length - 32;
+  const recent: typeof prior = [];
+  for (let i = prior.length - 1; i > 0 && remaining > 16; i--) {
+    const turn = prior[i];
+    const room = remaining - 16;
+    const body = turn.body.length <= room ? turn.body : room === 1 ? "…" : "…" + turn.body.slice(-(room - 1));
+    recent.push({ role: turn.role, body });
+    remaining -= body.length + 16;
+  }
+  return { history: [first, ...recent.reverse()], note: `History is excerpted. The full visible transcript is in ${threadPath}.` };
+}
+
+/** A saved thread can belong to a different harness from the current document. */
+export function documentModel(settings: HadSettings, harnessId?: string): string | undefined {
+  return harnessId && settings.harness && settings.harness !== harnessId ? undefined : settings.model;
+}
+
 /**
  * Inputs to the single `buildContext` builder, covering discuss/reply/resume/branch/
  * improve/visualize (anchored to `ann`), a whole-document Review Pass (`reviewMode`),
  * and an inline-directive pass (`directiveMode`).
  */
 export interface BuildContextOpts {
+  harnessId?: string;
   docPath: string;
   /**
    * Annotation this context is anchored to. Supplies `anchorExact` + `surrounding`
@@ -277,7 +302,7 @@ export async function buildAgentContext(opts: BuildContextOpts): Promise<AgentCo
     ...(opts.reviewMode ? { reviewMode: true } : {}),
     htmlMode: isHtmlDoc(docPath),
     docToolchain: resolveDocToolchain(docPath),
-    modelId: opts.modelId ?? settings.model,
+    modelId: opts.modelId ?? documentModel(settings, opts.harnessId),
     cancelKey: cancelKeyFor(docPath, opts.threadId),
   };
 }

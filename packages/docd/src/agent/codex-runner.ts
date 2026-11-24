@@ -1,3 +1,4 @@
+import { listCodexModels } from "./codex-models.js";
 import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -340,7 +341,17 @@ export class CodexRunner implements AgentRunner {
     });
   }
 
+  listModels(cwd: string) {
+    return listCodexModels(this.cfg.command ?? process.env.CODEX_BIN ?? "codex", cwd);
+  }
+
   private async codexLaunchConfig(ctx: AgentContext): Promise<CodexLaunchConfig> {
+    if (ctx.modelId?.startsWith("codex:")) {
+      const model = ctx.modelId.slice("codex:".length);
+      if (!model) throw new Error("Empty Codex model selection.");
+      return { model };
+    }
+    // Existing documents and threads can retain an explicitly configured provider route.
     if (ctx.modelId) {
       if (!this.cfg.modelsPath) {
         throw new Error("Codex model selected, but Docuzen has no model registry path configured");

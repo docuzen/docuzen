@@ -46,6 +46,8 @@ function fakeApi() {
     resolveComment: vi.fn(async () => ({ ok: true })),
     listThreads: vi.fn(async () => []),
     listTasks: vi.fn(async () => [] as unknown[]),
+    listHarnessModels: vi.fn(async ({ harness }: { harness: string }) =>
+      harness === "claude-code" ? [{ key: "claude-code:sonnet", name: "Sonnet" }] : [{ key: "codex:gpt-test", name: "GPT Test" }]),
     listModels: vi.fn(async () => [{ key: "p/m1", name: "Model One", provider: "p", modelId: "m1", hasKey: true }]),
     getThread: vi.fn(async ({ threadId }: { threadId: string }) => {
       const t = threads[threadId];
@@ -441,7 +443,7 @@ describe("opening threads", () => {
     expect(more.hidden).toBe(true);
   });
 
-  it("a new thread shows its document harness and hides model choices managed by that harness", async () => {
+  it("a new Claude thread offers Claude models in the composer", async () => {
     const { chat } = setup();
     chat.setHarnessContext("claude-code", [{
       id: "claude-code", label: "Claude Code", available: true, capabilities: { multiModelPanel: false },
@@ -449,9 +451,34 @@ describe("opening threads", () => {
     addCard(chat, "c0001");
     await chat.promoteToChat("c0001");
     expect($("#chatHarnessLabel").textContent).toBe("Harness: Claude Code");
-    expect($("#chatRoutingDetail").textContent).toContain("Model: Harness default");
-    expect($<HTMLSelectElement>("#chatModel").disabled).toBe(true);
+    await vi.waitFor(() => expect($<HTMLSelectElement>("#chatModel").options[1]?.value).toBe("claude-code:sonnet"));
+    expect($("#chatRoutingDetail").textContent).toContain("Claude Code default");
+    expect($<HTMLSelectElement>("#chatModel").disabled).toBe(false);
     expect($("#chatPanel").hidden).toBe(true);
+  });
+
+  it("sends an existing discussion and its selected native model to another harness", async () => {
+    const { chat, calls, threads } = setup();
+    addCard(chat, "c0001");
+    threads.c0001 = { frontmatter: { harness: "pi", model: "p/m1" }, turns: [{ role: "agent", body: "Earlier context" }] };
+    chat.setHarnessContext("pi", [
+      { id: "pi", label: "Pi", available: true, capabilities: { multiModelPanel: true } },
+      { id: "claude-code", label: "Claude Code", available: true, capabilities: { multiModelPanel: false } },
+    ] as Parameters<typeof chat.setHarnessContext>[1]);
+    await chat.promoteToChat("c0001");
+    const select = $<HTMLSelectElement>("#chatHarness");
+    select.value = "claude-code";
+    select.dispatchEvent(new Event("change"));
+    const models = $<HTMLSelectElement>("#chatModel");
+    await vi.waitFor(() => expect(models.options[1]?.value).toBe("claude-code:sonnet"));
+    models.value = "claude-code:sonnet";
+    models.dispatchEvent(new Event("change"));
+    footerSend("Continue the earlier discussion.");
+    await settle();
+    expect(calls.reply[0].params).toMatchObject({ threadId: "c0001", harness: "claude-code", modelId: "claude-code:sonnet" });
+    expect(calls.discuss).toBeUndefined();
+    calls.reply[0].resolve();
+    await settle();
   });
 
   it("a slow fetch for thread A never renders into thread B's pane", async () => {

@@ -2352,3 +2352,6 @@ textarea {
 #harnessPermissions section > div { margin-top: .5rem; white-space: pre-line; overflow-wrap: anywhere; }
 #harnessPermissions button + button { margin-left: .5rem; }
 #permissionModeRow[hidden] { display: none; }
+
+.thread-harness { display: inline-flex; align-items: center; gap: .3rem; font-size: .72rem; }
+#chatHandoffHint { width: 100%; font-size: .7rem; }

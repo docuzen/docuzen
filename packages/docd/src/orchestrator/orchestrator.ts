@@ -9,6 +9,7 @@ import { findDirectives } from "./directives.js";
 import { transition } from "./turn-status.js";
 import {
   readAnnotations,
+  listProposals,
   appendAnnotation,
   initThread,
   appendTurn,
@@ -26,6 +27,8 @@ import { ProposalService } from "./proposal-service.js";
 import {
   DOC_TEXT_BUDGET,
   buildAgentContext,
+  documentModel,
+  handoffTranscript,
   cancelKeyFor,
   improvePrompt,
   repoScope,
@@ -63,6 +66,7 @@ export interface OrchestratorDeps {
 }
 
 export interface DiscussArgs {
+  harness?: string;
   threadId: string;
   annotationId: string;
   stance: string;
@@ -177,6 +181,8 @@ export interface TurnSpec {
 
 /** A turn running in this process, from the moment it claims its thread until it settles. */
 interface LiveTurn {
+  /** During a handoff the active runner differs from the last successful thread owner. */
+  runner?: AgentRunner;
   /**
    * Stop was pressed (or the comment deleted). A runner may still resolve the turn
    * normally with a partial reply (PiRunner does), so this flag — not the runner's
@@ -292,7 +298,13 @@ export class Orchestrator {
    */
   async cancel(docPath: string, threadId: string): Promise<void> {
     const live = this.liveTurn(docPath, threadId);
-    if (live) live.cancelled = true;
+    if (live) {
+      live.cancelled = true;
+      if (live.runner) {
+        await live.runner.cancel?.(this.cancelKey(docPath, threadId));
+        return;
+      }
+    }
     let owner: string | undefined;
     try {
       owner = (await readThread(docPath, threadId)).frontmatter.harness;
@@ -406,6 +418,7 @@ export class Orchestrator {
   }> {
     const context = await buildAgentContext(spec.context);
     spec.afterContext?.(context);
+    if (context.handoffNote && this.liveTurn(docPath, spec.threadId)?.cancelled) throw new Error("Handoff cancelled");
     const { turn, sessionId } = await spec.invoke(runner, context, spec.onToken);
     const agentTurn: ThreadTurn = {
       role: "agent",
@@ -456,6 +469,8 @@ export class Orchestrator {
     const { db, now } = this.deps;
     const { threadId } = spec;
     const runner = (await this.harnessForDoc(docPath, spec.preferredHarness)).runner;
+    const live = this.liveTurn(docPath, threadId);
+    if (live) live.runner = runner;
 
     // The document as this turn starts: the version it is stamped with, the text its
     // context is built from, and the base any proposal it returns is checked against.
@@ -486,7 +501,7 @@ export class Orchestrator {
         threadId,
         agentMeta: spec.agentMeta,
         docVersion,
-        context: { ...spec.context, raw },
+        context: { ...spec.context, harnessId: spec.preferredHarness, raw },
         invoke: spec.invoke,
         onToken: spec.onToken,
         afterContext: spec.afterContext,
@@ -528,7 +543,16 @@ export class Orchestrator {
   }
 
   private async discussTurn(docPath: string, args: DiscussArgs, onToken?: TokenSink): Promise<void> {
-    const harness = await this.harnessForDoc(docPath);
+    // The first-send UI can race the initial thread listing. An explicit switch may
+    // continue a saved thread, but must never initialize over its existing transcript.
+    if (args.harness) {
+      const existing = await readThread(docPath, args.threadId).catch((e: NodeJS.ErrnoException) => {
+        if (e.code !== "ENOENT") throw e;
+        return undefined;
+      });
+      if (existing?.turns.length) return this.replyTurn(docPath, args.threadId, args.comment, onToken, args.stance, args.modelId, args.harness);
+    }
+    const harness = await this.harnessForDoc(docPath, args.harness);
     const ann = (await readAnnotations(docPath)).annotations.find(
       (a) => a.id === args.annotationId,
     );
@@ -536,7 +560,7 @@ export class Orchestrator {
 
     // Fresh thread: create it (stance/harness/model on the frontmatter) before the shared
     // spine appends the you-turn into it.
-    const resolvedModel = args.modelId ?? (await readSettings(docPath)).model;
+    const resolvedModel = args.modelId ?? (args.harness ? "" : (await readSettings(docPath)).model);
     await initThread(docPath, {
       id: args.threadId,
       anchorExact: ann.anchor.exact,
@@ -544,7 +568,7 @@ export class Orchestrator {
       status: "running",
       piSession: `sessions/${args.threadId}.session.jsonl`,
       harness: harness.id,
-      ...(resolvedModel ? { model: resolvedModel } : {}),
+      ...(resolvedModel !== undefined ? { model: resolvedModel } : {}),
     });
 
     await this.runTurn(docPath, {
@@ -552,6 +576,7 @@ export class Orchestrator {
       ann,
       youTurn: { body: args.comment },
       agentMeta: args.stance,
+      preferredHarness: harness.id,
       context: {
         docPath,
         ann,
@@ -559,7 +584,7 @@ export class Orchestrator {
         annotationId: args.annotationId,
         stance: args.stance,
         comment: args.comment,
-        modelId: args.modelId,
+        modelId: resolvedModel,
       },
       invoke: (runner, ctx, onToken) => runner.start(ctx, onToken),
       onToken,
@@ -1005,10 +1030,11 @@ export class Orchestrator {
     onToken?: TokenSink,
     stance?: string,
     modelId?: string,
+    requestedHarness?: string,
   ): Promise<void> {
     return this.holding(async (claim) => {
       claim(docPath, threadId);
-      await this.replyTurn(docPath, threadId, message, onToken, stance, modelId);
+      await this.replyTurn(docPath, threadId, message, onToken, stance, modelId, requestedHarness);
     });
   }
 
@@ -1019,18 +1045,25 @@ export class Orchestrator {
     onToken?: TokenSink,
     stance?: string,
     modelId?: string,
+    requestedHarness?: string,
   ): Promise<void> {
     let thread = await readThread(docPath, threadId);
-    const harness = await this.harnessForDoc(docPath, thread.frontmatter.harness);
-    const sid = this.liveSessionId(docPath, threadId, harness);
-    if (!sid || (modelId && modelId !== thread.frontmatter.model)) {
-      // The live pi session is gone — either after a doc reopen (the thread
-      // transcript persists but the in-memory session does not) or because a
-      // sidecar restart left a stale id the runner no longer holds. Rebuild a
-      // fresh session seeded with the prior turns as replayable history, then continue.
-      // A reply asking for a different model does the same: a live session is bound to
-      // the model it was started with, so continuing it would silently ignore the ask.
-      return this.resumeFromTranscript(docPath, threadId, message, onToken, stance, modelId);
+    const harness = await this.harnessForDoc(docPath, requestedHarness ?? thread.frontmatter.harness);
+    const priorOwner = thread.frontmatter.harness ?? (await readSettings(docPath)).harness ?? this.registry().defaultId();
+    const switching = priorOwner !== harness.id;
+    // A complete picker selection without a model explicitly follows the destination CLI default.
+    const wantedModel = requestedHarness ? modelId ?? "" : modelId;
+    const changingModel = wantedModel !== undefined && wantedModel !== (thread.frontmatter.model ?? "");
+    const sid = switching ? null : this.liveSessionId(docPath, threadId, harness);
+    if (switching || changingModel || !sid) {
+      const prior = this.registry().list().some(h => h.id === priorOwner && h.available) ? this.registry().resolve(priorOwner) : undefined;
+      const oldSession = prior ? this.liveSessionId(docPath, threadId, prior) : null;
+      try {
+        return await this.resumeFromTranscript(docPath, threadId, message, onToken, stance, wantedModel, harness,
+          switching || changingModel ? priorOwner : undefined);
+      } finally {
+        if (oldSession && (switching || changingModel)) prior?.runner.release?.(oldSession);
+      }
     }
     // Directive/review-umbrella threads (and any other thread with no persisted
     // annotation) reply with no highlight/surrounding — `buildContext` already knows how
@@ -1102,7 +1135,9 @@ export class Orchestrator {
     message: string,
     onToken?: TokenSink,
     stance?: string,
-    modelId?: string,
+    modelId: string | undefined = undefined,
+    destination?: AgentHarness,
+    handoffFrom?: string,
   ): Promise<void> {
     let thread = await readThread(docPath, threadId);
 
@@ -1129,12 +1164,15 @@ export class Orchestrator {
     const feedback = await this.proposals.pendingRejectFeedback(docPath, threadId);
     const agentComment = feedback.prefix + message;
 
-    await this.runTurn(docPath, {
+    const pending = handoffFrom ? (await listProposals(docPath, threadId)).filter(p => p.status === "pending") : [];
+    const result = await this.runTurn(docPath, {
       threadId,
       ann: ann ?? this.syntheticAnnotation(threadId),
-      preferredHarness: thread.frontmatter.harness,
+      preferredHarness: destination?.id ?? thread.frontmatter.harness,
       youTurn: { body: message },
-      agentMeta: effectiveStance,
+      agentMeta: handoffFrom && destination
+        ? effectiveStance + " · handoff to " + destination.label + (modelId ? " · " + modelId.replace(/^(?:claude-code|codex):/, "") : "")
+        : effectiveStance,
       context: {
         docPath,
         ann,
@@ -1150,18 +1188,30 @@ export class Orchestrator {
       // flows in through buildContext's stancePrompt (no need for the live path's
       // "(Your stance is now …)" preamble, which steers a running one).
       afterContext: (ctx) => {
-        ctx.history = prior;
+        if (handoffFrom && destination) {
+          const handoff = handoffTranscript(prior, hadPaths(docPath).threadFile(threadId));
+          ctx.history = handoff.history;
+          ctx.handoffNote = `Continue this discussion from ${handoffFrom} with ${destination.label}. ${handoff.note}`;
+          if (pending.length) {
+            const notes = pending.slice(-6).map(p => p.id + ": " + (p.rationale || "proposed document edit").slice(0, 300));
+            ctx.handoffNote += "\nPending edits awaiting review (" + pending.length + "):\n" + notes.join("\n");
+          }
+        } else ctx.history = prior;
       },
       invoke: (runner, ctx, tok) => runner.start(ctx, tok),
       onToken,
     });
+    if (handoffFrom && this.liveTurn(docPath, threadId)?.cancelled) {
+      destination?.runner.release?.(result.sessionId);
+      return;
+    }
     // The fresh session was given the thread's current stance in its context.
     this.unsteeredStance.delete(cancelKeyFor(docPath, threadId));
     await this.proposals.markRejectFeedbackDelivered(docPath, feedback.proposalIds);
     // A model named for this reply is now the thread's model: later replies, and a
     // resume after a reopen or on Codex, keep using it.
-    if (modelId && modelId !== thread.frontmatter.model) {
-      await updateThreadFrontmatter(docPath, threadId, { model: modelId });
+    if (destination && (destination.id !== thread.frontmatter.harness || (modelId !== undefined && modelId !== thread.frontmatter.model))) {
+      await updateThreadFrontmatter(docPath, threadId, { harness: destination.id, model: modelId ?? thread.frontmatter.model });
     }
   }
 
@@ -1268,7 +1318,7 @@ export class Orchestrator {
 
     // Effective model: explicit override, else the parent thread's model, else the
     // per-doc settings default; persisted on the branch and threaded into its context.
-    const branchModel = opts.modelId ?? parent.frontmatter.model ?? (await readSettings(docPath)).model;
+    const branchModel = opts.modelId ?? parent.frontmatter.model ?? documentModel(await readSettings(docPath), parent.frontmatter.harness);
 
     await initThread(docPath, {
       id: branchId,
@@ -1435,9 +1485,11 @@ export class Orchestrator {
     // source validation can run. Prior turns are replayed as history either way.
     let history: { role: "you" | "agent"; body: string }[] = [];
     let harnessId: string | undefined;
+    let threadModel: string | undefined;
     try {
       const thread = await readThread(docPath, threadId);
       harnessId = thread.frontmatter.harness;
+      threadModel = thread.frontmatter.model;
       history = thread.turns
         .filter((t) => t.role !== "system")
         .map((t) => ({ role: t.role as "you" | "agent", body: t.body }));
@@ -1458,6 +1510,7 @@ export class Orchestrator {
       annotationId: threadId,
       stance: "none",
       comment: improvePrompt(discussed, history, htmlDoc),
+      modelId: threadModel, harnessId,
     });
     context.history = history;
 
@@ -1537,8 +1590,11 @@ export class Orchestrator {
       " fenced ```mermaid code block (flowchart/sequence/class/state/etc.) — no" +
       " prose, no explanation.";
     let harnessId: string | undefined;
+    let threadModel: string | undefined;
     try {
-      harnessId = (await readThread(docPath, threadId)).frontmatter.harness;
+      const thread = await readThread(docPath, threadId);
+      harnessId = thread.frontmatter.harness;
+      threadModel = thread.frontmatter.model;
     } catch {
       // no thread yet; use doc default harness below
     }
@@ -1565,6 +1621,7 @@ export class Orchestrator {
       annotationId: threadId,
       stance: "none",
       comment: prompt,
+      modelId: threadModel, harnessId,
     });
     // A fresh conversation session: record it, so a follow-up reply() can continue it.
     const { turn } = await this.trackOneShot(

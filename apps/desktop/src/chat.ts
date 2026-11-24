@@ -1,3 +1,4 @@
+import { fillHarnessModels, modelDisplayId, supportsModelPicker } from "./harness-models.js";
 // The chat pane: the conversation with an agent about one thread. This module owns the
 // pane's own state and the flows that send messages; everything else in the "chat
 // region" lives in a focused module that reaches the pane only through `deps`:
@@ -150,6 +151,8 @@ export interface ChatApi {
   refreshThreadModels: () => Promise<void>;
   setDefaultModelKey: (key: string) => void;
   setHarnessContext: (id: string | undefined, list: RpcResult<"listHarnesses">) => void;
+  hasOpenDiscussion: () => boolean;
+  selectDiscussionRoute: (harness: string, model: string) => void;
   modelName: (key: string) => string;
   runReview: () => Promise<void>;
   runResolveDirectives: () => Promise<void>;
@@ -216,14 +219,21 @@ export function initChat(deps: ChatDeps): ChatApi {
   const MORE_OPEN_KEY = "docuzen.chatMoreOpen";
   const harnessLabel = document.querySelector<HTMLElement>("#chatHarnessLabel")!;
   const routingDetail = document.querySelector<HTMLElement>("#chatRoutingDetail")!;
+  const chatHarness = document.querySelector<HTMLSelectElement>("#chatHarness")!;
+  const handoffHint = document.querySelector<HTMLElement>("#chatHandoffHint")!;
+  let nextHarness: string | undefined;
+  let modelPicked = false;
+  let savedThreadModel: string | undefined;
   let documentHarness: string | undefined;
   let threadHarness: string | undefined;
   let harnessList: RpcResult<"listHarnesses"> = [];
 
   function refreshMoreLabel(): void {
-    const id = threadHarness ?? documentHarness;
+    const id = nextHarness ?? threadHarness ?? documentHarness;
+    chatHarness.value = id ?? "";
+    handoffHint.hidden = !threadHarness || (id === threadHarness && (!modelPicked || chatModelEl.value === (savedThreadModel ?? "")));
     const harness = harnessList.find(h => h.id === id);
-    const managed = !!id && id !== "pi" && id !== "codex";
+    const managed = !!id && !supportsModelPicker(id);
     const unavailable = !!id && harnessList.length > 0 && !harness?.available;
     harnessLabel.textContent = "Harness: " + (harness?.label ?? id ?? "Unknown") + (unavailable ? " (unavailable)" : "");
     harnessLabel.title = threadHarness ? "This thread uses its saved harness." : "New discussions use the document harness.";
@@ -231,11 +241,16 @@ export function initChat(deps: ChatDeps): ChatApi {
       (chatModelEl.selectedOptions[0]?.textContent ?? "").replace(/^[^\p{L}\p{N}]+/u, "").trim() || "Default";
     const stance = chatStanceEl.value;
     routingDetail.textContent = "Model: " + model + (stance && stance !== "none" ? " · " + stance : "");
-    chatModelEl.hidden = chatModelEl.disabled = managed;
+    chatModelEl.hidden = managed;
     chatPanelEl.hidden = !!harness && !harness.capabilities.multiModelPanel;
     chatMoreBtnEl.setAttribute("aria-expanded", String(!chatMoreEl.hidden));
   }
 
+  function threadDefaultModel(): string {
+    const target = nextHarness ?? threadHarness ?? documentHarness;
+    if (target === threadHarness && savedThreadModel !== undefined) return savedThreadModel;
+    return target === documentHarness ? defaultModelKey : "";
+  }
   function footerModel(): string {
     return chatModelEl.disabled ? "" : chatModelEl.value;
   }
@@ -253,7 +268,16 @@ export function initChat(deps: ChatDeps): ChatApi {
     }
   });
   chatStanceEl.addEventListener("change", refreshMoreLabel);
-  chatModelEl.addEventListener("change", refreshMoreLabel);
+  chatModelEl.addEventListener("change", () => {
+    modelPicked = true;
+    refreshMoreLabel();
+  });
+  chatHarness.addEventListener("change", () => {
+    nextHarness = chatHarness.value;
+    modelPicked = false;
+    modelSelectOptions(chatModelEl, threadDefaultModel());
+    refreshMoreLabel();
+  });
   let moreOpen = false;
   try {
     moreOpen = localStorage.getItem(MORE_OPEN_KEY) === "1";
@@ -339,7 +363,9 @@ export function initChat(deps: ChatDeps): ChatApi {
       cards.applyThreadNodes(nodes);
       const node = nodes.find(n => n.id === activeChatId);
       if (node) {
+        const previous = nextHarness ?? threadHarness ?? documentHarness;
         threadHarness = node.harness;
+        if (previous !== (nextHarness ?? threadHarness ?? documentHarness)) modelSelectOptions(chatModelEl, threadDefaultModel());
         refreshMoreLabel();
       }
     },
@@ -757,6 +783,9 @@ export function initChat(deps: ChatDeps): ChatApi {
    */
   function setPaneSubject(id: string | null): number {
     activeChatId = id;
+    nextHarness = undefined;
+    modelPicked = false;
+    savedThreadModel = undefined;
     threadHarness = tree.getThreadNodes().find(n => n.id === id)?.harness;
     refreshMoreLabel();
     paneGen++;
@@ -780,7 +809,7 @@ export function initChat(deps: ChatDeps): ChatApi {
     chatQuoteEl.textContent = `“${excerpt(quoted)}”`;
     // Populate the footer model picker (default for now; promoteToChat refines it
     // to the thread's persisted model once the thread is fetched).
-    modelSelectOptions(chatModelEl, defaultModelKey);
+    modelSelectOptions(chatModelEl, threadDefaultModel());
     refreshMoreLabel();
     chatFootEl.hidden = false;
     chatEmptyEl.hidden = true;
@@ -788,8 +817,6 @@ export function initChat(deps: ChatDeps): ChatApi {
 
   /** A thread's persisted turns, with the ‹ k / n › pager under each forked "you" turn. */
   function renderThreadTurns(id: string, thread: ThreadView, agentMeta: (tn: ThreadTurn) => string | undefined): void {
-    threadHarness = thread.frontmatter?.harness;
-    refreshMoreLabel();
     thread.turns.forEach((tn, i) => {
       chatTurn(tn.role, tn.body, agentMeta(tn), tn.thinking, i);
       if (tn.role === "you") {
@@ -834,14 +861,18 @@ export function initChat(deps: ChatDeps): ChatApi {
     const placeholder = () => chatTurn("you", entry.commentInput.value || "(write a comment, then Discuss)");
     renderOpenedThread(id, () => {
       if (!thread) return void placeholder();
+      if (thread.turns.some(t => t.role === "agent")) entry.discussed = true;
+      threadHarness = thread.frontmatter?.harness;
+      savedThreadModel = thread.frontmatter?.model;
       if (thread.frontmatter?.stance) chatStanceEl.value = thread.frontmatter.stance;
       // Picker defaults to the thread's persisted model, else the per-doc default.
       const threadModel = thread.frontmatter?.model;
-      modelSelectOptions(chatModelEl, threadModel ?? defaultModelKey);
+      if (!nextHarness && !modelPicked) modelSelectOptions(chatModelEl, threadModel ?? threadDefaultModel());
       refreshMoreLabel();
-      // Persisted agent turns get a subtle "· {model}" tag when the thread has a model.
+      // After a handoff the current thread model no longer describes older replies.
+      const singleRoute = !thread.turns.some(t => t.role === "agent" && t.meta?.includes(" · handoff to "));
       renderThreadTurns(id, thread, (tn) =>
-        tn.role === "agent" && threadModel ? `${tn.meta ?? "agent"} · ${modelName(threadModel)}` : tn.meta,
+        tn.role === "agent" && singleRoute && threadModel ? `${tn.meta ?? "agent"} · ${modelName(threadModel)}` : tn.meta,
       );
       const lastUser = lastUserTurn(thread.turns);
       if (thread.frontmatter?.status === "error" && lastUser && !chatInputEl.value.trim()) {
@@ -899,18 +930,23 @@ export function initChat(deps: ChatDeps): ChatApi {
       run: () => {
         if (entry && !entry.discussed) {
           return deps.api.discuss(
-            { docPath, threadId, annotationId: threadId, stance: item.stance, comment: item.text, ...(item.modelId ? { modelId: item.modelId } : {}) },
+            { docPath, threadId, annotationId: threadId, stance: item.stance, comment: item.text, ...(item.modelId ? { modelId: item.modelId } : {}), ...(item.harness ? { harness: item.harness } : {}) },
             onEvent,
           );
         }
         return deps.api.reply(
-          { docPath, threadId, message: item.text, stance: item.stance, ...(item.modelId ? { modelId: item.modelId } : {}) },
+          { docPath, threadId, message: item.text, stance: item.stance, ...(item.modelId ? { modelId: item.modelId } : {}), ...(item.harness ? { harness: item.harness } : {}) },
           onEvent,
         );
       },
       // Runs before driveSend releases the thread, so a message queued behind this one
       // sees the thread discussed and goes out as a reply.
       onSuccess: async () => {
+        if (item.harness && isShown(t) && !t.scope.stopped.has(threadId)) {
+          threadHarness = item.harness;
+          savedThreadModel = item.modelId ?? "";
+          refreshMoreLabel();
+        }
         const finalText = await fetchLastAgentReply(docPath, threadId);
         if (!isCurrent(t)) return; // the reply is on disk; the document re-reads it when reopened
         turnElByItemId.delete(item.id); // reached a terminal (sent) state — no more failure/removal to wire up
@@ -1012,6 +1048,7 @@ export function initChat(deps: ChatDeps): ChatApi {
       id: `q${++queueSeq}`,
       threadId,
       text,
+      ...(!picked && threadId === activeChatId && (nextHarness || modelPicked) ? { harness: nextHarness ?? threadHarness ?? documentHarness } : {}),
       stance: picked?.stance ?? chatStanceEl.value,
       modelId: picked ? picked.modelId : footerModel() || undefined,
     };
@@ -1179,7 +1216,7 @@ export function initChat(deps: ChatDeps): ChatApi {
     chatQuoteEl.textContent = title;
     chatFootEl.hidden = false;
     chatEmptyEl.hidden = true;
-    modelSelectOptions(chatModelEl, defaultModelKey);
+    modelSelectOptions(chatModelEl, threadDefaultModel());
     refreshMoreLabel();
     let thread: ThreadView | null = null;
     let failure = "";
@@ -1191,8 +1228,10 @@ export function initChat(deps: ChatDeps): ChatApi {
     if (gen !== paneGen) return; // superseded by a newer subject (see setPaneSubject)
     renderOpenedThread(id, () => {
       if (thread) {
+        threadHarness = thread.frontmatter?.harness;
+        savedThreadModel = thread.frontmatter?.model;
         if (thread.frontmatter?.stance) chatStanceEl.value = thread.frontmatter.stance;
-        modelSelectOptions(chatModelEl, thread.frontmatter?.model ?? defaultModelKey);
+        if (!nextHarness && !modelPicked) modelSelectOptions(chatModelEl, thread.frontmatter?.model ?? threadDefaultModel());
         refreshMoreLabel();
         if (!thread.turns.length) chatTurn("system", "No transcript for this agent task yet.");
         renderThreadTurns(id, thread, (tn) => tn.meta);
@@ -1258,6 +1297,7 @@ export function initChat(deps: ChatDeps): ChatApi {
    */
   function showDirectiveResult(headline: string, reply: string, threadId?: string): void {
     setPaneSubject(threadId ?? null);
+    if (threadId) modelSelectOptions(chatModelEl, threadDefaultModel());
     chatQuoteEl.hidden = true;
     // Footer only when there is a single addressable thread — the N≠1 summary
     // banner has no reply target (each directive is repliable from its own row).
@@ -1403,7 +1443,7 @@ export function initChat(deps: ChatDeps): ChatApi {
 
   /** Resolve a model key to its display name (falls back to the raw key). */
   function modelName(key: string): string {
-    return threadModels.find((m) => m.key === key)?.name ?? key;
+    return threadModels.find((m) => m.key === key)?.name ?? modelDisplayId(key);
   }
 
   /**
@@ -1413,12 +1453,9 @@ export function initChat(deps: ChatDeps): ChatApi {
    * Empty model list → only the "default" option, so behavior is unchanged.
    */
   function modelSelectOptions(sel: HTMLSelectElement, selected?: string): void {
-    sel.innerHTML = "";
-    sel.appendChild(el("option", { value: "", textContent: "🧠 default" }));
-    for (const m of threadModels) {
-      sel.appendChild(el("option", { value: m.key, textContent: m.name }));
-    }
-    sel.value = selected ?? "";
+    const harness = (sel === chatModelEl ? nextHarness ?? threadHarness ?? documentHarness : documentHarness) ?? "pi";
+    fillHarnessModels(sel, deps.api, harness, deps.getDocPath(), selected ?? "", threadModels,
+      sel === chatModelEl ? refreshMoreLabel : undefined);
   }
 
   return {
@@ -1445,13 +1482,39 @@ export function initChat(deps: ChatDeps): ChatApi {
     getThreadNodes: tree.getThreadNodes,
     refreshThreadTree: tree.refreshThreadTree,
     refreshThreadModels,
+    hasOpenDiscussion: () => !!activeChatId && !chatFootEl.hidden,
+    selectDiscussionRoute: (harness, model) => {
+      if (!activeChatId || chatFootEl.hidden) return;
+      nextHarness = harness;
+      modelPicked = true;
+      modelSelectOptions(chatModelEl, model);
+      refreshMoreLabel();
+      chatInputEl.focus();
+    },
     setHarnessContext: (id, list) => {
+      const oldHarness = documentHarness;
       documentHarness = id;
       harnessList = list;
+      chatHarness.replaceChildren(...list.map(h => el("option", {
+        value: h.id, textContent: h.available ? h.label : h.label + " (unavailable)", disabled: !h.available,
+      })));
+      const effective = nextHarness ?? threadHarness ?? id;
+      if (effective && (chatModelEl.dataset.modelHarness !== effective || !activeChatId)) {
+        modelSelectOptions(chatModelEl, threadDefaultModel());
+      }
+      if (id && oldHarness !== id) {
+        for (const picker of document.querySelectorAll<HTMLSelectElement>("#comments .cmodel, #reviewModel")) {
+          modelSelectOptions(picker, defaultModelKey);
+        }
+      }
       refreshMoreLabel();
     },
     setDefaultModelKey: (key) => {
+      const previous = defaultModelKey;
       defaultModelKey = key;
+      if (!threadHarness && previous !== key && (!chatModelEl.value || chatModelEl.value === previous)) {
+        modelSelectOptions(chatModelEl, key);
+      }
     },
     modelName,
     runReview: passes.runReview,

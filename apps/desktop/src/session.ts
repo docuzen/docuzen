@@ -18,7 +18,7 @@ const METHODS = [
   "approveProposal", "rejectProposal", "listProposals",
   "createAnnotation", "deleteAnnotation", "resolveComment", "listAnnotations",
   "listThreads", "getThread", "listVersions", "readVersion", "restoreVersion",
-  "listModels", "saveModels", "listHarnesses", "getHarnessModes", "answerHarnessPermission", "getSettings", "setSettings",
+  "listModels", "saveModels", "listHarnesses", "getHarnessModes", "listHarnessModels", "answerHarnessPermission", "getSettings", "setSettings",
   "listTasks", "exportHadz", "importHadz", "createDoc", "saveImage", "readImage",
   "inspectPath",
 ] as const satisfies readonly RpcMethod[];

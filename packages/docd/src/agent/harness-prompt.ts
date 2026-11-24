@@ -66,6 +66,7 @@ export function buildHarnessPrompt(ctx: AgentContext, label: string): string {
     "## Stance",
     ctx.stancePrompt,
     ...instructions,
+    ...(ctx.handoffNote ? [ctx.handoffNote] : []),
     ...history,
     "",
     "## Current document text",

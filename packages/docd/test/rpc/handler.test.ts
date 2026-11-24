@@ -27,6 +27,7 @@ const DOC = "We store limits in Redis with a TTL.\n";
 
 beforeEach(async () => {
   dir = await mkdtemp(join(tmpdir(), "rpc-"));
+  vi.stubEnv("DOCUZEN_CONFIG_DIR", join(dir, "config"));
   docPath = join(dir, "plan.md");
   await writeFile(docPath, DOC, "utf8");
   const start = DOC.indexOf("Redis");
@@ -50,6 +51,7 @@ beforeEach(async () => {
 });
 afterEach(async () => {
   handler.closeAll();
+  vi.unstubAllEnvs();
   await rm(dir, { recursive: true, force: true });
 });
 

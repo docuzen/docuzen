@@ -249,13 +249,28 @@ export class AcpRunner implements AgentRunner {
     return !!session && !session.live.closed && (owner === undefined || session.cancelKey === owner);
   }
 
+  private optionsProbe?: { cwd: string; result: Promise<SessionOptionsResponse> };
+
+  private sessionOptions(cwd: string): Promise<SessionOptionsResponse> {
+    if (this.optionsProbe?.cwd === cwd) return this.optionsProbe.result;
+    const result = this.connect().then(live => withTimeout(live.connection.agent.request(previewMethods.agent.session.options, {
+      cwd, _meta: this.spec.sessionMeta,
+    }) as Promise<SessionOptionsResponse>, 20_000, this.spec.label + " did not return session options"));
+    this.optionsProbe = { cwd, result };
+    const clear = () => { if (this.optionsProbe?.result === result) this.optionsProbe = undefined; };
+    void result.then(clear, clear);
+    return result;
+  }
+
+  async listModels(cwd: string) {
+    const res = await this.sessionOptions(cwd);
+    const option = modelOption(res);
+    return option ? selectChoices(option).map(o => ({ key: this.spec.id + ":" + o.value, name: o.name })) : [];
+  }
+
   async permissionModes(cwd: string) {
     if (!this.spec.selectedMode) throw new Error("This harness has no selectable permission mode.");
-    const live = await this.connect();
-    // This pinned adapter supports the ACP options preview without creating a conversation.
-    const res = await live.connection.agent.request(previewMethods.agent.session.options, {
-      cwd, _meta: this.spec.sessionMeta,
-    }) as SessionOptionsResponse;
+    const res = await this.sessionOptions(cwd);
     return { selected: this.spec.selectedMode(), modes: res.modes?.availableModes.map(({ id, name }) => ({ id, name })) ?? [] };
   }
 
@@ -311,6 +326,7 @@ export class AcpRunner implements AgentRunner {
     };
     this.byAcpId.set(res.sessionId, session);
     try {
+      await this.applySessionModel(session, res);
       await this.applySessionMode(session, res);
       this.throwIfCancelled(starting);
     } catch (e) {
@@ -325,6 +341,23 @@ export class AcpRunner implements AgentRunner {
 
   private throwIfCancelled(starting: { cancelled: boolean }): void {
     if (starting.cancelled) throw new Error(`${this.spec.label} run cancelled`);
+  }
+
+  private async applySessionModel(session: Session, res: Pick<NewSessionResponse, "configOptions">): Promise<void> {
+    const key = session.ctx.modelId;
+    const prefix = this.spec.id + ":";
+    if (!key?.startsWith(prefix)) return;
+    const model = key.slice(prefix.length);
+    const option = modelOption(res);
+    if (!option || !selectValues(option).includes(model)) {
+      throw new Error(`${this.spec.label} does not offer model "${model}". Choose another model in Settings.`);
+    }
+    if (option.currentValue !== model) {
+      const result = await session.live.connection.agent.request(methods.agent.session.setConfigOption, {
+        sessionId: session.acpId, configId: option.id, value: model,
+      });
+      if (modelOption(result)?.currentValue !== model) throw new Error(`${this.spec.label} did not select "${model}".`);
+    }
   }
 
   /** Switch the session into the read-only mode the spec names; refuse an agent that cannot. */
@@ -410,6 +443,7 @@ export class AcpRunner implements AgentRunner {
         ...(this.spec.sessionMeta && { _meta: this.spec.sessionMeta }),
       });
       session.open = true;
+      await this.applySessionModel(session, res);
       await this.applySessionMode(session, res);
     } catch (e) {
       this.forget(session);
@@ -702,8 +736,15 @@ export class AcpRunner implements AgentRunner {
   }
 }
 
+function modelOption(res: Pick<NewSessionResponse, "configOptions">) {
+  return res.configOptions?.find((o): o is SessionConfigOption & { type: "select" } => o.type === "select" && o.category === "model");
+}
+function selectChoices(option: SessionConfigOption & { type: "select" }) {
+  return option.options.flatMap(o => "options" in o ? [...o.options] : [o]);
+}
+
 function selectValues(option: SessionConfigOption & { type: "select" }): string[] {
-  return option.options.flatMap((o) => ("options" in o ? o.options.map((x) => x.value) : [o.value]));
+  return selectChoices(option).map(o => o.value);
 }
 
 function emptyReplyReason(label: string, stop: StopReason): string {

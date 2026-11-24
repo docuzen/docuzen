@@ -18,6 +18,7 @@
 
 /** One not-yet-dispatched (or currently-dispatching) chat message. */
 export interface QueuedTurn {
+  harness?: string;
   /** Unique id for this item's lifetime — used for ✕ removal and DOM bookkeeping. */
   id: string;
   threadId: string;

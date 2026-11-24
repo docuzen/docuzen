@@ -908,6 +908,7 @@ export class PiRunner implements AgentRunner {
         ctx.annotationsDigest,
       );
     }
+    if (ctx.handoffNote) parts.push(ctx.handoffNote);
     parts.push(...historySection(ctx.history, PI_HISTORY_HEADING, PI_HISTORY_LABELS));
     parts.push("", `## The reviewer highlighted\n"${ctx.anchorExact}"`, "");
     if (ctx.replacementOnly || structuredImprove) {

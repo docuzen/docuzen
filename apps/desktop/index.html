@@ -49,6 +49,8 @@
             <button id="chatMoreBtn" class="morebtn" type="button" aria-expanded="false" aria-controls="chatMore">Options</button>
           </div>
           <div id="chatMore" class="chatmore" hidden>
+            <label class="thread-harness">Reply with <select id="chatHarness" class="stance" aria-label="Harness for the next reply"></select></label>
+            <span id="chatHandoffHint" class="smuted" hidden>Your next message will carry this conversation to the selected harness or model.</span>
             <select id="chatStance" class="stance" title="Agent stance">
               <option value="none">🗣 none</option>
               <option value="critiquer">🔍 critiquer</option>
@@ -154,7 +156,7 @@
         <div class="srow">
           <label for="setHarness">Document harness</label>
           <select id="setHarness"></select>
-          <span class="smuted">Used for new discussions here and as the default for new documents. Existing threads keep their harness.</span>
+          <span class="smuted">Used for new discussions and new documents. To switch an existing thread with its history, choose Reply with in chat Options.</span>
         </div>
         <div class="settings-scroll">
           <div id="harnessCaps" class="caprow"></div>
@@ -167,6 +169,7 @@
             <label for="setDefaultModel">Default model</label>
             <select id="setDefaultModel"></select>
             <span id="setDefaultModelHint" class="smuted"></span>
+            <button id="useDiscussionRoute" class="action" type="button" hidden>Use for current discussion</button>
           </div>
           <details id="modelProviders" class="model-providers">
             <summary>Manage model providers <span id="modelCount"></span></summary>

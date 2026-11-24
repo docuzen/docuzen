@@ -83,6 +83,8 @@ export interface ShellDeps {
   runResolveDirectives: () => Promise<void>;
   refreshThreadModels: () => Promise<void>;
   setDefaultModelKey: (key: string) => void;
+  hasOpenDiscussion: () => boolean;
+  selectDiscussionRoute: (harness: string, model: string) => void;
   setHarnessContext: (id: string | undefined, list: RpcResult<"listHarnesses">) => void;
   getThreadNodes: () => ThreadNode[];
   refreshThreadTree: () => Promise<void>;
@@ -498,6 +500,8 @@ export function initShell(deps: ShellDeps): ShellApi {
     log: deps.log,
     setDefaultModelKey: deps.setDefaultModelKey,
     setHarnessContext: deps.setHarnessContext,
+    hasOpenDiscussion: deps.hasOpenDiscussion,
+    selectDiscussionRoute: deps.selectDiscussionRoute,
     refreshThreadModels: deps.refreshThreadModels,
     modelName: deps.modelName,
     activeDocPath: () => tabs[activeIdx]?.docPath,

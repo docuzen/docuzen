@@ -1,3 +1,4 @@
+import { fillHarnessModels, modelDisplayId, supportsModelPicker } from "./harness-models.js";
 // The Settings modal (per-document harness, tool scope, edit mode, default model,
 // standing instructions, web search), the model manager inside it (pi's models.json,
 // keys write-only), and the active document’s harness in the status bar.
@@ -8,7 +9,7 @@ import type { AgentHarness, HadSettings, ModelConfig } from "@ai-native-doc/docd
 import type { ShellDeps } from "./shell.js";
 import { confirmAction, el, wireModal, reportError } from "./ui.js";
 
-export interface SettingsDeps extends Pick<ShellDeps, "api" | "log" | "modelName" | "refreshThreadModels" | "setDefaultModelKey" | "setHarnessContext"> {
+export interface SettingsDeps extends Pick<ShellDeps, "api" | "log" | "modelName" | "refreshThreadModels" | "setDefaultModelKey" | "setHarnessContext" | "hasOpenDiscussion" | "selectDiscussionRoute"> {
   /** Settings are per document: the active one's path, or undefined (the modal and saves are no-ops). */
   activeDocPath: () => string | undefined;
 }
@@ -26,6 +27,14 @@ export function initSettings(deps: SettingsDeps): SettingsApi {
   const settingsModal = document.querySelector<HTMLDivElement>("#settingsModal")!;
   const setHarnessEl = document.querySelector<HTMLSelectElement>("#setHarness")!;
   const harnessCapsEl = document.querySelector<HTMLDivElement>("#harnessCaps")!;
+  const useDiscussionRoute = document.querySelector<HTMLButtonElement>("#useDiscussionRoute")!;
+  useDiscussionRoute.addEventListener("click", () => {
+    const h = selectedHarnessInfo();
+    if (!h?.available || !settingsDocPath || !deps.hasOpenDiscussion()) return;
+    const model = setDefaultModelEl.disabled ? "" : setDefaultModelEl.value;
+    closeSettings();
+    deps.selectDiscussionRoute(h.id, model);
+  });
   const modeRow = document.querySelector<HTMLElement>("#permissionModeRow")!;
   const modeSelect = document.querySelector<HTMLSelectElement>("#setPermissionMode")!;
   const modeHint = document.querySelector<HTMLElement>("#permissionModeHint")!;
@@ -105,7 +114,7 @@ export function initSettings(deps: SettingsDeps): SettingsApi {
           ? "Web: harness"
           : "",
       h.capabilities.documentTools === "docuzen-managed" ? "Doc tools: managed" : "",
-      h.id === "codex" ? "Model: Docuzen provider" : h.id !== "pi" ? "Model: harness-managed" : "",
+      h.id === "pi" ? "" : supportsModelPicker(h.id) ? "Models: " + h.label : "Model: harness default",
       h.capabilities.thinking ? "Thinking" : "",
       h.capabilities.cancel ? "Cancel" : "",
       h.capabilities.multiModelPanel ? "Panel" : "",
@@ -148,24 +157,15 @@ export function initSettings(deps: SettingsDeps): SettingsApi {
 
   function syncHarnessManagedControls(): void {
     const h = selectedHarnessInfo();
-    const harnessManagedModels = !!h && h.id !== "pi" && h.id !== "codex";
-    providersEl.hidden = harnessManagedModels;
-    if (harnessManagedModels) providersEl.open = false;
-    setDefaultModelEl.disabled = harnessManagedModels;
-    modelAddBtn.disabled = harnessManagedModels;
-    modelListEl.classList.toggle("disabled", harnessManagedModels);
-    for (const btn of modelListEl.querySelectorAll<HTMLButtonElement>("button")) {
-      btn.disabled = harnessManagedModels;
-    }
-    if (harnessManagedModels) {
-      setDefaultModelEl.value = "";
+    useDiscussionRoute.hidden = !deps.hasOpenDiscussion();
+    useDiscussionRoute.disabled = !h?.available;
+    const usesPiRegistry = h?.id === "pi";
+    providersEl.hidden = !usesPiRegistry;
+    if (!usesPiRegistry) {
+      providersEl.open = false;
       hideModelForm();
     }
-    setDefaultModelHintEl.textContent = harnessManagedModels
-      ? `${h?.label ?? "This harness"} uses its own model configuration.`
-      : h?.id === "codex"
-        ? "Select a model row to launch Codex with a Docuzen provider instead of ~/.codex defaults."
-      : "";
+    setDefaultModelHintEl.textContent = h && !supportsModelPicker(h.id) ? h.label + " uses its own model configuration." : "";
 
     const harnessManagedWebSearch = h?.capabilities.webSearch === "harness-managed";
     setWebSearchEl.disabled = harnessManagedWebSearch;
@@ -219,15 +219,11 @@ export function initSettings(deps: SettingsDeps): SettingsApi {
         ]),
       );
     }
-    // Rebuild the default-model select, preserving the current selection if still present.
-    const prev = setDefaultModelEl.value;
-    setDefaultModelEl.innerHTML = "";
-    setDefaultModelEl.appendChild(el("option", { value: "", textContent: "— sidecar default —" }));
-    for (const m of configuredModels) {
-      setDefaultModelEl.appendChild(el("option", { value: m.key, textContent: m.name }));
-    }
-    if (prev && configuredModels.some((m) => m.key === prev)) setDefaultModelEl.value = prev;
-    syncHarnessManagedControls();
+    if (setHarnessEl.value === "pi") fillDefaultModels(setDefaultModelEl.value);
+  }
+
+  function fillDefaultModels(selected = "", path = settingsDocPath) {
+    fillHarnessModels(setDefaultModelEl, deps.api, setHarnessEl.value, path, selected, configuredModels);
   }
 
   /** The key of the row the form is editing (Edit mode), or undefined when adding. */
@@ -328,9 +324,9 @@ export function initSettings(deps: SettingsDeps): SettingsApi {
       setInstructionsEl.value = s.instructions ?? "";
       setWebSearchEl.checked = s.webSearch?.enabled !== false;
       setWebProviderEl.value = s.webSearch?.provider ?? "ddg";
-      await refreshModels();
+      if (setHarnessEl.value === "pi") await refreshModels();
       if (stale()) return;
-      setDefaultModelEl.value = s.model ?? "";
+      fillDefaultModels(s.model, docPath);
       syncHarnessManagedControls();
     } catch (e) {
       // Never show the form without this document's values: it would hold the last
@@ -359,9 +355,7 @@ export function initSettings(deps: SettingsDeps): SettingsApi {
   async function saveSettings(permissionMode?: string): Promise<void> {
     const docPath = settingsDocPath;
     if (!docPath) return;
-    const harness = selectedHarnessInfo();
-    const harnessManagedModels = !!harness && harness.id !== "pi" && harness.id !== "codex";
-    const model = harnessManagedModels ? undefined : setDefaultModelEl.value || undefined;
+    const model = setDefaultModelEl.disabled ? undefined : setDefaultModelEl.value || undefined;
     const instructions = setInstructionsEl.value.trim() || undefined;
     const webSearch = {
       enabled: setWebSearchEl.checked,
@@ -391,6 +385,8 @@ export function initSettings(deps: SettingsDeps): SettingsApi {
   setHarnessEl.addEventListener("change", () => {
     renderHarnessCaps(setHarnessEl.value);
     syncHarnessManagedControls();
+    fillDefaultModels();
+    if (setHarnessEl.value === "pi") void refreshModels();
     void refreshModes();
     void saveSettings();
   });
@@ -432,7 +428,7 @@ export function initSettings(deps: SettingsDeps): SettingsApi {
     const id = settings?.harness;
     const h = list.find(item => item.id === id);
     const modelKey = settings?.model;
-    const model = modelKey && (id === "pi" || id === "codex") ? deps.modelName(modelKey) : "";
+    const model = modelKey ? modelDisplayId(deps.modelName(modelKey)) : "";
     const unavailable = !!id && list.length > 0 && !h?.available;
     harnessBadgeEl.textContent = "Document harness: " + (h?.label ?? id ?? "Unknown") +
       (unavailable ? " (unavailable)" : model ? " · " + model : "");

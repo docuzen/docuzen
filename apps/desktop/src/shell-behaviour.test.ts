@@ -48,6 +48,8 @@ function setup(opts: { settings?: Record<string, unknown>; versions?: unknown[] 
     }),
     listHarnesses: vi.fn(async () => [PI, CODEX]),
     listModels: vi.fn(async () => models),
+    listHarnessModels: vi.fn(async ({ harness }: { harness: string }) => harness === "claude-code"
+      ? [{ key: "claude-code:haiku", name: "Haiku" }] : [{ key: "codex:gpt-test", name: "GPT Test" }]),
     saveModels: vi.fn(async ({ models: m }: { models: Record<string, unknown>[] }) => {
       models = m.map((x) => ({ ...x, hasKey: true, apiKey: undefined }));
       return { ok: true };
@@ -131,6 +133,36 @@ describe("Settings modal", () => {
     expect(all<HTMLOptionElement>("#setHarness option").map((o) => o.value)).toEqual(["pi", "codex"]);
     expect(all("#modelList .modelrow .mname").map((n) => n.textContent)).toEqual(["Opus"]);
     expect($("#harnessCaps").textContent).toContain("Web: Docuzen");
+  });
+
+  it("loads and saves each native harness's models, ignoring a late answer from the previous harness", async () => {
+    const { shell, api } = setup();
+    api.listHarnesses.mockResolvedValue([PI, { ...CODEX, available: true }, { ...CODEX, id: "claude-code", label: "Claude Code", available: true }]);
+    await shell.openInTab("/d/a.md");
+    menu.fire("settings");
+    await settle();
+    const late = deferred<{ key: string; name: string }[]>();
+    api.listHarnessModels.mockImplementationOnce(() => late.promise);
+    change("#setHarness", "claude-code");
+    await settle();
+    change("#setHarness", "codex");
+    await settle();
+    late.resolve([{ key: "claude-code:haiku", name: "Haiku" }]);
+    await settle();
+    const options = () => all<HTMLOptionElement>("#setDefaultModel option").map(o => o.value);
+    expect(options()).toEqual(["", "codex:gpt-test"]);
+    change("#setDefaultModel", "codex:gpt-test");
+    expect(api.setSettings.mock.calls.at(-1)?.[0].settings.model).toBe("codex:gpt-test");
+    change("#setHarness", "claude-code");
+    await settle();
+    expect(options()).toEqual(["", "claude-code:haiku"]);
+    expect($<HTMLSelectElement>("#setDefaultModel").disabled).toBe(false);
+    change("#setDefaultModel", "claude-code:haiku");
+    expect(api.setSettings.mock.calls.at(-1)?.[0].settings.model).toBe("claude-code:haiku");
+    $("#settingsClose").click();
+    menu.fire("settings");
+    await settle();
+    expect($<HTMLSelectElement>("#setDefaultModel").value).toBe("claude-code:haiku");
   });
 
   it("switching to Editing mode saves it with the rest of the document's settings", async () => {

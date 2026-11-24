@@ -24,8 +24,8 @@ describe("Settings harness controls", () => {
 
     expect(harnessSource).toContain("unavailableReason");
     expect(harnessSource).toContain("Web: harness");
-    expect(harnessSource).toContain("Model: Docuzen provider");
-    expect(harnessSource).toContain("Model: harness-managed");
+    expect(harnessSource).toContain("supportsModelPicker");
+    expect(harnessSource).toContain("Model: harness default");
   });
 
   it("keeps Codex model controls editable while disabling web search that the CLI owns", () => {
@@ -38,9 +38,7 @@ describe("Settings harness controls", () => {
     expect(htmlSource).toContain('id="setDefaultModelHint"');
     expect(htmlSource).toContain('id="setWebSearchHint"');
     expect(settingsSource).toContain("function syncHarnessManagedControls");
-    expect(settingsSource).toContain('h.id !== "pi" && h.id !== "codex"');
-    expect(settingsSource).toContain("modelAddBtn.disabled = harnessManagedModels");
-    expect(settingsSource).toContain("launch Codex with a Docuzen provider");
+    expect(settingsSource).toContain("providersEl.hidden = !usesPiRegistry");
     expect(settingsSource).toContain("setWebSearchEl.disabled = harnessManagedWebSearch");
     expect(settingsSource).toContain("syncHarnessManagedControls()");
   });

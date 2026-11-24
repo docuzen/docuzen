@@ -355,6 +355,12 @@ printf 'final answer' > "$out"
       expect.any(String),
       "-",
     ]);
+
+    writeFileSync(argsPath, "");
+    await runner.start({ ...baseCtx, scopeDir: dir, modelId: "codex:native-test" });
+    const nativeArgs = readFileSync(argsPath, "utf8").trim().split("\n");
+    expect(nativeArgs.slice(0, 3)).toEqual(["exec", "--model", "native-test"]);
+    expect(nativeArgs).not.toContain('model_provider="docuzen"');
   });
 
   it("cancel() stops emissions even though the child keeps writing to stdout afterward", async () => {

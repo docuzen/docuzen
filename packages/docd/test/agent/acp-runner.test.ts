@@ -78,7 +78,8 @@ function fakeAgent(opts: FakeAgentOptions) {
     })
     .onRequest(methods.agent.session.setConfigOption, ({ params }) => {
       log.setConfig.push({ configId: params.configId, value: params.value });
-      return { configOptions: [] };
+      return { configOptions: (opts.session?.configOptions ?? []).map(o =>
+        o.id === params.configId && o.type === "select" ? { ...o, currentValue: String(params.value) } : o) };
     })
     .onNotification(methods.agent.session.cancel, ({ params }) => {
       log.cancels.push(params.sessionId);
@@ -234,6 +235,18 @@ describe("AcpRunner — a turn", () => {
 });
 
 describe("AcpRunner — parking sessions between turns", () => {
+  it("applies the chosen native model on create and resume and rejects unavailable selections", async () => {
+    const session = { ...PLAN_MODES, configOptions: [{ type: "select", category: "model", id: "model", name: "Model",
+      currentValue: "opus", options: [{ value: "haiku", name: "Haiku" }, { value: "opus", name: "Opus" }] }] } satisfies Omit<NewSessionResponse, "sessionId">;
+    const { app, log } = fakeAgent({ parks: true, session, prompt: async ({ say }) => { await say("OK"); } });
+    const runner = new AcpRunner(spec(), { launch: inProcess(app).launch });
+    const opened = await runner.start(ctx({ modelId: "claude-code:haiku" }));
+    await runner.send(opened.sessionId, "Continue");
+    expect(log.setConfig).toEqual([{ configId: "model", value: "haiku" }, { configId: "model", value: "haiku" }]);
+    await expect(runner.start(ctx({ modelId: "claude-code:missing" }))).rejects.toThrow(/does not offer model/);
+    runner.dispose();
+  });
+
   it("closes each session after its turn and resumes it, back in read-only mode, for the next reply", async () => {
     const { app, log } = fakeAgent({ parks: true, session: PLAN_MODES, prompt: async ({ say }) => void (await say("ok")) });
     const runner = new AcpRunner(spec(), { launch: inProcess(app).launch });

@@ -44,6 +44,7 @@ export interface RpcSchema {
       stance: string;
       comment: string;
       modelId?: string;
+      harness?: string;
     };
     result: { ok: boolean };
     event: true;
@@ -55,6 +56,7 @@ export interface RpcSchema {
       message: string;
       stance?: string;
       modelId?: string;
+      harness?: string;
     };
     result: { ok: boolean };
     event: true;
@@ -187,6 +189,10 @@ export interface RpcSchema {
   listHarnesses: {
     params: Record<string, never>;
     result: Array<Omit<AgentHarness, "runner">>;
+  };
+  listHarnessModels: {
+    params: { docPath: string; harness: string };
+    result: { key: string; name: string }[];
   };
   getHarnessModes: {
     params: { docPath: string; harness: string };

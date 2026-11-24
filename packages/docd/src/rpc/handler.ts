@@ -211,13 +211,14 @@ export class RpcHandler {
             stance: p.stance,
             comment: p.comment,
             modelId: p.modelId,
+            harness: p.harness,
           },
           tokenSink(emit),
         );
         return { ok: true };
       },
       reply: async (p, emit) => {
-        await this.orch(p.docPath).reply(p.docPath, p.threadId, p.message, tokenSink(emit), p.stance, p.modelId);
+        await this.orch(p.docPath).reply(p.docPath, p.threadId, p.message, tokenSink(emit), p.stance, p.modelId, p.harness);
         return { ok: true };
       },
       panel: async (p, emit) => {
@@ -270,6 +271,12 @@ export class RpcHandler {
         return { ok: true };
       },
       listHarnesses: () => this.registry.list(),
+      listHarnessModels: async (p) => {
+        const h = this.registry.resolve(p.harness);
+        if (h.id === "pi") return (await listModels(this.modelsPath)).map(({ key, name }) => ({ key, name }));
+        if (!h.runner.listModels) return [];
+        return h.runner.listModels(dirname(p.docPath));
+      },
       getHarnessModes: async (p) => {
         const h = this.registry.resolve(p.harness);
         if (!h.permissionModes || !h.runner.permissionModes) throw new Error("No permission modes for this harness.");

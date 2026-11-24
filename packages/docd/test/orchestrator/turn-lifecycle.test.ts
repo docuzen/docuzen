@@ -18,6 +18,8 @@ import {
   writeSettings,
 } from "../../src/had/index.js";
 import { createAnchor } from "../../src/anchor/index.js";
+import { HarnessRegistry, PI_CAPABILITIES } from "../../src/agent/harness-registry.js";
+import { handoffTranscript } from "../../src/orchestrator/context.js";
 import { FakePiRunner } from "../../src/agent/fake-runner.js";
 import type { AgentContext, AgentRunner, AgentTurn } from "../../src/agent/types.js";
 
@@ -371,6 +373,40 @@ describe("review findings get their own conversations (H9)", () => {
     expect(ctx.reviewMode).toBeUndefined();
     expect(ctx.conversationOnly).toBe(true);
     expect(ctx.anchorExact).toBe("Redis");
+  });
+});
+
+describe("handoff in the same discussion", () => {
+  it("transfers visible history and document context and commits the destination only after success", async () => {
+    await seedComment();
+    await writeSettings(docPath, { scope: "folder", harness: "pi", instructions: "Keep the rollout gradual." });
+    const pi = new FakePiRunner([{ reply: "Agreed on Juniper." }]);
+    const claude = new FakePiRunner([{ reply: "The code is Juniper." }, { reply: "Continuing." }]);
+    const registry = HarnessRegistry.single(pi);
+    registry.register({ id: "claude-code", label: "Claude Code", capabilities: PI_CAPABILITIES, runner: claude, available: true });
+    registry.register({ id: "codex", label: "Codex", capabilities: PI_CAPABILITIES, runner: new FakePiRunner([]), available: true });
+    const orch = new Orchestrator({ registry, db, now: () => "t" });
+    await orch.discuss(docPath, { threadId: "c0001", annotationId: "c0001", stance: "none", comment: "Our code is Juniper." });
+    await orch.reply(docPath, "c0001", "What was our code?", undefined, undefined, "claude-code:haiku", "claude-code");
+    const context = claude.contextFor(claude.lastSessionId()!);
+    expect(context).toMatchObject({ docText: DOC, anchorExact: SENTENCE, instructions: "Keep the rollout gradual.", modelId: "claude-code:haiku",
+      history: [{ role: "you", body: "Our code is Juniper." }, { role: "agent", body: "Agreed on Juniper." }] });
+    const thread = await readThread(docPath, "c0001");
+    expect(thread.frontmatter).toMatchObject({ harness: "claude-code", model: "claude-code:haiku" });
+    expect(thread.turns).toHaveLength(4);
+    await orch.reply(docPath, "c0001", "Continue");
+    expect(claude.sentMessages).toEqual(["Continue"]);
+    await expect(orch.reply(docPath, "c0001", "Switch", undefined, undefined, "codex:test", "codex")).rejects.toThrow();
+    expect((await readThread(docPath, "c0001")).frontmatter).toMatchObject({ harness: "claude-code", model: "claude-code:haiku" });
+  });
+
+  it("keeps the opening request and the newest context when the transcript exceeds the budget", () => {
+    const prior = [{ role: "you" as const, body: "Initial goal" }, { role: "agent" as const, body: "x".repeat(80_000) }, { role: "you" as const, body: "Recent decision" }];
+    const result = handoffTranscript(prior, "/tmp/thread.md");
+    expect(result.history[0]).toEqual(prior[0]);
+    expect(result.history.at(-1)).toEqual(prior.at(-1));
+    expect(result.history.map(t => t.body).join("").length).toBeLessThanOrEqual(48_000);
+    expect(result.note).toContain("/tmp/thread.md");
   });
 });
 
