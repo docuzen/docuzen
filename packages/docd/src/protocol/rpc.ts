@@ -188,12 +188,20 @@ export interface RpcSchema {
     params: Record<string, never>;
     result: Array<Omit<AgentHarness, "runner">>;
   };
+  getHarnessModes: {
+    params: { docPath: string; harness: string };
+    result: { selected: string; modes: { id: string; name: string }[] };
+  };
+  answerHarnessPermission: {
+    params: { harness: string; requestId: string; allow: boolean };
+    result: { ok: boolean };
+  };
   getSettings: {
     params: { docPath: string };
     result: HadSettings;
   };
   setSettings: {
-    params: { docPath: string; settings: HadSettings };
+    params: { docPath: string; settings: HadSettings; permissionMode?: string };
     result: { ok: boolean };
   };
   getAppConfig: {

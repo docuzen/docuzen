@@ -739,8 +739,9 @@ export class PiRunner implements AgentRunner {
   }
 
   /** Whether this runner still holds the live session (false after a restart). */
-  hasSession(sessionId: string): boolean {
-    return this.sessions.has(sessionId);
+  hasSession(sessionId: string, owner?: string): boolean {
+    const entry = this.sessions.get(sessionId);
+    return !!entry && (owner === undefined || owner === entry.cancelKey);
   }
 
   /** Register a run of `entry` under its cancel key until it settles. */

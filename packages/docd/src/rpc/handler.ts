@@ -1,9 +1,9 @@
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { homedir } from "node:os";
 import { stat } from "node:fs/promises";
 import type { AgentRunner, TokenSink } from "../agent/types.js";
 import { HarnessRegistry, listModels, saveModels } from "../agent/index.js";
-import { readAppConfig, writeAppConfig } from "../config/app-config.js";
+import { isHarnessChoice, readAppConfig, writeAppConfig } from "../config/app-config.js";
 import { TaskDB } from "../state/task-db.js";
 import { Orchestrator } from "../orchestrator/orchestrator.js";
 import { listThreadTree } from "../orchestrator/index.js";
@@ -270,6 +270,12 @@ export class RpcHandler {
         return { ok: true };
       },
       listHarnesses: () => this.registry.list(),
+      getHarnessModes: async (p) => {
+        const h = this.registry.resolve(p.harness);
+        if (!h.permissionModes || !h.runner.permissionModes) throw new Error("No permission modes for this harness.");
+        return h.runner.permissionModes(dirname(p.docPath));
+      },
+      answerHarnessPermission: (p) => ({ ok: this.answerPermission(p.harness, p.requestId, p.allow === true) }),
       getSettings: async (p) => {
         const settings = await readSettings(p.docPath);
         // A doc that names no harness (and no app default) runs on the registry default —
@@ -278,16 +284,16 @@ export class RpcHandler {
       },
       setSettings: async (p) => {
         await writeSettings(p.docPath, p.settings);
-        // Write-through: if the user chose a config-level harness (pi | codex), persist it
-        // as the app default so future documents open with the same harness. "claude-code"
-        // is a doc-only value that has no HarnessChoice equivalent in config.toml.
-        if (p.settings.harness === "pi" || p.settings.harness === "codex") {
+        if (isHarnessChoice(p.settings.harness)) {
           const cfg = readAppConfig();
           const next = { ...cfg, harness: { default: p.settings.harness } };
+          if (p.settings.harness === "claude-code" && typeof p.permissionMode === "string" && p.permissionMode) {
+            next.claude = { permissionMode: p.permissionMode };
+          }
           if (p.settings.harness === "pi" && p.settings.model) {
             next.pi = { model: p.settings.model };
           }
-          if (cfg.harness?.default !== next.harness.default || cfg.pi?.model !== next.pi?.model) {
+          if (cfg.harness?.default !== next.harness.default || cfg.pi?.model !== next.pi?.model || cfg.claude?.permissionMode !== next.claude?.permissionMode) {
             writeAppConfig(next);
           }
         }
@@ -303,13 +309,19 @@ export class RpcHandler {
           ? models.some((m) => m.key === wanted && m.hasKey)
           : models.some((m) => m.hasKey);
         const codexUsable = Boolean(this.registry.list().find((h) => h.id === "codex")?.available);
-        return { config, piUsable, codexUsable };
+        // Local launch overrides may contain environment credentials. Setup only edits defaults.
+        const { acp: _localLaunchSpecs, ...publicConfig } = config;
+        return { config: publicConfig, piUsable, codexUsable };
       },
       setAppConfig: (p) => {
         writeAppConfig(p.config);
         return { ok: true };
       },
     };
+  }
+
+  answerPermission(harness: string, requestId: string, allow: boolean): boolean {
+    return this.registry.resolve(harness).runner.answerPermission?.(requestId, allow) ?? false;
   }
 
   closeAll(): void {

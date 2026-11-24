@@ -4,7 +4,8 @@
 // dynamic require(), which esbuild only preserves natively in CJS output.
 // docd itself has no import.meta or __dirname (verified), so CJS is safe.
 import { build } from "esbuild";
-import { mkdirSync } from "node:fs";
+import { createRequire } from "node:module";
+import { mkdirSync, copyFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -33,3 +34,18 @@ await build({
   logLevel: "info",
 });
 console.log(`bundled sidecar -> ${resolve(outDir, "main.cjs")}`);
+
+// Only the JS adapter ships in the app. Its native Claude runtime is supplied by the user's CLI.
+const require = createRequire(import.meta.url);
+const adapterDir = dirname(require.resolve("@agentclientprotocol/claude-agent-acp/package.json"));
+await build({
+  entryPoints: [resolve(adapterDir, "dist/index.js")],
+  bundle: true, platform: "node", format: "esm", target: "node22",
+  banner: { js: "import { createRequire as __createRequire } from 'node:module'; const require = __createRequire(import.meta.url);" },
+  external: ["@anthropic-ai/claude-agent-sdk-*"],
+  outfile: resolve(outDir, "claude-agent-acp.mjs"),
+  legalComments: "eof",
+});
+copyFileSync(resolve(adapterDir, "LICENSE"), resolve(outDir, "claude-agent-acp-LICENSE"));
+const sdkDir = dirname(require.resolve("@anthropic-ai/claude-agent-sdk", { paths: [adapterDir] }));
+copyFileSync(resolve(sdkDir, "LICENSE.md"), resolve(outDir, "claude-agent-sdk-LICENSE.md"));

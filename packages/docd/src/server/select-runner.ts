@@ -49,8 +49,8 @@ export function selectRunner(opts: {
  * when its CLI is present, and pi again when nothing is (so the error names pi's problem).
  * server/harness-setup.ts asks again once pi has actually started or failed.
  */
-export function chooseDefaultHarness(config: AppConfig, piUsable: boolean, codexAvailable: boolean): HarnessChoice {
-  return config.harness?.default ?? (piUsable ? "pi" : codexAvailable ? "codex" : "pi");
+export function chooseDefaultHarness(config: AppConfig, piUsable: boolean, codexAvailable: boolean, firstAcp?: HarnessChoice): HarnessChoice {
+  return config.harness?.default ?? (piUsable ? "pi" : codexAvailable ? "codex" : firstAcp ?? "pi");
 }
 
 function selectPi(

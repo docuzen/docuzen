@@ -125,6 +125,10 @@ cmd_doctor() {
   cur=$(installed_version)
   printf 'arch: %s\n' "$arch"
   [ -n "$cur" ] && printf 'app:  %s (%s)\n' "$APP" "$cur" || printf 'app:  not installed\n'
+  sidecar="$APP/Contents/Resources/sidecar"
+  if [ -f "$sidecar/claude-agent-acp.mjs" ]; then
+    DOCD_NATIVE_BINDING="$sidecar/better_sqlite3.node" "$sidecar/node" "$sidecar/main.cjs" --doctor-harnesses
+  fi
   cfg="${DOCUZEN_CONFIG_DIR:-$HOME/.docuzen}/config.toml"
   if [ -f "$cfg" ] && grep -q '^\s*default\s*=' "$cfg" 2>/dev/null; then
     printf 'harness: configured (%s)\n' "$cfg"

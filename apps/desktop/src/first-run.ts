@@ -2,7 +2,7 @@
 // harness. Saving writes the app config over RPC, then (packaged app only)
 // bounces the sidecar via the restart_sidecar Tauri command so the choice
 // takes effect immediately — rpc.ts auto-reconnects on the same port.
-import type { AppConfig } from "@ai-native-doc/docd/protocol";
+import type { AppConfig, AgentHarness } from "@ai-native-doc/docd/protocol";
 import { wireModal } from "./ui.js";
 
 interface FirstRunClient {
@@ -24,7 +24,7 @@ export function shouldShowFirstRun(config: AppConfig): boolean {
  * harness set (and, for pi, the picked model). Sections the user already has, such as a
  * `[codex] command` or a `[pi] model` when no model is picked here, are kept.
  */
-export function configWithHarness(current: AppConfig, harness: "pi" | "codex", piModel: string): AppConfig {
+export function configWithHarness(current: AppConfig, harness: NonNullable<AppConfig["harness"]>["default"], piModel: string): AppConfig {
   const config: AppConfig = { ...current, harness: { default: harness } };
   if (harness === "pi" && piModel) config.pi = { ...current.pi, model: piModel };
   return config;
@@ -95,14 +95,28 @@ export async function maybeShowFirstRun(
   // Preselect whatever can work right now, so "Save" on a fresh install is one click:
   // pi when a model already has a stored key (and that model), else codex when its CLI
   // was detected, else pi (the modal then explains what is missing).
+  let harnesses: Omit<AgentHarness, "runner">[] = [];
+  try {
+    harnesses = await client.call("listHarnesses", {}) as typeof harnesses;
+  } catch { /* Older sidecars supply only the two built-in options. */ }
+  if (harnesses?.length) {
+    harnessSel.replaceChildren(...harnesses.map(h => {
+      const option = document.createElement("option");
+      option.value = h.id;
+      option.textContent = h.available ? h.label : h.label + " (unavailable)";
+      return option;
+    }));
+  }
   const usable = pickUsableHarness(models, state.codexUsable);
-  harnessSel.value = usable.harness;
+  harnessSel.value = harnesses?.length && !harnesses.find(h => h.id === usable.harness)?.available
+    ? (harnesses.find(h => h.available)?.id ?? usable.harness) : usable.harness;
   if (usable.model) modelSel.value = usable.model;
 
   const syncRows = () => {
     const codex = harnessSel.value === "codex";
-    piRow.hidden = codex;
-    hint.textContent = codex
+    piRow.hidden = harnessSel.value !== "pi";
+    const selected = harnesses?.find(h => h.id === harnessSel.value);
+    hint.textContent = selected ? (selected.unavailableReason ?? selected.status ?? "") : codex
       ? state.codexUsable
         ? "codex CLI detected"
         : "codex CLI not found on PATH — install it or pick Pi"
@@ -118,7 +132,7 @@ export async function maybeShowFirstRun(
   saveBtn.addEventListener("click", () => {
     void (async () => {
       saveBtn.disabled = true;
-      const config = configWithHarness(state.config, harnessSel.value === "codex" ? "codex" : "pi", modelSel.value);
+      const config = configWithHarness(state.config, harnesses?.find(h => h.id === harnessSel.value)?.id ?? (harnessSel.value === "codex" ? "codex" : "pi"), modelSel.value);
       try {
         await client.call("setAppConfig", { config });
       } catch (e) {

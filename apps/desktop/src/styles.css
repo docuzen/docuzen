@@ -2312,3 +2312,9 @@ textarea {
   overflow-x: auto;
   vertical-align: baseline;
 }
+
+#harnessPermissions { position: fixed; bottom: 1rem; right: 1rem; z-index: 1100; max-width: min(28rem, 90vw); max-height: 65vh; overflow: auto; }
+#harnessPermissions section { border: 1px solid var(--border, #a4a4a4); border-radius: 8px; padding: 1rem; margin-top: .5rem; background: var(--bg); color: var(--text, CanvasText); box-shadow: 0 2px 12px #0002; }
+#harnessPermissions section > div { margin-top: .5rem; white-space: pre-line; overflow-wrap: anywhere; }
+#harnessPermissions button + button { margin-left: .5rem; }
+#permissionModeRow[hidden] { display: none; }

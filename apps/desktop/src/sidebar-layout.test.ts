@@ -162,7 +162,7 @@ describe("harness/model badge", () => {
 
     const saveSettingsSource = sourceBetween(
       shellSource,
-      "async function saveSettings(): Promise<void> {",
+      "async function saveSettings(",
       "setScopeEl.addEventListener",
     );
     expect(saveSettingsSource).toContain("void refreshHarnessBadge();");

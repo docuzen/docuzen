@@ -5,6 +5,7 @@
 //   node tools/live/run.mjs                              # default model below
 //   node tools/live/run.mjs --model litellm/aws/claude-haiku-4-5
 //   node tools/live/run.mjs --only discuss,improve
+//   node tools/live/run.mjs --harness claude-code     # every doc set to that harness
 //
 // Not part of `npm test` (costs tokens, needs a key, non-deterministic wording). Every
 // assertion is structural — a reply exists, a proposal was persisted, the file changed —
@@ -24,6 +25,8 @@ const argOf = (name, dflt) => {
 };
 const MODEL = argOf("model", "litellm/aws/claude-opus-5-5");
 const ONLY = argOf("only", "")?.split(",").filter(Boolean) ?? [];
+/** Run every scenario on this harness instead of pi (e.g. claude-code, codex, acp:<name>). */
+const HARNESS = argOf("harness", "pi");
 
 const DOC = `# Rate limiting plan
 
@@ -54,7 +57,11 @@ async function main() {
   const token = randomBytes(32).toString("hex");
   const env = { ...process.env, DOCD_TOKEN: token, DOCUZEN_CONFIG_DIR: cfg, DOCUZEN_AUTHOR: "reviewer", DOCUZEN_GIT_EXCLUDES_FILE: join(work, "git-ignore") };
   delete env.LLM_API_KEY;
-  const sidecar = spawn("npx", ["tsx", "packages/docd/src/server/main.ts", "--port", "0"], {
+  const packaged = argOf("sidecar", "");
+  if (packaged) env.DOCD_NATIVE_BINDING = resolve(packaged, "better_sqlite3.node");
+  const sidecar = spawn(packaged ? resolve(packaged, "node") : "npx", [
+    ...(packaged ? [resolve(packaged, "main.cjs")] : ["tsx", "packages/docd/src/server/main.ts"]), "--port", "0",
+  ], {
     cwd: repoRoot, env, stdio: ["ignore", "pipe", "pipe"], detached: true,
   });
   let log = "";
@@ -80,7 +87,15 @@ async function main() {
     if ("ok" in msg) {
       pending.delete(msg.id);
       msg.ok ? p.res({ result: msg.result, events: p.events }) : p.rej(new Error(msg.error));
-    } else p.events.push(msg);
+    } else {
+      p.events.push(msg);
+      if (msg.event === "permission") {
+        const request = JSON.parse(msg.data);
+        // This fixture exercises local reading only. Never approve other operations.
+        const allow = request.locations.length > 0 && request.locations.every(path => resolve(path).startsWith(work + "/"));
+        void call("answerHarnessPermission", { harness: HARNESS, requestId: request.id, allow }).catch(p.rej);
+      }
+    }
   });
   const call = (method, params = {}) =>
     new Promise((res, rej) => {
@@ -99,7 +114,9 @@ async function main() {
     const docPath = join(dir, "plan.md");
     await writeFile(docPath, DOC);
     await call("openDoc", { docPath });
-    if (settings) await call("setSettings", { docPath, settings: { scope: "folder", ...settings } });
+    if (settings || HARNESS !== "pi") {
+      await call("setSettings", { docPath, settings: { scope: "folder", ...(HARNESS !== "pi" ? { harness: HARNESS } : {}), ...settings } });
+    }
     return docPath;
   }
   async function comment(docPath, exact) {
@@ -115,9 +132,14 @@ async function main() {
 
   try {
     const { result: harnesses } = await call("listHarnesses");
-    const pi = harnesses.find((h) => h.id === "pi");
-    check("pi harness is live", !!pi?.available, pi?.unavailableReason ?? MODEL);
-    if (!pi?.available) throw new Error("pi is offline — nothing else can run");
+    const harness = harnesses.find((h) => h.id === HARNESS);
+    check(`${HARNESS} harness is live`, !!harness?.available, harness?.unavailableReason ?? (HARNESS === "pi" ? MODEL : harness?.status ?? "not registered"));
+    if (!harness?.available) throw new Error(`${HARNESS} is unavailable — nothing else can run`);
+    if (harness.permissionModes) {
+      const { result } = await call("getHarnessModes", { harness: HARNESS, docPath: join(work, "doc.md") });
+      check("Manual permission mode available and selected", result.selected === "default" && result.modes.some(m => m.id === result.selected));
+    }
+    const caps = harness.capabilities;
 
     if (want("discuss")) {
       console.log("\n[discuss + reply]");
@@ -157,7 +179,7 @@ async function main() {
       const res = await call("resolveDirectives", { docPath });
       const proposals = (await call("listProposals", { docPath })).result;
       check("found the directive", res.result.count === 1);
-      check("agent called propose_edit (proposal persisted, pending)", res.result.proposed && proposals.length === 1 && proposals[0].status === "pending", res.result.reply.slice(0, 120));
+      check("agent proposed an edit (proposal persisted, pending)", res.result.proposed && proposals.length === 1 && proposals[0].status === "pending", res.result.reply.slice(0, 120));
       if (proposals[0]) {
         await call("approveProposal", { docPath, threadId: proposals[0].threadId, proposalId: proposals[0].id });
         const after = await readFile(docPath, "utf8");
@@ -165,7 +187,8 @@ async function main() {
       }
     }
 
-    if (want("review")) {
+    if (want("review") && !caps.reviewFindings) console.log(`\n[review pass] skipped: ${HARNESS} cannot file review findings`);
+    if (want("review") && caps.reviewFindings) {
       console.log("\n[review pass]");
       const docPath = await freshDoc();
       const rev = await call("reviewDocument", { docPath, stance: "critiquer", rubric: "Find at most three concrete problems. Include an edit for at least one." });
@@ -199,6 +222,9 @@ async function main() {
       const id = await comment(docPath, "Ship to 5% of traffic, then everyone.");
       const d = await call("discuss", { docPath, threadId: id, annotationId: id, stance: "none", comment: "There is a file notes.txt next to this document. Read it and tell me the on-call rotation codename." });
       check("agent read a sibling file through its scoped tools", tokens(d.events).includes("HERON-42"), `tools used: ${tools(d.events).join(", ") || "none"}`);
+      if (caps.documentTools !== "docuzen-managed") {
+        console.log(`  (MCP document-tool checks skipped: ${HARNESS} has no Docuzen document tools)`);
+      } else {
       // A legitimate draft request: preview a change as a diff, writing nothing. (That the
       // bridge pins dryRun even when a model passes false is unit-tested in mcp-bridge.test.ts;
       // a well-behaved model refuses to try, so it can't be exercised live.)
@@ -208,6 +234,7 @@ async function main() {
       check("agent invoked the mcp proxy tool", tools(m.events).includes("mcp"), `tools used: ${tools(m.events).join(", ") || "none"}`);
       check("MCP edit_file returned a real diff", /@@|Index:/.test(tokens(m.events)) && /then 50%/.test(tokens(m.events)), tokens(m.events).replace(/\s+/g, " ").slice(0, 200));
       check("the MCP draft wrote nothing to the document", (await readFile(docPath, "utf8")) === DOC);
+      }
     }
   } finally {
     ws.close();
@@ -215,7 +242,7 @@ async function main() {
     await rm(work, { recursive: true, force: true });
   }
 
-  console.log(`\n${results.length - failures}/${results.length} checks passed (model ${MODEL})`);
+  console.log(`\n${results.length - failures}/${results.length} checks passed (${HARNESS === "pi" ? `model ${MODEL}` : `harness ${HARNESS}`})`);
   if (failures) {
     if (process.argv.includes("--log")) console.log(log);
     process.exit(1);

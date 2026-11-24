@@ -132,11 +132,19 @@ The sidecar answers two separate questions at startup
   `models.json` that has a stored key.
 - Otherwise pi is offline (`FakePiRunner`), and the log says why.
 
+**Testing Claude Code in the nightly.** Install the Claude Code CLI and sign in using
+its own setup. The macOS app includes the ACP adapter. Pick **Claude Code** at
+first launch or in **File → Settings**. The permission picker shows the modes
+your CLI offers and starts in Manual. Docuzen gives Claude reading and web
+tools. Improve and Resolve return proposals, and Editing applies them through
+document version history. Use Pi for document-wide review findings and Docuzen
+MCP tools in this build.
+
 **Which harness is the default** for documents that don't pick one?
 
 - The `[harness] default` in `config.toml`, when set.
 - Otherwise the first usable harness: pi if it is usable, else Codex if the
-  `codex` CLI was detected, else pi (so the error names what is missing).
+  `codex` CLI was detected, then the first available ACP harness.
 
 A document can always choose a different harness in its settings; pi stays
 usable when Codex is the default and vice versa.
@@ -146,7 +154,7 @@ modal that writes `~/.docuzen/config.toml`:
 
 ```toml
 [harness]
-default = "pi"              # or "codex"
+default = "pi"              # also "codex", "claude-code", or a configured "acp:<name>"
 
 [pi]
 model = "litellm/gpt-5.5"   # key into ~/.pi/agent/models.json

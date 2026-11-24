@@ -23,6 +23,8 @@ export async function setupHarnesses(opts: {
   sel: RunnerSelection;
   config: AppConfig;
   codex: AgentHarness;
+  /** ACP agents (Claude Code, config.toml's [acp.*]); each is registered, usable or not. */
+  acp?: AgentHarness[];
   createPi: (model: { provider: string; modelId: string }) => Promise<AgentRunner>;
 }): Promise<HarnessSetup> {
   const { sel, config, codex } = opts;
@@ -38,7 +40,7 @@ export async function setupHarnesses(opts: {
     }
   }
 
-  const registry = new HarnessRegistry(chooseDefaultHarness(config, piRunner !== null, codex.available));
+  const registry = new HarnessRegistry(chooseDefaultHarness(config, piRunner !== null, codex.available, opts.acp?.find((h) => h.available)?.id));
   registry.register(
     piRunner
       ? { id: "pi", label: "Pi", runner: piRunner, capabilities: PI_CAPABILITIES, available: true }
@@ -52,5 +54,8 @@ export async function setupHarnesses(opts: {
         },
   );
   registry.register(codex);
+  // Registered even when the agent is missing, so a thread or document that names it
+  // gets "unavailable: <reason>" instead of quietly falling back to the default harness.
+  for (const harness of opts.acp ?? []) registry.register(harness);
   return { registry, piRunner, piOfflineReason: piRunner ? null : piOfflineReason };
 }

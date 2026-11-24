@@ -91,6 +91,7 @@ jobs:
       - name: Smoke-test sidecar artifact
         run: |
           if [ "${{ matrix.arch }}" = "arm64" ] || arch -x86_64 /usr/bin/true 2>/dev/null; then
+            apps/desktop/src-tauri/sidecar/node apps/desktop/src-tauri/sidecar/claude-agent-acp.mjs --version
             node packages/docd/scripts/smoke-sidecar.mjs apps/desktop/src-tauri/sidecar
           else
             echo "::warning::Rosetta unavailable — x64 sidecar assembled + checksum-verified but not executed on this runner"
@@ -129,10 +130,16 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          gh release create "$GITHUB_REF_NAME" dist/* \
+          flags=()
+          intro="macOS builds (unsigned until code signing lands)."
+          if [[ "$GITHUB_REF_NAME" == *-nightly.* ]]; then
+            flags+=(--prerelease --latest=false)
+            intro="Nightly test build. With Claude Code installed and signed in, select Claude Code during setup or in File → Settings. Manual is the default permission mode. Try Discuss followed by Improve on a test document and approve the proposal. Claude review findings and Docuzen MCP tools are not included in this nightly."
+          fi
+          gh release create "$GITHUB_REF_NAME" dist/* --verify-tag "${flags[@]}" \
             --repo "$GITHUB_REPOSITORY" \
             --title "docuzen $GITHUB_REF_NAME" \
-            --notes "macOS builds (unsigned until code signing lands).
+            --notes "$intro
 
           - Apple Silicon: *-arm64.dmg
           - Intel: *-x64.dmg

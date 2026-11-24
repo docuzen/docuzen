@@ -1,4 +1,5 @@
 import type { TextQuoteAnchor } from "../anchor/types.js";
+import type { HarnessId } from "../agent/harness-registry.js";
 
 export interface Manifest {
   version: number;
@@ -85,8 +86,8 @@ export interface ThreadFrontmatter {
   piSession: string;
   /** "provider/modelId" key of the model that answered this thread; survives reopen. */
   model?: string;
-  /** Agent harness that owns this thread (e.g. "pi", future "codex"/"claude-code"). */
-  harness?: "pi" | "codex" | "claude-code";
+  /** Agent harness that owns this thread ("pi", "codex", "claude-code", "acp:<name>"). */
+  harness?: HarnessId;
   /** For branched threads: the thread id this one forked from. */
   parent?: string;
   /** For branched threads: the turn index in the parent at which the fork occurred. */

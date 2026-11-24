@@ -83,6 +83,8 @@ function doctor(): void {
   const cargo = cargoVersion();
   console.log(`${cargo ? "✓" : "✗"} cargo: ${cargo ?? "not found"}`);
   ok &&= nodeOk && cargo !== null;
+  const probe = spawnSync(process.execPath, ["--import", "tsx", "packages/docd/src/server/main.ts", "--doctor-harnesses"], { cwd: repoRoot, stdio: "inherit" });
+  ok &&= probe.status === 0;
   if (!process.env.LLM_API_KEY) {
     console.log(
       "! LLM_API_KEY is not set; live agents need a harness configured in ~/.docuzen/config.toml (first-launch modal).",

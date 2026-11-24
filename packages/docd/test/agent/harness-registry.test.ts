@@ -28,10 +28,10 @@ describe("HarnessRegistry", () => {
     expect(item).not.toHaveProperty("runner");
   });
 
-  it("falls back to the default harness when an unknown harness id is requested", () => {
+  it("rejects a saved harness that is not configured on this machine", () => {
     const registry = HarnessRegistry.single(new FakePiRunner([]));
 
-    expect(registry.resolve("missing").id).toBe("pi");
+    expect(() => registry.resolve("missing")).toThrow(/missing is not configured/);
   });
 
   it("throws for a known but unavailable harness", () => {

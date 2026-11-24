@@ -8,6 +8,7 @@ import type {
 import { hadPaths } from "./paths.js";
 import { withFileLock, writeFileAtomic } from "./io.js";
 import { splitFrontmatter, stringifyFrontmatter } from "./frontmatter.js";
+import type { HarnessId } from "../agent/harness-registry.js";
 
 // Turn header. The optional trailing " ::vNNNN" tag records the doc version active
 // at this turn; it's digits-only so it can't collide with the colons in an ISO timestamp.
@@ -89,7 +90,7 @@ export function parseThread(text: string): ThreadFile {
     piSession: fm.piSession as string,
   };
   if (fm.model !== undefined) frontmatter.model = fm.model as string;
-  if (fm.harness !== undefined) frontmatter.harness = fm.harness as "pi" | "codex" | "claude-code";
+  if (fm.harness !== undefined) frontmatter.harness = fm.harness as HarnessId;
   if (fm.parent !== undefined) frontmatter.parent = fm.parent as string;
   if (fm.branchFromTurn !== undefined) frontmatter.branchFromTurn = Number(fm.branchFromTurn);
   if (fm.baseVersion !== undefined) frontmatter.baseVersion = fm.baseVersion as string;

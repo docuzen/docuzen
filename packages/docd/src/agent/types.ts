@@ -117,7 +117,7 @@ export interface AgentEvent {
    * "proposal": an edit awaiting the reviewer (Suggesting mode). "applied": an edit that
    * was applied on submission (Editing mode) — the UI should reload the document.
    */
-  type: "token" | "thinking" | "tool" | "proposal" | "applied" | "finding";
+  type: "token" | "thinking" | "tool" | "proposal" | "applied" | "finding" | "permission" | "permissionClosed";
   text: string;
   /** Set by panel fan-out to tag which model produced this event; unset otherwise. */
   model?: string;
@@ -138,7 +138,9 @@ export interface AgentRunner {
    */
   cancel?(cancelKey: string): Promise<void>;
   /** Whether the runner still holds this live session; false after a restart. Optional. */
-  hasSession?(sessionId: string): boolean;
+  hasSession?(sessionId: string, owner?: string): boolean;
+  permissionModes?(cwd: string): Promise<{ selected: string; modes: { id: string; name: string }[] }>;
+  answerPermission?(requestId: string, allow: boolean): boolean;
   /**
    * The orchestrator will never use this session again (an earlier model's session in a
    * Panel, which the thread does not keep), so the runner may free it. Optional.

@@ -446,7 +446,7 @@ describe("RpcHandler", () => {
       expect(readAppConfig().harness).toEqual({ default: "pi" });
     });
 
-    it("setSettings harness='claude-code' does NOT write through to app config", async () => {
+    it("setSettings harness='claude-code' writes through to app config", async () => {
       writeFileSync(
         join(cfgDir, "config.toml"),
         '[harness]\ndefault = "pi"\n',
@@ -458,8 +458,7 @@ describe("RpcHandler", () => {
         params: { docPath, settings: { scope: "folder", harness: "claude-code" } },
       });
       expect(res.ok).toBe(true);
-      // app config must remain unchanged
-      expect(readAppConfig().harness).toEqual({ default: "pi" });
+      expect(readAppConfig().harness).toEqual({ default: "claude-code" });
     });
   });
 

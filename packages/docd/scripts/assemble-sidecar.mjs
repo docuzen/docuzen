@@ -28,6 +28,8 @@ const cacheDir = cacheDirFor(pkgDir, loadSidecarMeta(pkgDir), arch);
 mkdirSync(outDir, { recursive: true });
 copyFileSync(resolve(cacheDir, "node"), resolve(outDir, "node"));
 chmodSync(resolve(outDir, "node"), 0o755);
-copyFileSync(resolve(pkgDir, "dist-sidecar/main.cjs"), resolve(outDir, "main.cjs"));
+for (const name of ["main.cjs", "claude-agent-acp.mjs", "claude-agent-acp-LICENSE", "claude-agent-sdk-LICENSE.md"]) {
+  copyFileSync(resolve(pkgDir, "dist-sidecar", name), resolve(outDir, name));
+}
 copyFileSync(resolve(cacheDir, "better_sqlite3.node"), resolve(outDir, "better_sqlite3.node"));
 console.log(`sidecar assembled -> ${outDir}`);

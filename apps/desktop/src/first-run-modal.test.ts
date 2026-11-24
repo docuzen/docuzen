@@ -19,7 +19,7 @@ const settle = async () => {
 function sidecar(config: AppConfig, models: { key: string; name: string; hasKey?: boolean }[] = []) {
   const saved: AppConfig[] = [];
   const client = {
-    call: vi.fn(async (method: string, params: Record<string, unknown>) => {
+    call: vi.fn(async (method: string, params: Record<string, unknown>): Promise<unknown> => {
       if (method === "getAppConfig") return { config, piUsable: true, codexUsable: true };
       if (method === "listModels") return models;
       if (method === "setAppConfig") return void saved.push(params.config as AppConfig);
@@ -44,6 +44,20 @@ describe("first-run harness setup", () => {
     $<HTMLButtonElement>("#firstRunSave").click();
     await settle();
     expect(saved).toEqual([{ harness: { default: "codex" }, pi: { model: "litellm/opus" }, codex: { command: "/opt/bin/codex" } }]);
+  });
+
+  it("offers the available Claude harness and saves it as the app default", async () => {
+    const { client, saved } = sidecar({ harness: null });
+    const oldCall = client.call.getMockImplementation()!;
+    client.call.mockImplementation(async (method, params) => method === "listHarnesses"
+      ? [{ id: "claude-code", label: "Claude Code", available: true, status: "CLI detected" }]
+      : oldCall(method, params));
+    await maybeShowFirstRun(client, vi.fn());
+    expect($<HTMLSelectElement>("#firstRunHarness").value).toBe("claude-code");
+    expect($("#firstRunPiRow").hidden).toBe(true);
+    $<HTMLButtonElement>("#firstRunSave").click();
+    await settle();
+    expect(saved[0].harness?.default).toBe("claude-code");
   });
 
   it("choosing pi with a model sets that model and keeps the codex command", async () => {

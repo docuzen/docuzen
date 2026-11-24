@@ -1,6 +1,7 @@
 import type { AgentRunner } from "./types.js";
 
-export type HarnessId = "pi" | "codex" | "claude-code";
+/** Built-in harnesses, plus "acp:<name>" for an ACP agent added in config.toml. */
+export type HarnessId = "pi" | "codex" | "claude-code" | `acp:${string}`;
 
 export interface HarnessCapabilities {
   proposeEdits: boolean;
@@ -17,6 +18,8 @@ export interface HarnessCapabilities {
 export interface AgentHarness {
   id: HarnessId;
   label: string;
+  /** The adapter can list and apply native permission modes. */
+  permissionModes?: boolean;
   runner: AgentRunner;
   capabilities: HarnessCapabilities;
   /** False when the adapter is known but unavailable in the current environment. */
@@ -69,8 +72,8 @@ export class HarnessRegistry {
 
   resolve(id?: string): AgentHarness {
     const requested = (id as HarnessId | undefined) ?? this.fallback;
-    const harness = this.items.get(requested) ?? this.items.get(this.fallback);
-    if (!harness) throw new Error(`no agent harness registered for ${requested}`);
+    const harness = this.items.get(requested);
+    if (!harness) throw new Error(`Harness ${requested} is not configured. Choose an installed harness in Settings.`);
     if (!harness.available) {
       const reason = harness.unavailableReason ? `: ${harness.unavailableReason}` : "";
       throw new Error(`agent harness unavailable: ${harness.id}${reason}`);

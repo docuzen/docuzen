@@ -5,6 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { appConfigPath, readAppConfig, writeAppConfig } from "../../src/config/app-config.js";
 import { createCodexHarness } from "../../src/agent/codex-runner.js";
+import { acpAgentSpecs } from "../../src/agent/acp-agents.js";
 
 let dir: string;
 
@@ -100,5 +101,53 @@ describe("app config", () => {
     const cfg = readAppConfig();
     expect(cfg.pi).toBeUndefined();
     expect(cfg.codex).toEqual({ command: "/opt/codex" });
+  });
+
+  test("[acp.<name>] tables become additional ACP harnesses", () => {
+    writeFileSync(
+      appConfigPath(),
+      [
+        "[acp.gemini]",
+        'command = "gemini"',
+        'args = ["--experimental-acp"]',
+        'label = "Gemini CLI"',
+        'read_only_mode = "default"',
+        "[acp.gemini.env]",
+        'GEMINI_API_KEY_FILE = "/k"',
+        "",
+        "[acp.goose]",
+        'command = "goose"',
+        'args = ["acp"]',
+        "",
+        "[acp.nocommand]",
+        'label = "skipped: no command"',
+        "",
+        '[acp."bad name"]',
+        'command = "x"',
+        "",
+      ].join("\n"),
+    );
+    const cfg = readAppConfig();
+    expect(cfg.acp).toEqual({
+      gemini: {
+        command: "gemini",
+        args: ["--experimental-acp"],
+        label: "Gemini CLI",
+        env: { GEMINI_API_KEY_FILE: "/k" },
+        readOnlyMode: "default",
+      },
+      goose: { command: "goose", args: ["acp"] },
+    });
+    expect(acpAgentSpecs(cfg).map((a) => [a.id, a.label, a.command, a.readOnlyMode])).toEqual([
+      ["acp:gemini", "Gemini CLI", "gemini", "default"],
+      ["acp:goose", "goose", "goose", undefined],
+    ]);
+  });
+
+  test("writing the config keeps the user's [acp.*] tables as written", () => {
+    writeFileSync(appConfigPath(), '[acp.goose]\ncommand = "goose"\nargs = ["acp"]\n');
+    writeAppConfig({ harness: { default: "pi" } });
+    const raw = parse(readFileSync(appConfigPath(), "utf8")) as Record<string, unknown>;
+    expect(raw.acp).toEqual({ goose: { command: "goose", args: ["acp"] } });
   });
 });

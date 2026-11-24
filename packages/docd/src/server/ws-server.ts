@@ -133,6 +133,11 @@ export function startServer(opts: StartServerOptions): Promise<RunningServer> {
     const send = (msg: unknown): void => {
       if (socket.readyState === WebSocket.OPEN) socket.send(JSON.stringify(msg));
     };
+    const permissions = new Map<string, string>();
+    socket.once("close", () => {
+      for (const [id, harness] of permissions) handler.answerPermission(harness, id, false);
+      permissions.clear();
+    });
     const onMessage = async (data: RawData): Promise<void> => {
       let parsed: unknown;
       try {
@@ -144,7 +149,19 @@ export function startServer(opts: StartServerOptions): Promise<RunningServer> {
       // Intermediate streaming frames carry the request id + {event,data};
       // the final RpcResponse carries {ok,...}. The client distinguishes by key.
       const id = rpcRequestId(parsed);
-      send(await handler.handle(parsed, (frame) => send({ id, ...frame })));
+      send(await handler.handle(parsed, (frame) => {
+        if (frame.event === "permission") {
+          const request = JSON.parse(String(frame.data)) as { id: string; harness: string };
+          if (socket.readyState !== WebSocket.OPEN) {
+            handler.answerPermission(request.harness, request.id, false);
+            return;
+          }
+          permissions.set(request.id, request.harness);
+        } else if (frame.event === "permissionClosed") {
+          permissions.delete(String(frame.data));
+        }
+        send({ id, ...frame });
+      }));
     };
     socket.on("message", (data) => {
       onMessage(data).catch((e: unknown) => {

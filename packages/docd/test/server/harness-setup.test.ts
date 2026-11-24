@@ -1,5 +1,7 @@
 import { describe, expect, test, vi } from "vitest";
 import { createCodexHarness } from "../../src/agent/codex-runner.js";
+import { createAcpHarness } from "../../src/agent/acp-runner.js";
+import { CLAUDE_CODE_AGENT } from "../../src/agent/acp-agents.js";
 import { FakePiRunner } from "../../src/agent/fake-runner.js";
 import type { AppConfig } from "../../src/config/app-config.js";
 import { setupHarnesses } from "../../src/server/harness-setup.js";
@@ -61,5 +63,24 @@ describe("setupHarnesses — the default is chosen once pi init has settled", ()
     expect(createPi).not.toHaveBeenCalled();
     expect(registry.defaultId()).toBe("codex");
     expect(piOfflineReason).toBe(sel.reason);
+  });
+
+  test("an ACP agent that is not installed is still registered, so naming it fails with the reason", async () => {
+    const config: AppConfig = { harness: null };
+    const sel = selectRunner({ env: {}, config, models: [keyed], codexAvailable: true });
+    const claude = createAcpHarness(CLAUDE_CODE_AGENT, { find: () => null });
+    const { registry } = await setupHarnesses({
+      sel,
+      config,
+      codex: codex(true),
+      acp: [claude],
+      createPi: async () => new FakePiRunner([]),
+    });
+    expect(registry.list().find((h) => h.id === "claude-code")).toMatchObject({ label: "Claude Code", available: false });
+    expect(() => registry.resolve("claude-code")).toThrow(
+      /agent harness unavailable: claude-code: claude not found on PATH/,
+    );
+    // The default is still chosen from pi and codex only.
+    expect(registry.defaultId()).toBe("pi");
   });
 });

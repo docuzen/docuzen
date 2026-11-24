@@ -278,11 +278,11 @@ export class Orchestrator {
   }
 
   /** The thread's session id, but only if its owning harness still holds it live (null after a restart). */
-  private liveSessionId(threadId: string, harness: AgentHarness): string | null {
+  private liveSessionId(docPath: string, threadId: string, harness: AgentHarness): string | null {
     const sid = this.deps.db.get(threadId)?.piSessionId ?? null;
     if (!sid) return null;
     const r = harness.runner;
-    return !r.hasSession || r.hasSession(sid) ? sid : null;
+    return !r.hasSession || r.hasSession(sid, cancelKeyFor(docPath, threadId)) ? sid : null;
   }
 
   /**
@@ -1022,7 +1022,7 @@ export class Orchestrator {
   ): Promise<void> {
     let thread = await readThread(docPath, threadId);
     const harness = await this.harnessForDoc(docPath, thread.frontmatter.harness);
-    const sid = this.liveSessionId(threadId, harness);
+    const sid = this.liveSessionId(docPath, threadId, harness);
     if (!sid || (modelId && modelId !== thread.frontmatter.model)) {
       // The live pi session is gone — either after a doc reopen (the thread
       // transcript persists but the in-memory session does not) or because a
@@ -1544,7 +1544,7 @@ export class Orchestrator {
     }
     const harness = await this.harnessForDoc(docPath, harnessId);
     const runner = harness.runner;
-    const sid = this.liveSessionId(threadId, harness);
+    const sid = this.liveSessionId(docPath, threadId, harness);
 
     // Continue the existing discussion session if there is a live one...
     if (sid) {

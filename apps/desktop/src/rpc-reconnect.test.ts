@@ -98,6 +98,30 @@ describe("rpc reconnect", () => {
     }
   });
 
+  it("answers the permission prompt on its originating turn and dismisses it on Stop", async () => {
+    const dismiss = vi.fn();
+    let answer!: (allow: boolean) => Promise<unknown>;
+    const client = connect(undefined, url => new FakeWebSocket(url), (_request, respond) => {
+      answer = respond;
+      return dismiss;
+    });
+    const socket = latest();
+    socket.triggerOpen();
+    const turn = client.call("discuss", {});
+    socket.triggerMessage({ id: "f1", event: "permission", data: JSON.stringify({ id: "r1", harness: "claude-code" }) });
+    const decision = answer(true);
+    expect(JSON.parse(socket.sent[1])).toMatchObject({ method: "answerHarnessPermission", params: {
+      harness: "claude-code", requestId: "r1", allow: true,
+    } });
+    socket.triggerMessage({ id: "f1", event: "permissionClosed", data: "r1" });
+    socket.triggerMessage({ id: "f2", ok: true, result: { ok: true } });
+    socket.triggerMessage({ id: "f1", ok: false, error: "Run cancelled" });
+    await decision;
+    await expect(turn).rejects.toThrow("Run cancelled");
+    expect(dismiss).toHaveBeenCalledTimes(1);
+    client.close();
+  });
+
   it("resolves a call sent once the socket is open", async () => {
     const client = makeClient();
     latest().triggerOpen();

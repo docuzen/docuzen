@@ -5,6 +5,7 @@
 // Request/response keyed by an auto-incrementing id. Mirrors RpcResponse:
 // resolves on ok, rejects with the error string otherwise.
 
+import type { HarnessPermission, showHarnessPermission } from "./harness-permissions.js";
 import type { RpcEvent } from "@ai-native-doc/docd/protocol";
 /** Intermediate streaming frame (e.g. an agent reply token); re-exported for callers. */
 export type { RpcEvent } from "@ai-native-doc/docd/protocol";
@@ -98,12 +99,14 @@ export interface DocdClient {
 export function connect(
   onStatus?: (s: string) => void,
   wsFactory: WebSocketFactory = (url) => new WebSocket(url),
+  showPermission?: typeof showHarnessPermission,
 ): DocdClient {
   // Read once: the token is fixed for the app's lifetime, so reconnects (to a respawned
   // sidecar on the same port) present the same one.
   const token = docdToken();
   const url = `ws://127.0.0.1:${docdPort()}${token ? `/?token=${encodeURIComponent(token)}` : ""}`;
   const pending = new Map<string, Pending>();
+  const permissionCards = new Map<string, { callId: string; close: () => void }>();
   const queue = new Map<string, Queued>();
   let counter = 0;
   let ws: MinimalWebSocket;
@@ -115,6 +118,8 @@ export function connect(
   function rejectAllPending(err: Error): void {
     for (const p of pending.values()) p.reject(err);
     pending.clear();
+    for (const card of permissionCards.values()) card.close();
+    permissionCards.clear();
   }
 
   // Calls issued while disconnected are held here (see `call` below) rather than rejected
@@ -165,8 +170,27 @@ export function connect(
       if (!p) return;
       if ("event" in msg) {
         // streaming frame; `model` is set for panel fan-out, undefined otherwise
+        if (msg.event === "permission") {
+          const request = JSON.parse(String(msg.data)) as HarnessPermission;
+          const answer = (allow: boolean) => call("answerHarnessPermission", { harness: request.harness, requestId: request.id, allow });
+          if (showPermission) permissionCards.set(request.id, { callId: msg.id, close: showPermission(request, answer) });
+          else void answer(false).catch(() => {});
+          return;
+        }
+        if (msg.event === "permissionClosed") {
+          const id = String(msg.data);
+          permissionCards.get(id)?.close();
+          permissionCards.delete(id);
+          return;
+        }
         p.onEvent?.({ event: msg.event, data: msg.data, model: msg.model });
         return;
+      }
+      for (const [id, card] of permissionCards) {
+        if (card.callId === msg.id) {
+          card.close();
+          permissionCards.delete(id);
+        }
       }
       pending.delete(msg.id); // final response
       if (msg.ok) p.resolve(msg.result);

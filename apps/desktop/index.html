@@ -136,6 +136,7 @@
 
     <!-- Kept a direct child of body (NOT inside .topbar): an ancestor with backdrop-filter
          would make position:fixed resolve against it instead of the viewport. -->
+    <aside id="harnessPermissions" aria-label="Agent permission requests" aria-live="polite"></aside>
     <div id="agentsPanel" class="agentspanel" hidden></div>
 
     <div id="settingsModal" class="modal" hidden>
@@ -146,6 +147,11 @@
           <select id="setHarness"></select>
           <div id="harnessCaps" class="caprow"></div>
           <span class="smuted">Harness capabilities differ. Pi uses Docuzen-managed tools; Codex can launch through a selected Docuzen model provider.</span>
+        </div>
+        <div class="srow" id="permissionModeRow" hidden>
+          <label for="setPermissionMode">Harness permission mode</label>
+          <select id="setPermissionMode"></select>
+          <span class="smuted" id="permissionModeHint">Applies to the next turn. Document changes use Docuzen proposals.</span>
         </div>
         <div class="srow">
           <label for="setDefaultModel">Default model</label>

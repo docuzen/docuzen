@@ -26,6 +26,31 @@ export function initSettings(deps: SettingsDeps): SettingsApi {
   const settingsModal = document.querySelector<HTMLDivElement>("#settingsModal")!;
   const setHarnessEl = document.querySelector<HTMLSelectElement>("#setHarness")!;
   const harnessCapsEl = document.querySelector<HTMLDivElement>("#harnessCaps")!;
+  const modeRow = document.querySelector<HTMLElement>("#permissionModeRow")!;
+  const modeSelect = document.querySelector<HTMLSelectElement>("#setPermissionMode")!;
+  const modeHint = document.querySelector<HTMLElement>("#permissionModeHint")!;
+  let modeQuery = 0;
+
+  async function refreshModes(): Promise<void> {
+    const query = ++modeQuery;
+    const harness = selectedHarnessInfo();
+    const docPath = settingsDocPath;
+    modeRow.hidden = !harness?.permissionModes || !harness.available;
+    modeSelect.disabled = true;
+    modeSelect.replaceChildren();
+    if (modeRow.hidden || !docPath || !harness) return;
+    modeHint.textContent = "Checking modes…";
+    try {
+      const result = await deps.api.getHarnessModes({ docPath, harness: harness.id });
+      if (query !== modeQuery || settingsDocPath !== docPath) return;
+      for (const mode of result.modes) modeSelect.append(el("option", { value: mode.id, textContent: mode.name }));
+      modeSelect.value = result.selected;
+      modeSelect.disabled = !result.modes.length;
+      modeHint.textContent = modeSelect.value ? "Applies to the next turn. Document changes use Docuzen proposals." : "Choose a mode supported by this session.";
+    } catch (err) {
+      if (query === modeQuery && settingsDocPath === docPath) modeHint.textContent = String(err);
+    }
+  }
   const setScopeEl = document.querySelector<HTMLSelectElement>("#setScope")!;
   const setAgentEditEl = document.querySelector<HTMLSelectElement>("#setAgentEdit")!;
   const setInstructionsEl = document.querySelector<HTMLTextAreaElement>("#setInstructions")!;
@@ -113,7 +138,10 @@ export function initSettings(deps: SettingsDeps): SettingsApi {
       );
     }
     setHarnessEl.value = selected;
-    if (!setHarnessEl.value && harnesses.length) setHarnessEl.value = harnesses[0].id;
+    if (!setHarnessEl.value && selected) {
+      setHarnessEl.append(el("option", { value: selected, textContent: selected + " (not configured)" }));
+      setHarnessEl.value = selected;
+    }
     renderHarnessCaps(setHarnessEl.value || selected);
     syncHarnessManagedControls();
   }
@@ -309,6 +337,7 @@ export function initSettings(deps: SettingsDeps): SettingsApi {
       return void reportError("settings load", e, deps.log);
     }
     settingsDocPath = docPath;
+    void refreshModes();
     settingsModal.hidden = false;
   }
 
@@ -323,7 +352,7 @@ export function initSettings(deps: SettingsDeps): SettingsApi {
   }
 
   // Settings opens from the native File menu (⌘,) — see the menu-action listener.
-  async function saveSettings(): Promise<void> {
+  async function saveSettings(permissionMode?: string): Promise<void> {
     const docPath = settingsDocPath;
     if (!docPath) return;
     const harness = selectedHarnessInfo();
@@ -338,6 +367,7 @@ export function initSettings(deps: SettingsDeps): SettingsApi {
     try {
       await deps.api.setSettings({
         docPath,
+        ...(permissionMode ? { permissionMode } : {}),
         settings: {
           scope: setScopeEl.value as HadSettings["scope"],
           harness: (setHarnessEl.value || "pi") as HadSettings["harness"],
@@ -353,10 +383,12 @@ export function initSettings(deps: SettingsDeps): SettingsApi {
       reportError("settings save", e, deps.log);
     }
   }
+  modeSelect.addEventListener("change", () => void saveSettings(modeSelect.value));
   setScopeEl.addEventListener("change", () => void saveSettings());
   setHarnessEl.addEventListener("change", () => {
     renderHarnessCaps(setHarnessEl.value);
     syncHarnessManagedControls();
+    void refreshModes();
     void saveSettings();
   });
   setAgentEditEl.addEventListener("change", () => void saveSettings());
@@ -428,7 +460,7 @@ export function initSettings(deps: SettingsDeps): SettingsApi {
       }
     }
     const harnessId = settings?.harness ?? "pi";
-    renderHarnessBadge(list.find((h) => h.id === harnessId) ?? list[0], settings);
+    renderHarnessBadge(list.find((h) => h.id === harnessId), settings);
   }
 
   return { openSettings, closeSettings, refreshHarnessBadge };

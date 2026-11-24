@@ -1,3 +1,4 @@
+import { showHarnessPermission } from "./harness-permissions.js";
 // Bootstrap: constructs shared state (log, RPC client, DocSession store, editor/
 // html-surface handles) and wires every feature module together. This file is
 // the ONLY place that imports every module; feature modules never import each
@@ -98,7 +99,7 @@ function updateConnStatus(status: string): void {
 const client = connect((s) => {
   log(s);
   updateConnStatus(s);
-});
+}, undefined, showHarnessPermission);
 
 // Shared DOM mount points, queried once and threaded to every module that needs
 // them (editor.ts/surface.ts's initSearch/initHtmlSurface, shell.ts).

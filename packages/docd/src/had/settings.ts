@@ -1,6 +1,7 @@
 import { hadPaths } from "./paths.js";
 import { readJsonFile, withFileLock, writeJsonFile } from "./io.js";
 import { readAppConfig } from "../config/app-config.js";
+import type { HarnessId } from "../agent/harness-registry.js";
 
 /** Tool/agent scope for a document. "folder" = the doc's directory (+ .had);
  *  "repo" = up to the nearest repo root. */
@@ -16,7 +17,7 @@ export interface HadSettings {
    * this document nor ~/.docuzen/config.toml names one — the sidecar then uses its
    * registry default (the first usable harness; see server/select-runner.ts).
    */
-  harness?: "pi" | "codex" | "claude-code";
+  harness?: HarnessId;
   /** Optional per-doc model override (provider/model resolution is the sidecar's). */
   model?: string;
   /**
