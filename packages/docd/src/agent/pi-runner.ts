@@ -109,6 +109,8 @@ export interface PiConfig {
   modelId: string;
   /** Built-in pi tools to enable. Default: read-only set (no bash/edit/write). */
   tools?: string[];
+  /** Maximum silence during a model request; streamed text, reasoning and tool events renew it. */
+  idleTimeoutMs?: number;
 }
 
 export function buildPiSessionOptions<T extends PiSessionOptions>(input: T): T {
@@ -413,7 +415,7 @@ export class PiRunner implements AgentRunner {
     }
     let turn: AgentTurn;
     try {
-      turn = await this.run(entry, this.firstPrompt(ctx), onToken, firstRun);
+      turn = await this.run(sessionId, entry, this.firstPrompt(ctx), onToken, firstRun);
     } catch (e) {
       this.drop(sessionId); // the caller never learns this session's id
       throw e;
@@ -735,7 +737,7 @@ export class PiRunner implements AgentRunner {
   async send(sessionId: string, message: string, onToken?: TokenSink): Promise<AgentTurn> {
     const entry = this.sessions.get(sessionId);
     if (!entry) throw new Error(`unknown session: ${sessionId}`);
-    return this.run(entry, message, onToken);
+    return this.run(sessionId, entry, message, onToken);
   }
 
   /** Whether this runner still holds the live session (false after a restart). */
@@ -777,19 +779,28 @@ export class PiRunner implements AgentRunner {
 
   /** Serialize prompts per session — pi rejects overlapping turns. */
   private run(
+    sessionId: string,
     entry: SessionEntry,
     prompt: string,
     onToken?: TokenSink,
     pending: PendingRun = this.register(entry),
   ): Promise<AgentTurn> {
     const task = entry.chain.then(async () => {
+      if (!this.sessions.has(sessionId)) throw new Error("Pi session expired. Retry this turn.");
       entry.buf = "";
       entry.think = "";
       entry.error = null;
       entry.aborted = false;
       entry.proposal = null;
       entry.findings = [];
-      entry.sink = onToken ?? null;
+      const idleMs = this.cfg.idleTimeoutMs ?? 60_000;
+      let timer: NodeJS.Timeout | undefined;
+      let expired = false;
+      entry.sink = event => {
+        if (expired) return;
+        timer?.refresh();
+        onToken?.(event);
+      };
       let promptError: unknown;
       try {
         if (pending.cancelled) {
@@ -799,15 +810,32 @@ export class PiRunner implements AgentRunner {
           entry.active = pending;
           // The reviewer's text goes to the model as typed: a reply starting with "/" is
           // not an extension command, skill or prompt-template invocation.
-          await entry.session.prompt(prompt, { expandPromptTemplates: false });
+          // A local proxy can accept a connection forever without sending headers.
+          // Bound silence across SDK retries, and abandon the session if abort does not settle.
+          const silent = new Promise<never>((_, reject) => {
+            timer = setTimeout(() => {
+              expired = true;
+              const stopped = pending.cancelled;
+              pending.cancelled = true;
+              reject(new Error(stopped ? "Pi run cancelled" :
+                `Pi received no model or tool activity for ${Math.ceil(idleMs / 1000)} seconds. Check your model provider or gateway connection, then retry.`));
+              void entry.session.abort?.().catch(() => {});
+              this.drop(sessionId);
+            }, idleMs);
+            timer.unref();
+          });
+          await Promise.race([entry.session.prompt(prompt, { expandPromptTemplates: false }), silent]);
         }
       } catch (e) {
         // A rejected prompt() is itself a failure shape the SDK exposes (e.g. its own "no
         // model selected"/"no API key available" preflight checks) — captured here rather
         // than left to propagate uncaught, so it funnels through finishTurn's single rule
         // just like an event-reported failure does.
+        // A partial reply or draft from a timed-out turn must never be committed.
+        if (expired) throw e;
         promptError = e;
       } finally {
+        clearTimeout(timer);
         entry.sink = null;
         entry.active = undefined;
       }

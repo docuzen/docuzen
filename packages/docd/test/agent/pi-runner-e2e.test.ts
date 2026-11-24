@@ -25,6 +25,8 @@ const requestMeta: { url: string; auth: string | undefined }[] = [];
 let script: object[][] = [];
 /** When set, the next request is held open (headers sent, no chunks) until the client aborts. */
 let hang = false;
+let silentHeaders = false;
+let delayedChunks = 0;
 let modelsJsonPath: string;
 let baseUrl: string;
 
@@ -104,6 +106,10 @@ beforeAll(async () => {
       }
       requests.push(JSON.parse(body) as ChatRequest);
       requestMeta.push({ url: req.url, auth: req.headers.authorization });
+      if (silentHeaders) {
+        silentHeaders = false;
+        return; // proxy accepted the request but did not send HTTP headers
+      }
       if (hang) {
         hang = false;
         res.writeHead(200, { "content-type": "text/event-stream" });
@@ -117,6 +123,17 @@ beforeAll(async () => {
         return;
       }
       res.writeHead(200, { "content-type": "text/event-stream" });
+      if (delayedChunks) {
+        const delay = delayedChunks;
+        delayedChunks = 0;
+        let i = 0;
+        const timer = setInterval(() => {
+          if (i < chunks.length) res.write(`data: ${JSON.stringify(chunks[i++])}\n\n`);
+          else { clearInterval(timer); res.end("data: [DONE]\n\n"); }
+        }, delay);
+        res.on("close", () => clearInterval(timer));
+        return;
+      }
       for (const c of chunks) res.write(`data: ${JSON.stringify(c)}\n\n`);
       res.end("data: [DONE]\n\n");
     });
@@ -157,10 +174,10 @@ function ctx(extra: Partial<AgentContext> = {}): AgentContext {
   };
 }
 
-async function newRunner() {
+async function newRunner(idleTimeoutMs?: number) {
   // Imported lazily: the SDK resolves its agent dir from the env set in beforeAll.
   const { PiRunner } = await import("../../src/agent/pi-runner.js");
-  return PiRunner.create({ provider: "mock", modelId: "mock-model" });
+  return PiRunner.create({ provider: "mock", modelId: "mock-model", idleTimeoutMs });
 }
 
 describe("PiRunner end-to-end against a mock chat-completions server", () => {
@@ -249,6 +266,25 @@ describe("PiRunner end-to-end against a mock chat-completions server", () => {
     expect((requests[0] as unknown as { model: string }).model).toBe("late-model");
     writeModels(["mock-model"]);
   }, 30_000);
+
+  it("fails a silent gateway request and lets a fresh turn succeed", async () => {
+    const runner = await newRunner(500);
+    script = [reply("back")];
+    silentHeaders = true;
+    await expect(runner.start(ctx({ conversationOnly: true }))).rejects.toThrow(/no model or tool activity.*gateway/);
+    expect((await runner.start(ctx({ conversationOnly: true }))).turn.reply).toBe("back");
+  });
+
+  it("keeps a streaming turn alive beyond the silence limit and discards a stalled reply session", async () => {
+    const runner = await newRunner(550);
+    delayedChunks = 180;
+    script = [[chunk({ role: "assistant", content: "one " }), chunk({ content: "two " }), chunk({ content: "three" }), chunk({}, "stop")]];
+    const { sessionId, turn } = await runner.start(ctx({ conversationOnly: true }));
+    expect(turn.reply).toBe("one two three");
+    hang = true;
+    await expect(runner.send(sessionId, "Next")).rejects.toThrow(/no model or tool activity/);
+    expect(runner.hasSession(sessionId)).toBe(false);
+  });
 
   it("Stop mid-stream settles the turn normally instead of throwing", async () => {
     requests.length = 0;
