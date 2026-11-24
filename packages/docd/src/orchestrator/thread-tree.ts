@@ -17,6 +17,7 @@ export interface ThreadNode {
   anchorExact: string;
   /** First "you" turn body, whitespace-collapsed + capped; falls back to anchorExact. */
   title: string;
+  harness?: string;
   turnCount: number;
   /** Whether the agent has replied at least once (the next message is a reply, not a first ask). */
   hasAgentTurn: boolean;
@@ -59,6 +60,7 @@ export async function listThreadTree(docPath: string): Promise<ThreadNode[]> {
         status: fm.status,
         createdAt: ann.createdAt,
       };
+      if (fm.harness !== undefined) node.harness = fm.harness;
       if (fm.parent !== undefined) node.parent = fm.parent;
       if (fm.branchFromTurn !== undefined) node.branchFromTurn = fm.branchFromTurn;
       if (fm.baseVersion !== undefined) node.baseVersion = fm.baseVersion;

@@ -412,17 +412,23 @@ describe("opening threads", () => {
     expect(agent.textContent).not.toContain("**");
   });
 
-  it("the footer keeps the text box and Send in view; stance, model, panel and Resolve sit behind one toggle that names what is in use", async () => {
+  it("the footer keeps the text box and Send in view; stance, model, panel and Resolve sit behind Options with the thread’s harness visible", async () => {
     const { chat, threads } = setup();
     addCard(chat, "c0001");
-    threads.c0001 = { frontmatter: { stance: "critiquer" }, turns: [{ role: "you", body: "q" }, { role: "agent", body: "a" }] };
+    threads.c0001 = { frontmatter: { stance: "critiquer", harness: "codex" }, turns: [{ role: "you", body: "q" }, { role: "agent", body: "a" }] };
     await chat.promoteToChat("c0001");
     const more = $("#chatMore");
     const toggle = $<HTMLButtonElement>("#chatMoreBtn");
     expect(more.hidden).toBe(true);
     for (const id of ["#chatStance", "#chatModel", "#chatPanel", "#chatResolve"]) expect(more.contains($(id))).toBe(true);
     for (const id of ["#chatInput", "#chatSend", "#chatStop", "#chatImprove"]) expect(more.contains($(id))).toBe(false);
-    expect(toggle.textContent).toContain("critiquer"); // visible while the row is closed
+    chat.setHarnessContext("pi", [
+      { id: "pi", label: "Pi", available: true, capabilities: { multiModelPanel: true } },
+      { id: "codex", label: "Codex", available: true, capabilities: { multiModelPanel: false } },
+    ] as Parameters<typeof chat.setHarnessContext>[1]);
+    expect($("#chatHarnessLabel").textContent).toBe("Harness: Codex");
+    expect($("#chatRoutingDetail").textContent).toContain("critiquer");
+    expect(toggle.textContent).toBe("Options");
 
     toggle.click();
     expect(more.hidden).toBe(false);
@@ -430,9 +436,22 @@ describe("opening threads", () => {
     const stance = $<HTMLSelectElement>("#chatStance");
     stance.value = "supporter";
     stance.dispatchEvent(new Event("change"));
-    expect(toggle.textContent).toContain("supporter");
+    expect($("#chatRoutingDetail").textContent).toContain("supporter");
     toggle.click();
     expect(more.hidden).toBe(true);
+  });
+
+  it("a new thread shows its document harness and hides model choices managed by that harness", async () => {
+    const { chat } = setup();
+    chat.setHarnessContext("claude-code", [{
+      id: "claude-code", label: "Claude Code", available: true, capabilities: { multiModelPanel: false },
+    }] as Parameters<typeof chat.setHarnessContext>[1]);
+    addCard(chat, "c0001");
+    await chat.promoteToChat("c0001");
+    expect($("#chatHarnessLabel").textContent).toBe("Harness: Claude Code");
+    expect($("#chatRoutingDetail").textContent).toContain("Model: Harness default");
+    expect($<HTMLSelectElement>("#chatModel").disabled).toBe(true);
+    expect($("#chatPanel").hidden).toBe(true);
   });
 
   it("a slow fetch for thread A never renders into thread B's pane", async () => {

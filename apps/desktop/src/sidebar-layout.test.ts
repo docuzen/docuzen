@@ -121,61 +121,6 @@ describe("sidebar un-collapse exceptions (NO magic beyond these two)", () => {
   });
 });
 
-describe("harness/model badge", () => {
-  it("resolves the default model's display name through chat.ts's cache (deps.modelName), not this module's own lazy configuredModels", () => {
-    const badgeSource = sourceBetween(
-      shellSource,
-      "function renderHarnessBadge(",
-      "async function refreshHarnessBadge(): Promise<void> {",
-    );
-    expect(badgeSource).toContain("deps.modelName(modelKey)");
-    expect(badgeSource).not.toContain("configuredModels");
-  });
-
-  it("uses established app vocabulary for the two 'no user-facing model name' cases", () => {
-    const badgeSource = sourceBetween(
-      shellSource,
-      "function renderHarnessBadge(",
-      "async function refreshHarnessBadge(): Promise<void> {",
-    );
-    expect(badgeSource).toContain('"harness-managed"'); // matches this file's own "Model: harness-managed" capchip
-    expect(badgeSource).toContain('"sidecar default"'); // matches refreshModels' "— sidecar default —" option
-  });
-
-  it("notes in its tooltip that it reflects defaults, not per-thread overrides", () => {
-    const badgeSource = sourceBetween(
-      shellSource,
-      "function renderHarnessBadge(",
-      "async function refreshHarnessBadge(): Promise<void> {",
-    );
-    expect(badgeSource).toContain("Defaults — per-thread overrides show in the chat pane.");
-    expect(badgeSource).toContain("Change in Settings (⌘,).");
-  });
-
-  it("threads chat.ts's modelName getter through ShellDeps/main.ts, not a re-fetch of its own", () => {
-    expect(shellSource).toContain("modelName: (key: string) => string;");
-    expect(mainSource).toContain("modelName: chat.modelName,");
-  });
-
-  it("refreshes on boot and after saveSettings, and NOT on every tab switch", () => {
-    expect(mainSource).toContain("await shell.refreshHarnessBadge();");
-
-    const saveSettingsSource = sourceBetween(
-      shellSource,
-      "async function saveSettings(",
-      "setScopeEl.addEventListener",
-    );
-    expect(saveSettingsSource).toContain("void refreshHarnessBadge();");
-
-    const activateTabSource = sourceBetween(
-      shellSource,
-      "async function activateTab(",
-      "/** Read the per-doc default model key",
-    );
-    expect(activateTabSource).not.toContain("refreshHarnessBadge");
-  });
-});
-
 describe("reading area widens when a pane is hidden (bugfix: freed space stayed empty margin)", () => {
   // These are pure source pins on styles.css, matching the established pattern
   // for CSS-behavior regressions in this repo (see code-block-style.test.ts).

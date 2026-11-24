@@ -83,7 +83,7 @@ describe("streamingAgentTurn call sites pass the actual model driving each bubbl
       'const runBranch = async (doc: "latest" | "at-turn"): Promise<void> => {',
       "latestBtn.addEventListener",
     );
-    expect(runBranchSource).toContain("const modelId = chatModelEl.value || undefined;");
+    expect(runBranchSource).toContain("const modelId = footerModel() || undefined;");
     expect(runBranchSource).toContain("const bubble = turn.bubble(chatStanceEl.value, modelId);");
   });
 

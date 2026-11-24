@@ -149,6 +149,7 @@ export interface ChatApi {
   refreshThreadTree: () => Promise<void>;
   refreshThreadModels: () => Promise<void>;
   setDefaultModelKey: (key: string) => void;
+  setHarnessContext: (id: string | undefined, list: RpcResult<"listHarnesses">) => void;
   modelName: (key: string) => string;
   runReview: () => Promise<void>;
   runResolveDirectives: () => Promise<void>;
@@ -211,25 +212,34 @@ export function initChat(deps: ChatDeps): ChatApi {
   const chatMoreBtnEl = document.querySelector<HTMLButtonElement>("#chatMoreBtn")!;
   const chatMoreEl = document.querySelector<HTMLDivElement>("#chatMore")!;
 
-  // --- footer "more" row: stance, model, ask-all-models and Resolve live behind one toggle,
-  // so the footer is a text box plus Send. The toggle names the stance + model in use, which
-  // keeps them visible while the row is closed.
+  // The routing summary stays visible when the optional stance and model controls are closed.
   const MORE_OPEN_KEY = "docuzen.chatMoreOpen";
+  const harnessLabel = document.querySelector<HTMLElement>("#chatHarnessLabel")!;
+  const routingDetail = document.querySelector<HTMLElement>("#chatRoutingDetail")!;
+  let documentHarness: string | undefined;
+  let threadHarness: string | undefined;
+  let harnessList: RpcResult<"listHarnesses"> = [];
+
   function refreshMoreLabel(): void {
-    const open = !chatMoreEl.hidden;
-    const stance = chatStanceEl.value && chatStanceEl.value !== "none" ? chatStanceEl.value : "";
-    // Option text carries a leading icon; the toggle is narrow, so it shows the name only.
-    const model = (chatModelEl.selectedOptions[0]?.textContent ?? "").replace(/^[^\p{L}\p{N}]+/u, "").trim();
-    const summary = [stance, model].filter(Boolean).join(" · ") || "Options";
-    // The ▸/▾ is CSS on the button; the label is its own span so a long model name
-    // truncates instead of pushing the arrow out.
-    const label = document.createElement("span");
-    label.className = "morelabel";
-    label.textContent = summary;
-    chatMoreBtnEl.replaceChildren(label);
-    chatMoreBtnEl.title = `${summary} — stance, model, ask all models, resolve`;
-    chatMoreBtnEl.setAttribute("aria-expanded", String(open));
+    const id = threadHarness ?? documentHarness;
+    const harness = harnessList.find(h => h.id === id);
+    const managed = !!id && id !== "pi" && id !== "codex";
+    const unavailable = !!id && harnessList.length > 0 && !harness?.available;
+    harnessLabel.textContent = "Harness: " + (harness?.label ?? id ?? "Unknown") + (unavailable ? " (unavailable)" : "");
+    harnessLabel.title = threadHarness ? "This thread uses its saved harness." : "New discussions use the document harness.";
+    const model = managed ? "Harness default" :
+      (chatModelEl.selectedOptions[0]?.textContent ?? "").replace(/^[^\p{L}\p{N}]+/u, "").trim() || "Default";
+    const stance = chatStanceEl.value;
+    routingDetail.textContent = "Model: " + model + (stance && stance !== "none" ? " · " + stance : "");
+    chatModelEl.hidden = chatModelEl.disabled = managed;
+    chatPanelEl.hidden = !!harness && !harness.capabilities.multiModelPanel;
+    chatMoreBtnEl.setAttribute("aria-expanded", String(!chatMoreEl.hidden));
   }
+
+  function footerModel(): string {
+    return chatModelEl.disabled ? "" : chatModelEl.value;
+  }
+
   function setMoreOpen(open: boolean): void {
     chatMoreEl.hidden = !open;
     refreshMoreLabel();
@@ -295,7 +305,7 @@ export function initChat(deps: ChatDeps): ChatApi {
     renderPreviewText: deps.renderPreviewText,
     onEditTurn: (turnEl, original, turnIndex) => beginEditBranch(turnEl, original, turnIndex),
     modelName: (key) => modelName(key),
-    getFooterModelId: () => chatModelEl.value,
+    getFooterModelId: footerModel,
   });
 
   // --- Improve: rewrite a highlighted passage (chat-improve.ts) ---
@@ -325,7 +335,14 @@ export function initChat(deps: ChatDeps): ChatApi {
     comments: () => comments.values(),
     openThread: (id) => jumpToAnnotation(id),
     appendToTurns: (el) => void chatTurnsEl.appendChild(el),
-    onNodes: (nodes) => cards.applyThreadNodes(nodes),
+    onNodes: (nodes) => {
+      cards.applyThreadNodes(nodes);
+      const node = nodes.find(n => n.id === activeChatId);
+      if (node) {
+        threadHarness = node.harness;
+        refreshMoreLabel();
+      }
+    },
   });
 
   // --- Agents button + dropdown (chat-agents-panel.ts) ---
@@ -376,6 +393,8 @@ export function initChat(deps: ChatDeps): ChatApi {
   function refreshBusy(): void {
     busyThread = activeChatId && scope.busy.has(activeChatId) ? activeChatId : null;
     chatStopEl.hidden = !busyThread;
+    chatSendEl.textContent = busyThread ? "Queue" : "Send";
+    chatSendEl.title = busyThread ? "Send after the current turn" : "Send";
     chatPanelEl.disabled = !!busyThread; // no concurrent panel run while a turn streams
     chatFootEl.classList.toggle("busy", !!busyThread);
     refreshEditLocks(); // Phase 9 T2: busy state is one of forkLocked's two inputs
@@ -631,7 +650,7 @@ export function initChat(deps: ChatDeps): ChatApi {
       if (!turn) return;
       setButtons(true);
       const quoted = comments.get(parentId)?.quoted ?? "";
-      const modelId = chatModelEl.value || undefined;
+      const modelId = footerModel() || undefined;
       const bubble = turn.bubble(chatStanceEl.value, modelId);
       try {
         const res = await deps.api.branchThread(
@@ -738,6 +757,8 @@ export function initChat(deps: ChatDeps): ChatApi {
    */
   function setPaneSubject(id: string | null): number {
     activeChatId = id;
+    threadHarness = tree.getThreadNodes().find(n => n.id === id)?.harness;
+    refreshMoreLabel();
     paneGen++;
     comments.forEach((e) => e.card.classList.toggle("active", e.id === id));
     chatTurnsEl.replaceChildren();
@@ -767,6 +788,8 @@ export function initChat(deps: ChatDeps): ChatApi {
 
   /** A thread's persisted turns, with the ‹ k / n › pager under each forked "you" turn. */
   function renderThreadTurns(id: string, thread: ThreadView, agentMeta: (tn: ThreadTurn) => string | undefined): void {
+    threadHarness = thread.frontmatter?.harness;
+    refreshMoreLabel();
     thread.turns.forEach((tn, i) => {
       chatTurn(tn.role, tn.body, agentMeta(tn), tn.thinking, i);
       if (tn.role === "you") {
@@ -990,7 +1013,7 @@ export function initChat(deps: ChatDeps): ChatApi {
       threadId,
       text,
       stance: picked?.stance ?? chatStanceEl.value,
-      modelId: picked ? picked.modelId : chatModelEl.value || undefined,
+      modelId: picked ? picked.modelId : footerModel() || undefined,
     };
     if (t.scope.queue.isInFlight(threadId)) {
       t.scope.queue.enqueue(item);
@@ -1422,6 +1445,11 @@ export function initChat(deps: ChatDeps): ChatApi {
     getThreadNodes: tree.getThreadNodes,
     refreshThreadTree: tree.refreshThreadTree,
     refreshThreadModels,
+    setHarnessContext: (id, list) => {
+      documentHarness = id;
+      harnessList = list;
+      refreshMoreLabel();
+    },
     setDefaultModelKey: (key) => {
       defaultModelKey = key;
     },
@@ -1432,7 +1460,7 @@ export function initChat(deps: ChatDeps): ChatApi {
     refreshAgents: agents.refreshAgents,
     handleResolveShortcut: passes.handleResolveShortcut,
     getStance: () => chatStanceEl.value,
-    getModelId: () => chatModelEl.value || undefined,
+    getModelId: () => footerModel() || undefined,
     appendCustomTurn,
     scrollTurnsToBottom: () => {
       chatTurnsEl.scrollTop = chatTurnsEl.scrollHeight;

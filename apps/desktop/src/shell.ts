@@ -49,7 +49,7 @@ import type { PluginKey } from "@milkdown/kit/prose/state";
 import { save, open } from "@tauri-apps/plugin-dialog";
 import { listen } from "@tauri-apps/api/event";
 import { getCurrentWindow } from "@tauri-apps/api/window";
-import type { Annotation, EditHunk } from "@ai-native-doc/docd/protocol";
+import type { Annotation, EditHunk, RpcResult } from "@ai-native-doc/docd/protocol";
 import { baseHrefForDoc, type HtmlSurface } from "./html-surface.js";
 import { wireModal, reportError } from "./ui.js";
 import type { DocdApi } from "./session.js";
@@ -83,6 +83,7 @@ export interface ShellDeps {
   runResolveDirectives: () => Promise<void>;
   refreshThreadModels: () => Promise<void>;
   setDefaultModelKey: (key: string) => void;
+  setHarnessContext: (id: string | undefined, list: RpcResult<"listHarnesses">) => void;
   getThreadNodes: () => ThreadNode[];
   refreshThreadTree: () => Promise<void>;
   truncTitle: (s: string, max?: number) => string;
@@ -496,6 +497,7 @@ export function initShell(deps: ShellDeps): ShellApi {
     api: deps.api,
     log: deps.log,
     setDefaultModelKey: deps.setDefaultModelKey,
+    setHarnessContext: deps.setHarnessContext,
     refreshThreadModels: deps.refreshThreadModels,
     modelName: deps.modelName,
     activeDocPath: () => tabs[activeIdx]?.docPath,
@@ -733,6 +735,7 @@ export function initShell(deps: ShellDeps): ShellApi {
     shownDocPath = undefined;
     closeDocModals();
     clearDocPath();
+    void refreshHarnessBadge();
     deps.clearSearchHighlights();
     deps.setEditToggleVisible(false);
     deps.getHtmlSurface()?.unload(); // a closed page must not keep running
@@ -794,9 +797,8 @@ export function initShell(deps: ShellDeps): ShellApi {
     saveTabSession();
     // Read this doc's default model BEFORE rendering cards so their pickers default
     // to it. Failure is non-fatal — defaultModelKey falls back to "" (sidecar default).
-    const modelKey = await readDocDefaultModel(tab.docPath);
+    await refreshHarnessBadge();
     if (!isCurrentActivation(seq, tab)) return;
-    deps.setDefaultModelKey(modelKey);
     // Phase 1: annotations/proposals render on the markdown surface only. The HTML
     // surface gets its own annotation layer in Phase 2; skip the editor-projection
     // path here so it doesn't run against the wrong surface.
@@ -848,16 +850,6 @@ export function initShell(deps: ShellDeps): ShellApi {
       reportError("load proposals", e, deps.log);
     }
     resetDocumentViewport();
-  }
-
-  /** Read the per-doc default model key from getSettings().model. */
-  async function readDocDefaultModel(docPath: string): Promise<string> {
-    try {
-      const s = await deps.api.getSettings({ docPath });
-      return s.model ?? "";
-    } catch {
-      return "";
-    }
   }
 
   /** True for the rpc client's "sidecar unreachable" rejection (the file itself may be fine). */

@@ -41,13 +41,12 @@
           Open a review-card discussion to work with an agent on the selected passage.
         </div>
         <div id="chatFoot" class="chatfoot" hidden>
-          <textarea id="chatInput" rows="2" placeholder="Message the agent…"></textarea>
-          <div class="chatprimary">
-            <button id="chatImprove" class="improvebtn" title="Ask the agent to rewrite the highlighted text using this discussion">Improve passage</button>
-            <button id="chatMoreBtn" class="morebtn" type="button" aria-expanded="false" aria-controls="chatMore" title="Stance, model, ask all models, resolve">Options</button>
-            <span class="footspacer"></span>
-            <button id="chatStop" title="Stop the agent" hidden>Stop</button>
-            <button id="chatSend" title="Send">Send</button>
+          <div class="chat-routing">
+            <div class="chat-routing-text">
+              <strong id="chatHarnessLabel">Harness unknown</strong>
+              <span id="chatRoutingDetail"></span>
+            </div>
+            <button id="chatMoreBtn" class="morebtn" type="button" aria-expanded="false" aria-controls="chatMore">Options</button>
           </div>
           <div id="chatMore" class="chatmore" hidden>
             <select id="chatStance" class="stance" title="Agent stance">
@@ -58,6 +57,13 @@
             <select id="chatModel" class="stance" title="Model"></select>
             <button id="chatPanel" title="Ask all configured models at once">Ask all models</button>
             <button id="chatResolve" class="resolvebtn" title="Mark this discussion resolved">Resolve thread</button>
+          </div>
+          <textarea id="chatInput" rows="2" placeholder="Message the agent…"></textarea>
+          <div class="chatprimary">
+            <button id="chatImprove" class="improvebtn" title="Ask the agent to rewrite the highlighted text using this discussion">Improve passage</button>
+            <span class="footspacer"></span>
+            <button id="chatStop" title="Stop the agent" hidden>Stop</button>
+            <button id="chatSend" title="Send">Send</button>
           </div>
         </div>
       </aside>
@@ -110,6 +116,7 @@
          `.layout`, NOT nested inside `.layout`) so it spans the full window
          width below both sidebars, not just below `.doc`. -->
     <footer class="statusbar">
+      <button id="harnessBadge" type="button" class="harnessbadge" title="Open document harness settings" disabled>Document harness: —</button>
       <div class="statuscluster">
         <span id="docZoomControl" class="doczoom" title="Document zoom — pinch on the document to zoom, or ⌘+ / ⌘- / ⌘0. Click the percentage to reset.">
           <button id="docZoomOutBtn" class="doczoombtn" type="button" title="Zoom document out (⌘-)">−</button>
@@ -117,7 +124,6 @@
           <button id="docZoomInBtn" class="doczoombtn" type="button" title="Zoom document in (⌘+)">+</button>
         </span>
         <button id="docPath" class="docpath" type="button" hidden disabled title="Click to reveal in Finder"></button>
-        <span id="harnessBadge" class="harnessbadge" title="Loading harness…"></span>
         <span id="connStatus" class="connstatus reconnecting" title="docd connection status"><span class="dot"></span><span class="connlabel">reconnecting…</span></span>
       </div>
     </footer>
@@ -139,81 +145,83 @@
     <aside id="harnessPermissions" aria-label="Agent permission requests" aria-live="polite"></aside>
     <div id="agentsPanel" class="agentspanel" hidden></div>
 
-    <div id="settingsModal" class="modal" hidden>
+    <div id="settingsModal" class="modal" role="dialog" aria-modal="true" aria-labelledby="settingsTitle" hidden>
       <div class="modal-card">
-        <h3>Settings</h3>
+        <div class="settings-heading">
+          <h3 id="settingsTitle">Settings</h3>
+          <button id="settingsClose" class="action" type="button">Done</button>
+        </div>
         <div class="srow">
-          <label for="setHarness">Agent harness</label>
+          <label for="setHarness">Document harness</label>
           <select id="setHarness"></select>
+          <span class="smuted">Used for new discussions here and as the default for new documents. Existing threads keep their harness.</span>
+        </div>
+        <div class="settings-scroll">
           <div id="harnessCaps" class="caprow"></div>
-          <span class="smuted">Harness capabilities differ. Pi uses Docuzen-managed tools; Codex can launch through a selected Docuzen model provider.</span>
-        </div>
-        <div class="srow" id="permissionModeRow" hidden>
-          <label for="setPermissionMode">Harness permission mode</label>
-          <select id="setPermissionMode"></select>
-          <span class="smuted" id="permissionModeHint">Applies to the next turn. Document changes use Docuzen proposals.</span>
-        </div>
-        <div class="srow">
-          <label for="setDefaultModel">Default model</label>
-          <select id="setDefaultModel"></select>
-          <span id="setDefaultModelHint" class="smuted"></span>
-        </div>
-        <div class="srow">
-          <label>Model providers <span class="smuted">(base URL, API key, reasoning)</span></label>
-          <div id="modelList" class="modellist"></div>
-          <button id="modelAddBtn" class="action" type="button">+ Add model/provider</button>
-        </div>
-        <div id="modelForm" class="modelform" hidden>
-          <input id="mfName" placeholder="Display name (e.g. GPT-5.5)" />
-          <input id="mfProvider" placeholder="Provider key (e.g. docuzen)" />
-          <input id="mfModelId" placeholder="Model id (e.g. gpt-5.5)" />
-          <input id="mfBaseUrl" placeholder="API URL (e.g. https://host/v1)" />
-          <input id="mfApiKey" type="password" placeholder="API key (blank = keep existing)" />
-          <select id="mfReasoning">
-            <option value="none">reasoning: none</option>
-            <option value="low">reasoning: low</option>
-            <option value="medium">reasoning: medium</option>
-            <option value="high">reasoning: high</option>
-            <option value="xhigh">reasoning: xhigh</option>
-          </select>
-          <div class="mfacts"><button id="mfSave" class="action" type="button">Save model</button><button id="mfCancel" class="action" type="button">Cancel</button></div>
-        </div>
-        <div class="srow">
-          <label for="setScope">Agent tool scope <span class="smuted">(this document)</span></label>
-          <select id="setScope">
-            <option value="folder">Document folder + .had</option>
-            <option value="repo">Whole repo</option>
-          </select>
-        </div>
-        <div class="srow">
-          <label for="setAgentEdit">Agent edits <span class="smuted">(Improve, Resolve [[ ]], Review)</span></label>
-          <select id="setAgentEdit">
-            <option value="propose">Suggesting — you approve each edit</option>
-            <option value="direct">Editing — edits apply directly (versioned)</option>
-          </select>
-        </div>
-        <div class="srow">
-          <label for="setInstructions">Standing instructions <span class="smuted">(added to every agent prompt for this doc)</span></label>
-          <textarea id="setInstructions" rows="4" placeholder="e.g. No passive voice. Keep paragraphs under 3 sentences. Match my terse, concrete voice."></textarea>
-        </div>
-        <div class="srow">
-          <label for="setWebProvider">Agent web search
-            <label class="inlinecheck"><input type="checkbox" id="setWebSearch" checked /> enabled</label>
-          </label>
-          <select id="setWebProvider">
-            <option value="ddg">DuckDuckGo (no key)</option>
-            <option value="brave">Brave (BRAVE_API_KEY)</option>
-            <option value="tavily">Tavily (TAVILY_API_KEY)</option>
-          </select>
-          <span class="smuted">Brave/Tavily read their API key from the environment; keys are never stored in the document.</span>
-          <span id="setWebSearchHint" class="smuted"></span>
-        </div>
-        <div class="srow">
-          <label>Stances</label>
-          <span class="smuted">🗣 none · 🔍 critiquer · 🤝 supporter (built-in)</span>
-        </div>
-        <div class="modal-foot">
-          <button id="settingsClose" class="action">Done</button>
+          <div class="srow" id="permissionModeRow" hidden>
+            <label for="setPermissionMode">Harness permission mode</label>
+            <select id="setPermissionMode"></select>
+            <span class="smuted" id="permissionModeHint">Applies to the next turn. Document changes use Docuzen proposals.</span>
+          </div>
+          <div class="srow">
+            <label for="setDefaultModel">Default model</label>
+            <select id="setDefaultModel"></select>
+            <span id="setDefaultModelHint" class="smuted"></span>
+          </div>
+          <details id="modelProviders" class="model-providers">
+            <summary>Manage model providers <span id="modelCount"></span></summary>
+            <button id="modelAddBtn" class="action" type="button">+ Add model/provider</button>
+            <div id="modelForm" class="modelform" hidden>
+              <input id="mfName" placeholder="Display name (e.g. GPT-5.5)" />
+              <input id="mfProvider" placeholder="Provider key (e.g. docuzen)" />
+              <input id="mfModelId" placeholder="Model id (e.g. gpt-5.5)" />
+              <input id="mfBaseUrl" placeholder="API URL (e.g. https://host/v1)" />
+              <input id="mfApiKey" type="password" placeholder="API key (blank = keep existing)" />
+              <select id="mfReasoning">
+                <option value="none">reasoning: none</option>
+                <option value="low">reasoning: low</option>
+                <option value="medium">reasoning: medium</option>
+                <option value="high">reasoning: high</option>
+                <option value="xhigh">reasoning: xhigh</option>
+              </select>
+              <div class="mfacts"><button id="mfSave" class="action" type="button">Save model</button><button id="mfCancel" class="action" type="button">Cancel</button></div>
+            </div>
+            <div id="modelList" class="modellist"></div>
+          </details>
+          <div class="srow">
+            <label for="setScope">Agent tool scope <span class="smuted">(this document)</span></label>
+            <select id="setScope">
+              <option value="folder">Document folder + .had</option>
+              <option value="repo">Whole repo</option>
+            </select>
+          </div>
+          <div class="srow">
+            <label for="setAgentEdit">Agent edits <span class="smuted">(Improve, Resolve [[ ]], Review)</span></label>
+            <select id="setAgentEdit">
+              <option value="propose">Suggesting — you approve each edit</option>
+              <option value="direct">Editing — edits apply directly (versioned)</option>
+            </select>
+          </div>
+          <div class="srow">
+            <label for="setInstructions">Standing instructions <span class="smuted">(added to every agent prompt for this doc)</span></label>
+            <textarea id="setInstructions" rows="4" placeholder="e.g. No passive voice. Keep paragraphs under 3 sentences. Match my terse, concrete voice."></textarea>
+          </div>
+          <div class="srow">
+            <label for="setWebProvider">Agent web search
+              <label class="inlinecheck"><input type="checkbox" id="setWebSearch" checked /> enabled</label>
+            </label>
+            <select id="setWebProvider">
+              <option value="ddg">DuckDuckGo (no key)</option>
+              <option value="brave">Brave (BRAVE_API_KEY)</option>
+              <option value="tavily">Tavily (TAVILY_API_KEY)</option>
+            </select>
+            <span class="smuted">Brave/Tavily read their API key from the environment; keys are never stored in the document.</span>
+            <span id="setWebSearchHint" class="smuted"></span>
+          </div>
+          <div class="srow">
+            <label>Stances</label>
+            <span class="smuted">🗣 none · 🔍 critiquer · 🤝 supporter (built-in)</span>
+          </div>
         </div>
       </div>
     </div>

@@ -240,7 +240,27 @@ describe("model manager", () => {
   });
 });
 
-describe("topbar harness badge", () => {
+describe("document harness in the status bar", () => {
+  it("follows the active tab, ignores stale replies, and opens its settings with providers collapsed", async () => {
+    const { shell, api } = setup();
+    await shell.openInTab("/d/a.md");
+    const late = deferred<Record<string, unknown>>();
+    api.getSettings.mockImplementationOnce(() => late.promise);
+    const oldRead = shell.refreshHarnessBadge();
+    api.getSettings.mockResolvedValue({ scope: "folder", harness: "codex" });
+    await shell.openInTab("/d/b.md");
+    late.resolve({ scope: "folder", harness: "pi" });
+    await oldRead;
+    expect($("#harnessBadge").textContent).toBe("Document harness: Codex (unavailable)");
+    $("#harnessBadge").click();
+    await settle();
+    expect($("#settingsModal").hidden).toBe(false);
+    expect($<HTMLSelectElement>("#setHarness").value).toBe("codex");
+    expect($<HTMLDetailsElement>("#modelProviders").open).toBe(false);
+    shell.showEmptyState();
+    expect($<HTMLButtonElement>("#harnessBadge").disabled).toBe(true);
+  });
+
   it("names the harness and model a turn on this document would use", async () => {
     const { shell } = setup({ settings: { model: "litellm/opus" } });
     await shell.openInTab("/d/a.md");

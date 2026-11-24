@@ -95,15 +95,23 @@ body { display: flex; flex-direction: column; height: 100vh; background: var(--b
    boxed pills — sits quietly apart from the view controls (see the
    .statuscluster divider above). */
 .harnessbadge {
-  display: inline-flex;
-  align-items: center;
-  border: none;
-  background: transparent;
-  padding: 0;
-  color: var(--ink-soft, var(--muted));
-  font: 500 0.68rem/1 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  display: block;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
   white-space: nowrap;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  background: var(--surface-strong);
+  color: var(--ink);
+  font: 650 0.75rem/1.35 ui-sans-serif, -apple-system, sans-serif;
+  padding: 0.15rem 0.5rem;
+  cursor: pointer;
 }
+.harnessbadge:hover:enabled { border-color: var(--accent); color: var(--accent); }
+.harnessbadge:disabled { color: var(--muted); cursor: default; }
+.statuscluster { min-width: 0; margin-left: auto; }
+.statuscluster .doczoom, .statuscluster .connstatus { flex-shrink: 0; }
 .harnessbadge.unavailable {
   border-color: transparent;
   background: transparent;
@@ -201,7 +209,27 @@ body { display: flex; flex-direction: column; height: 100vh; background: var(--b
 }
 .capchip.unavailable { border-color: #f3c0c0; background: #fff4f4; color: #a02020; }
 .modal-foot { display: flex; justify-content: flex-end; gap: 0.5rem; margin-top: 0.5rem; }
-#settingsModal .modal-card { width: min(460px, 92vw); }
+#settingsModal .modal-card {
+  display: flex;
+  flex-direction: column;
+  width: min(34rem, calc(100vw - 2rem));
+  max-height: calc(100dvh - 2rem);
+  box-sizing: border-box;
+}
+.settings-heading { display: flex; align-items: center; justify-content: space-between; margin-bottom: .85rem; }
+.settings-heading h3 { margin: 0; }
+.settings-heading, #settingsModal .modal-card > .srow { flex: none; }
+.settings-scroll { min-height: 0; overflow-y: auto; padding: .75rem .25rem 0 0; border-top: 1px solid var(--line); }
+.settings-scroll .caprow { margin: 0 0 .75rem; }
+.model-providers { margin: 0 0 1rem; font-size: .8rem; }
+.model-providers summary { color: var(--ink); cursor: pointer; font-weight: 600; }
+#modelCount { color: var(--muted); font-weight: normal; }
+#modelAddBtn { margin: .5rem 0; }
+#settingsModal .modelform[hidden], #modelProviders[hidden] { display: none; }
+#settingsModal .modelrow { display: grid; grid-template-columns: minmax(0,1fr) auto auto; gap: .4rem; padding: .35rem .45rem; }
+.modelrow .modelinfo { min-width: 0; overflow-wrap: anywhere; }
+.modelrow .mname, .modelrow .mmeta { display: block; }
+
 .shortcuts-card { width: min(460px, 92vw); }
 .shortcut-list { display: flex; flex-direction: column; gap: 0.45rem; }
 .shortcut-list > div { display: flex; align-items: center; gap: 0.75rem; font-size: 0.82rem; }
@@ -1126,6 +1154,7 @@ textarea {
  * topbar's `.actions` before this move. `.editor`/`.htmlhost`'s
  * `min-height: calc(100vh - Npx)` below account for this bar's height too. */
 .statusbar {
+  gap: .75rem;
   display: flex;
   align-items: center;
   justify-content: flex-end;
@@ -2028,7 +2057,12 @@ textarea {
 /* ===== quieter chat pane: no title bar, a two-row footer ===== */
 .chathead[hidden] { display: none; }
 .chatfoot #chatInput { order: 0; }
-.chatprimary { display: flex; align-items: center; gap: 0.45rem; flex: 1 1 100%; min-width: 0; }
+.chatfoot[hidden], #chatStop[hidden] { display: none; }
+.chat-routing { display: flex; align-items: center; justify-content: space-between; gap: .5rem; flex: 1 1 100%; min-width: 0; }
+.chat-routing-text { display: grid; gap: .1rem; min-width: 0; overflow-wrap: anywhere; font-size: .75rem; color: var(--ink); }
+#chatRoutingDetail { font-size: .69rem; color: var(--ink-soft); }
+.chat-routing .morebtn { flex: none; }
+.chatprimary { display: flex; flex-wrap: wrap; align-items: center; gap: 0.45rem; flex: 1 1 100%; min-width: 0; }
 .chatprimary .improvebtn { flex: none; padding: 0 0.7rem; white-space: nowrap; }
 .chatprimary .footspacer { flex: 1; }
 .morebtn {
@@ -2041,7 +2075,7 @@ textarea {
 .morebtn::after { content: "▸"; flex: none; }
 .morebtn[aria-expanded="true"]::after { content: "▾"; }
 .morebtn:hover, .morebtn[aria-expanded="true"] { color: var(--ink); background: rgba(0, 0, 0, 0.05); }
-.chatfoot #chatSend, #chatStop { padding: 0 0.95rem; }
+.chatfoot #chatSend, #chatStop { flex: none; white-space: nowrap; padding: 0 0.7rem; }
 .chatmore { display: flex; flex-wrap: wrap; align-items: center; gap: 0.4rem; flex: 1 1 100%; }
 .chatmore[hidden] { display: none; }
 .chatmore .resolvebtn { flex: 0 1 auto; padding: 0 0.8rem; min-height: 1.8rem; font-size: 0.72rem; }

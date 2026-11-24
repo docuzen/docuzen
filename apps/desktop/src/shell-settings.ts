@@ -1,6 +1,6 @@
 // The Settings modal (per-document harness, tool scope, edit mode, default model,
 // standing instructions, web search), the model manager inside it (pi's models.json,
-// keys write-only), and the topbar harness/model badge that summarises the result.
+// keys write-only), and the active document’s harness in the status bar.
 // Split out of shell.ts; it knows nothing about tabs beyond "which document is active". The
 // modal belongs to the document it was opened for: it reads and saves that document's
 // settings by path, and the shell closes it when another document becomes active.
@@ -8,7 +8,7 @@ import type { AgentHarness, HadSettings, ModelConfig } from "@ai-native-doc/docd
 import type { ShellDeps } from "./shell.js";
 import { confirmAction, el, wireModal, reportError } from "./ui.js";
 
-export interface SettingsDeps extends Pick<ShellDeps, "api" | "log" | "modelName" | "refreshThreadModels" | "setDefaultModelKey"> {
+export interface SettingsDeps extends Pick<ShellDeps, "api" | "log" | "modelName" | "refreshThreadModels" | "setDefaultModelKey" | "setHarnessContext"> {
   /** Settings are per document: the active one's path, or undefined (the modal and saves are no-ops). */
   activeDocPath: () => string | undefined;
 }
@@ -17,7 +17,7 @@ export interface SettingsApi {
   openSettings: () => Promise<void>;
   /** Close the modal and let go of its document (the shell calls this when the active document changes). */
   closeSettings: () => void;
-  /** Refresh the topbar harness/model badge from the live RPCs. */
+  /** Refresh the active document’s harness and model from the sidecar. */
   refreshHarnessBadge: () => Promise<void>;
 }
 
@@ -59,6 +59,8 @@ export function initSettings(deps: SettingsDeps): SettingsApi {
   const setDefaultModelEl = document.querySelector<HTMLSelectElement>("#setDefaultModel")!;
   const setDefaultModelHintEl = document.querySelector<HTMLSpanElement>("#setDefaultModelHint")!;
   const setWebSearchHintEl = document.querySelector<HTMLSpanElement>("#setWebSearchHint")!;
+  const providersEl = document.querySelector<HTMLDetailsElement>("#modelProviders")!;
+  const countEl = document.querySelector<HTMLElement>("#modelCount")!;
   const modelListEl = document.querySelector<HTMLDivElement>("#modelList")!;
   const modelAddBtn = document.querySelector<HTMLButtonElement>("#modelAddBtn")!;
   const modelFormEl = document.querySelector<HTMLDivElement>("#modelForm")!;
@@ -80,19 +82,13 @@ export function initSettings(deps: SettingsDeps): SettingsApi {
   type HarnessInfo = Omit<AgentHarness, "runner">;
   let harnesses: HarnessInfo[] = [];
 
-  /**
-   * Network-only harness fetch, shared by the Settings modal's refreshHarnesses
-   * (which also drives the harness <select>) and the topbar badge's
-   * refreshHarnessBadge (which must NOT touch the modal's DOM).
-   */
   async function loadHarnesses(): Promise<HarnessInfo[]> {
     try {
-      harnesses = await deps.api.listHarnesses({});
+      return (await deps.api.listHarnesses({})) ?? [];
     } catch (e) {
       reportError("harnesses load", e, deps.log);
-      harnesses = [];
+      return [];
     }
-    return harnesses;
   }
 
   function renderHarnessCaps(id: string): void {
@@ -130,7 +126,7 @@ export function initSettings(deps: SettingsDeps): SettingsApi {
   }
 
   async function refreshHarnesses(selected = "pi"): Promise<void> {
-    await loadHarnesses();
+    harnesses = await loadHarnesses();
     setHarnessEl.replaceChildren();
     for (const h of harnesses) {
       setHarnessEl.appendChild(
@@ -153,6 +149,8 @@ export function initSettings(deps: SettingsDeps): SettingsApi {
   function syncHarnessManagedControls(): void {
     const h = selectedHarnessInfo();
     const harnessManagedModels = !!h && h.id !== "pi" && h.id !== "codex";
+    providersEl.hidden = harnessManagedModels;
+    if (harnessManagedModels) providersEl.open = false;
     setDefaultModelEl.disabled = harnessManagedModels;
     modelAddBtn.disabled = harnessManagedModels;
     modelListEl.classList.toggle("disabled", harnessManagedModels);
@@ -198,6 +196,7 @@ export function initSettings(deps: SettingsDeps): SettingsApi {
       return;
     }
 
+    countEl.textContent = "(" + configuredModels.length + ")";
     modelListEl.innerHTML = "";
     for (const m of configuredModels) {
       const editBtn = el("button", { type: "button", textContent: "Edit" });
@@ -208,12 +207,13 @@ export function initSettings(deps: SettingsDeps): SettingsApi {
 
       modelListEl.appendChild(
         el("div", { className: "modelrow" }, [
-          el("span", { className: "mname", textContent: m.name }),
-          el("span", {
-            className: "mmeta",
-            textContent: `${m.provider}/${m.modelId} · ${m.reasoningEffort ?? "none"} · ${m.hasKey ? "🔑" : "no key"}`,
-          }),
-          el("span", { className: "mspace" }),
+          el("div", { className: "modelinfo" }, [
+            el("span", { className: "mname", textContent: m.name }),
+            el("span", { className: "mmeta", textContent: [
+              m.key, m.reasoningEffort && m.reasoningEffort !== "none" ? m.reasoningEffort + " reasoning" : "",
+              m.hasKey ? "" : "No API key",
+            ].filter(Boolean).join(" · ") }),
+          ]),
           editBtn,
           removeBtn,
         ]),
@@ -243,6 +243,7 @@ export function initSettings(deps: SettingsDeps): SettingsApi {
     mfApiKeyEl.value = ""; // never returned — blank means "keep existing key"
     mfReasoningEl.value = existing?.reasoningEffort ?? "none";
     modelFormEl.hidden = false;
+    mfNameEl.focus();
   }
   function hideModelForm(): void {
     modelFormEl.hidden = true;
@@ -337,8 +338,11 @@ export function initSettings(deps: SettingsDeps): SettingsApi {
       return void reportError("settings load", e, deps.log);
     }
     settingsDocPath = docPath;
+    providersEl.open = false;
+    settingsModal.querySelector(".settings-scroll")!.scrollTop = 0;
     void refreshModes();
     settingsModal.hidden = false;
+    setHarnessEl.focus();
   }
 
   function closeSettings(): void {
@@ -358,7 +362,6 @@ export function initSettings(deps: SettingsDeps): SettingsApi {
     const harness = selectedHarnessInfo();
     const harnessManagedModels = !!harness && harness.id !== "pi" && harness.id !== "codex";
     const model = harnessManagedModels ? undefined : setDefaultModelEl.value || undefined;
-    if (deps.activeDocPath() === docPath) deps.setDefaultModelKey(model ?? ""); // thread pickers default to the new per-doc model
     const instructions = setInstructionsEl.value.trim() || undefined;
     const webSearch = {
       enabled: setWebSearchEl.checked,
@@ -378,7 +381,7 @@ export function initSettings(deps: SettingsDeps): SettingsApi {
         },
       });
       deps.log(`settings saved (scope=${setScopeEl.value}, harness=${setHarnessEl.value || "default"}, model=${model ?? "default"})`);
-      void refreshHarnessBadge(); // reflect the just-saved harness/model in the topbar chip
+      void refreshHarnessBadge();
     } catch (e) {
       reportError("settings save", e, deps.log);
     }
@@ -397,70 +400,46 @@ export function initSettings(deps: SettingsDeps): SettingsApi {
   setWebSearchEl.addEventListener("change", () => void saveSettings());
   setWebProviderEl.addEventListener("change", () => void saveSettings());
   document.querySelector("#settingsClose")!.addEventListener("click", () => closeSettings());
-  wireModal(settingsModal); // click backdrop to close
+  wireModal(settingsModal, closeSettings);
 
-  // --- topbar: harness/model badge (Phase 11 T1) ---
-  // A persistent chip showing the active harness + its default model, so users
-  // always know what agent they're talking to without opening Settings.
-  // Sourced from the same RPCs as the Settings modal (listHarnesses/
-  // getSettings) via the shared `loadHarnesses`/`harnesses` cache above, but
-  // resolves the model KEY to a display NAME through `deps.modelName`
-  // (chat.ts's `threadModels` cache) rather than this module's own
-  // `configuredModels` — that cache is lazy (only populated once Settings is
-  // opened), while chat.ts's is already refreshed at boot by main.ts's
-  // `chat.refreshThreadModels()`, so it's the fresher source for a badge that
-  // must be right immediately on launch. This reflects the per-doc DEFAULT
-  // model only — per-thread overrides still show only in the chat pane's own
-  // pickers (unchanged); the tooltip says so explicitly.
-  const harnessBadgeEl = document.querySelector<HTMLSpanElement>("#harnessBadge")!;
+  const harnessBadgeEl = document.querySelector<HTMLButtonElement>("#harnessBadge")!;
+  harnessBadgeEl.addEventListener("click", () => void openSettings());
+  let badgeQuery = 0;
+  let badgeDoc: string | undefined;
 
-  function renderHarnessBadge(harness: HarnessInfo | undefined, settings: HadSettings | undefined): void {
-    if (!harness) {
-      harnessBadgeEl.textContent = "—";
-      harnessBadgeEl.title = "No agent harness detected.";
-      harnessBadgeEl.classList.remove("unavailable");
-      return;
-    }
-    const harnessManagedModel = harness.id !== "pi" && harness.id !== "codex"; // mirrors syncHarnessManagedControls' own check
-    const modelKey = settings?.model;
-    const modelPart = harnessManagedModel
-      ? "harness-managed" // same vocabulary as this file's own "Model: harness-managed" capchip
-      : modelKey
-        ? deps.modelName(modelKey)
-        : harness.id === "codex"
-          ? "Codex config default"
-        : "sidecar default"; // same vocabulary as refreshModels' "— sidecar default —" option
-    harnessBadgeEl.textContent = `${harness.label} · ${modelPart}`;
-    harnessBadgeEl.classList.toggle("unavailable", !harness.available);
-    harnessBadgeEl.title = [
-      harness.available
-        ? `Available${harness.status ? ` (${harness.status})` : ""}`
-        : `Unavailable${harness.unavailableReason ? `: ${harness.unavailableReason}` : ""}`,
-      "Defaults — per-thread overrides show in the chat pane.",
-      "Change in Settings (⌘,).",
-    ].join("\n");
-  }
-
-  /**
-   * Refresh the badge from the live RPCs. Triggers: boot (main.ts, once the
-   * initial doc/tab is settled) and after saveSettings above — no other
-   * trigger by design (e.g. switching tabs does not re-fetch), matching the
-   * plan's explicit refresh contract rather than inventing extra staleness
-   * handling.
-   */
+  // getSettings resolves the same document/app/registry default that starts a discussion.
+  // Replies to saved threads use their own harness; chat shows that choice at the composer.
   async function refreshHarnessBadge(): Promise<void> {
-    const list = await loadHarnesses();
-    let settings: HadSettings | undefined;
+    const query = ++badgeQuery;
     const docPath = deps.activeDocPath();
-    if (docPath) {
-      try {
-        settings = await deps.api.getSettings({ docPath });
-      } catch (e) {
-        reportError("badge settings load", e, deps.log);
-      }
+    harnessBadgeEl.disabled = !docPath;
+    if (!docPath || docPath !== badgeDoc) {
+      badgeDoc = docPath;
+      harnessBadgeEl.textContent = docPath ? "Document harness: Loading…" : "Document harness: No document";
+      harnessBadgeEl.classList.remove("unavailable");
+      harnessBadgeEl.title = docPath ? "Open document harness settings" : "Open a document to choose its harness.";
+      deps.setHarnessContext(undefined, []);
     }
-    const harnessId = settings?.harness ?? "pi";
-    renderHarnessBadge(list.find((h) => h.id === harnessId), settings);
+    if (!docPath) return;
+    const [list, settings] = await Promise.all([
+      loadHarnesses(),
+      deps.api.getSettings({ docPath }).catch((e) => {
+        reportError("document settings", e, deps.log);
+        return undefined;
+      }),
+    ]);
+    if (query !== badgeQuery || deps.activeDocPath() !== docPath) return;
+    const id = settings?.harness;
+    const h = list.find(item => item.id === id);
+    const modelKey = settings?.model;
+    const model = modelKey && (id === "pi" || id === "codex") ? deps.modelName(modelKey) : "";
+    const unavailable = !!id && list.length > 0 && !h?.available;
+    harnessBadgeEl.textContent = "Document harness: " + (h?.label ?? id ?? "Unknown") +
+      (unavailable ? " (unavailable)" : model ? " · " + model : "");
+    harnessBadgeEl.classList.toggle("unavailable", unavailable);
+    harnessBadgeEl.title = [h?.unavailableReason ?? h?.status, "Used for new discussions. Click to change in Settings."].filter(Boolean).join("\n");
+    deps.setDefaultModelKey(modelKey ?? "");
+    deps.setHarnessContext(id, list);
   }
 
   return { openSettings, closeSettings, refreshHarnessBadge };

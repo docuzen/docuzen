@@ -312,6 +312,7 @@ const shell = initShell({
   runResolveDirectives: chat.runResolveDirectives,
   refreshThreadModels: chat.refreshThreadModels,
   setDefaultModelKey: chat.setDefaultModelKey,
+  setHarnessContext: chat.setHarnessContext,
   getThreadNodes: chat.getThreadNodes,
   refreshThreadTree: chat.refreshThreadTree,
   truncTitle,
@@ -471,7 +472,6 @@ async function init(): Promise<void> {
   await shell.drainExternalOpens({ boot: true });
   if (shell.getTabCount() === 0 && initialDocPath) await shell.openInTab(initialDocPath);
   else if (shell.getTabCount() === 0) shell.showEmptyState();
-  await shell.refreshHarnessBadge(); // boot refresh — see shell.ts's harness-badge section for the full trigger contract
   void maybeShowFirstRun(client, log, { onConfigured: () => void shell.refreshHarnessBadge() });
 }
 

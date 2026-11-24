@@ -81,7 +81,7 @@ describe("commitSend: dispatch immediately when free, queue (with a chip) when b
   it("captures stance/model at commit time onto the QueuedTurn, not re-read later from the (possibly since-changed) footer pickers", () => {
     // (A held message sent again keeps the stance/model it was committed with.)
     expect(commitSendSource).toContain("stance: picked?.stance ?? chatStanceEl.value,");
-    expect(commitSendSource).toContain("modelId: picked ? picked.modelId : chatModelEl.value || undefined,");
+    expect(commitSendSource).toContain("modelId: picked ? picked.modelId : footerModel() || undefined,");
   });
 });
 
