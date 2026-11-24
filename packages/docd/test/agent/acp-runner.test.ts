@@ -38,6 +38,8 @@ interface FakeAgentOptions {
   parks?: boolean;
   /** Fail session/resume with this message. */
   resumeError?: string;
+  /** What session/resume answers, when it differs from session/new. */
+  resumed?: Omit<NewSessionResponse, "sessionId">;
   prompt: (args: PromptArgs) => Promise<StopReason | void>;
 }
 
@@ -66,7 +68,7 @@ function fakeAgent(opts: FakeAgentOptions) {
     .onRequest(methods.agent.session.resume, async ({ params }) => {
       log.resumes.push(params.sessionId);
       if (opts.resumeError) throw new Error(opts.resumeError);
-      return { ...opts.session };
+      return { ...(opts.resumed ?? opts.session) };
     })
     .onRequest(methods.agent.session.new, ({ params }) => {
       log.newSessions.push(params);
@@ -244,6 +246,24 @@ describe("AcpRunner — parking sessions between turns", () => {
     await runner.send(opened.sessionId, "Continue");
     expect(log.setConfig).toEqual([{ configId: "model", value: "haiku" }, { configId: "model", value: "haiku" }]);
     await expect(runner.start(ctx({ modelId: "claude-code:missing" }))).rejects.toThrow(/does not offer model/);
+    runner.dispose();
+  });
+
+  it("reselects the chosen model in a resumed session that lists it under an alias and fell back to the default", async () => {
+    // What claude-agent-acp 0.110 does: session/new offers "claude-haiku-5-5", session/resume
+    // offers the same model as "haiku" and is back on the default model.
+    const model = (currentValue: string, haiku: string) => ({ type: "select" as const, category: "model", id: "model", name: "Model",
+      currentValue, options: [{ value: "default", name: "Default (recommended)" }, { value: haiku, name: "Haiku 5.5" }] });
+    const session = { ...PLAN_MODES, configOptions: [model("default", "claude-haiku-5-5")] };
+    const resumed = { ...PLAN_MODES, configOptions: [model("default", "haiku")] };
+    const { app, log } = fakeAgent({ parks: true, session, resumed, prompt: async ({ say }) => void (await say("OK")) });
+    const runner = new AcpRunner(spec(), { launch: inProcess(app).launch });
+    const opened = await runner.start(ctx({ modelId: "claude-code:claude-haiku-5-5" }));
+    // The fake answers set_config_option from its session/new list: let that list hold the alias too.
+    session.configOptions[0].options.push({ value: "haiku", name: "Haiku 5.5" });
+    for (const reply of ["two", "three"]) expect((await runner.send(opened.sessionId, reply)).reply).toBe("OK");
+    expect(log.setConfig.map((c) => c.value)).toEqual(["claude-haiku-5-5", "haiku", "haiku"]);
+    expect(log.resumes).toHaveLength(2);
     runner.dispose();
   });
 

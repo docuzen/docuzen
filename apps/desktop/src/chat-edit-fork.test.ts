@@ -176,7 +176,7 @@ describe("fork affordance reaches directive-N/review pseudo-threads too (Phase 9
       "async function jumpToAnnotation(",
     );
     // Both openers render through renderThreadTurns, which passes the loop index.
-    expect(openThreadByIdSource).toContain("renderThreadTurns(id, thread, (tn) => tn.meta);");
+    expect(openThreadByIdSource).toContain("renderThreadTurns(id, thread, savedTurnLabel(thread));");
     expect(chatSource).toContain("chatTurn(tn.role, tn.body, agentMeta(tn), tn.thinking, i);");
     // Would break in lockstep if the shared gate ever changed shape.
     const renderTurnSource = sourceBetween(chatSource, "function renderTurn(", "function chatTurn(");

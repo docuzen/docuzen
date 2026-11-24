@@ -15,6 +15,7 @@ import {
   addProposal,
   listProposals,
   readThread,
+  readSettings,
   writeSettings,
 } from "../../src/had/index.js";
 import { createAnchor } from "../../src/anchor/index.js";
@@ -219,6 +220,58 @@ describe("Stop (H11)", () => {
   });
 });
 
+/** Codex's and the ACP runner's Stop: the turn rejects ("… run cancelled") after streaming. */
+class RejectOnStopRunner implements AgentRunner {
+  private parked: { key?: string; reject: (e: unknown) => void; resolve: (t: AgentTurn) => void }[] = [];
+  async start(ctx: AgentContext, onToken?: (e: { type: "token" | "thinking"; text: string }) => void) {
+    onToken?.({ type: "thinking", text: "Weighing it." });
+    onToken?.({ type: "token", text: "Redis is shared " });
+    onToken?.({ type: "token", text: "across nodes" });
+    const turn = await new Promise<AgentTurn>((resolve, reject) => this.parked.push({ key: ctx.cancelKey, resolve, reject }));
+    return { sessionId: "r-1", turn };
+  }
+  send(): Promise<AgentTurn> {
+    return new Promise<AgentTurn>((resolve, reject) => this.parked.push({ resolve, reject }));
+  }
+  async cancel(key: string): Promise<void> {
+    for (const p of this.parked.splice(0)) if (p.key === key) p.reject(new Error("Codex run cancelled"));
+  }
+  hasSession(): boolean {
+    return false;
+  }
+  get waiting(): number {
+    return this.parked.length;
+  }
+  finish(reply: string): void {
+    this.parked.shift()!.resolve({ reply });
+  }
+}
+
+describe("Stop on a harness that rejects a stopped turn (Codex, Claude Code)", () => {
+  it("is not an error: the turn keeps what had streamed, like Pi, and the thread goes on", async () => {
+    await seedComment();
+    const runner = new RejectOnStopRunner();
+    const orch = new Orchestrator({ runner, db, now: () => "t" });
+    const asked = orch.discuss(docPath, { threadId: "c0001", annotationId: "c0001", stance: "none", comment: "Why Redis?" });
+    await vi.waitFor(() => expect(runner.waiting).toBe(1));
+    await orch.cancel(docPath, "c0001");
+    await expect(asked).resolves.toBeUndefined();
+
+    let thread = await readThread(docPath, "c0001");
+    expect(thread.turns.map((t) => [t.role, t.body])).toEqual([["you", "Why Redis?"], ["agent", "Redis is shared across nodes"]]);
+    expect(thread.turns[1].thinking).toBe("Weighing it.");
+    expect(db.get("c0001")?.status).toBe("responded");
+
+    // The stopped start left no session: the next reply replays the thread and answers.
+    const next = orch.reply(docPath, "c0001", "And the TTL?");
+    await vi.waitFor(() => expect(runner.waiting).toBe(1));
+    runner.finish("It expires stale limits.");
+    await next;
+    thread = await readThread(docPath, "c0001");
+    expect(thread.turns.map((t) => t.body).slice(-2)).toEqual(["And the TTL?", "It expires stale limits."]);
+  });
+});
+
 describe("one turn per thread (M17)", () => {
   it("refuses a second discuss on a thread whose first is still running, without touching its transcript", async () => {
     await seedComment();
@@ -394,10 +447,73 @@ describe("handoff in the same discussion", () => {
     const thread = await readThread(docPath, "c0001");
     expect(thread.frontmatter).toMatchObject({ harness: "claude-code", model: "claude-code:haiku" });
     expect(thread.turns).toHaveLength(4);
+    // Each reply names the harness and model that wrote it, and the switch.
+    expect(thread.turns.filter((t) => t.role === "agent").map((t) => t.meta)).toEqual(["none · Pi", "none · Claude Code · claude-code:haiku · from Pi"]);
     await orch.reply(docPath, "c0001", "Continue");
     expect(claude.sentMessages).toEqual(["Continue"]);
     await expect(orch.reply(docPath, "c0001", "Switch", undefined, undefined, "codex:test", "codex")).rejects.toThrow();
     expect((await readThread(docPath, "c0001")).frontmatter).toMatchObject({ harness: "claude-code", model: "claude-code:haiku" });
+  });
+
+  it("Ask all models in a discussion keeps its transcript and gives each model the discussion so far", async () => {
+    await seedComment();
+    const pi = new FakePiRunner([{ reply: "Redis is shared." }, { reply: "m1 view" }, { reply: "m2 view" }]);
+    const orch = new Orchestrator({ registry: HarnessRegistry.single(pi), db, now: () => "t" });
+    await orch.discuss(docPath, { threadId: "c0001", annotationId: "c0001", stance: "none", comment: "Why Redis?" });
+    await orch.panel(docPath, { threadId: "c0001", annotationId: "c0001", stance: "none", comment: "Compare." }, ["p/m1", "p/m2"]);
+    const thread = await readThread(docPath, "c0001");
+    expect(thread.turns.map((t) => t.body)).toEqual(["Why Redis?", "Redis is shared.", "Compare.", "m1 view", "m2 view"]);
+    expect(pi.contextFor(pi.lastSessionId()!)?.history).toEqual([
+      { role: "you", body: "Why Redis?" },
+      { role: "agent", body: "Redis is shared." },
+    ]);
+  });
+
+  it("Ask all models runs on the discussion's own harness, and is refused on one that can't fan out", async () => {
+    await seedComment();
+    const pi = new FakePiRunner([{ reply: "Pi answer." }, { reply: "m1 view" }]);
+    const codex = new FakePiRunner([{ reply: "Codex answer." }]);
+    const registry = HarnessRegistry.single(pi);
+    registry.register({ id: "codex", label: "Codex", capabilities: { ...PI_CAPABILITIES, multiModelPanel: false }, runner: codex, available: true });
+    const orch = new Orchestrator({ registry, db, now: () => "t" });
+    await orch.discuss(docPath, { threadId: "c0001", annotationId: "c0001", stance: "none", comment: "Why Redis?" });
+    // The document moves to Codex; the Pi discussion's panel still runs on Pi.
+    await writeSettings(docPath, { scope: "folder", harness: "codex" });
+    await orch.panel(docPath, { threadId: "c0001", annotationId: "c0001", stance: "none", comment: "Compare." }, ["p/m1"]);
+    expect(codex.sentMessages).toEqual([]);
+    expect((await readThread(docPath, "c0001")).frontmatter.harness).toBe("pi");
+
+    await seedComment("c0002", "Rollout goes to 5% first.");
+    await orch.discuss(docPath, { threadId: "c0002", annotationId: "c0002", stance: "none", comment: "Why 5%?" });
+    const before = await readThread(docPath, "c0002");
+    await expect(orch.panel(docPath, { threadId: "c0002", annotationId: "c0002", stance: "none", comment: "Compare." }, ["p/m1"]))
+      .rejects.toThrow(/Codex can't ask several models/);
+    expect((await readThread(docPath, "c0002")).turns).toEqual(before.turns);
+  });
+
+  it("a document keeps the harness its first discussion ran on when the app default moves", async () => {
+    const cfgDir = await mkdtemp(join(tmpdir(), "turn-life-cfg-"));
+    process.env.DOCUZEN_CONFIG_DIR = cfgDir;
+    try {
+      await writeFile(join(cfgDir, "config.toml"), '[harness]\ndefault = "pi"\n');
+      await seedComment();
+      const pi = new FakePiRunner([{ reply: "Pi one." }, { reply: "Pi two." }]);
+      const codex = new FakePiRunner([{ reply: "Codex." }]);
+      const registry = HarnessRegistry.single(pi);
+      registry.register({ id: "codex", label: "Codex", capabilities: PI_CAPABILITIES, runner: codex, available: true });
+      const orch = new Orchestrator({ registry, db, now: () => "t" });
+      await orch.discuss(docPath, { threadId: "c0001", annotationId: "c0001", stance: "none", comment: "Why Redis?" });
+      // Another document's Settings makes Codex the app default (setSettings writes it through).
+      await writeFile(join(cfgDir, "config.toml"), '[harness]\ndefault = "codex"\n');
+      expect((await readSettings(docPath)).harness).toBe("pi");
+      await seedComment("c0002", "Rollout goes to 5% first.");
+      await orch.discuss(docPath, { threadId: "c0002", annotationId: "c0002", stance: "none", comment: "Why 5%?" });
+      expect((await readThread(docPath, "c0002")).frontmatter.harness).toBe("pi");
+      expect(codex.lastSessionId()).toBeUndefined();
+    } finally {
+      delete process.env.DOCUZEN_CONFIG_DIR;
+      await rm(cfgDir, { recursive: true, force: true });
+    }
   });
 
   it("keeps the opening request and the newest context when the transcript exceeds the budget", () => {

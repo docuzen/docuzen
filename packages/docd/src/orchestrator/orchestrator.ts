@@ -18,6 +18,7 @@ import {
   snapshot,
   readVersion,
   readSettings,
+  pinHarness,
   isHtmlDoc,
 } from "../had/index.js";
 import { createAnchor } from "../anchor/index.js";
@@ -131,6 +132,8 @@ export interface TurnSpec {
   youTurn: { body: string };
   /** meta stamped on the agent turn — the effective stance (discuss/reply/resumeFromTranscript/branch). */
   agentMeta: string;
+  /** Appended after the harness and model on the agent turn's meta, e.g. "from Pi" after a handoff. */
+  routeNote?: string;
   /**
    * buildContext inputs. The engine builds the context and hands it to `invoke`. (reply's
    * send() ignores the context arg: a live session already has it.)
@@ -278,6 +281,18 @@ export class Orchestrator {
     return this.registry().resolve(preferred ?? settings.harness);
   }
 
+  /** A harness's display name, or its id when it is not registered (any more). */
+  private harnessLabel(id: string): string {
+    return this.registry().list().find((h) => h.id === id)?.label ?? id;
+  }
+
+  /** The harness new agent work on the document starts on; the document keeps it from then on (pinHarness). */
+  private async harnessForNewWork(docPath: string, preferred?: string): Promise<AgentHarness> {
+    const harness = await this.harnessForDoc(docPath, preferred);
+    if (!preferred) await pinHarness(docPath, harness.id);
+    return harness;
+  }
+
   /** Opaque key the runner indexes a live session by, so cancel() can abort it. */
   private cancelKey(docPath: string, threadId: string): string {
     return cancelKeyFor(docPath, threadId);
@@ -399,6 +414,12 @@ export class Orchestrator {
       threadId: string;
       /** meta stamped on the agent turn — the effective stance, or (panel) the model id. */
       agentMeta: string;
+      /**
+       * The harness answering, stamped after agentMeta with the turn's model (and routeNote),
+       * so every reply says which harness and model wrote it. Unset for panel turns, whose
+       * meta is the model id the UI matches each bubble by.
+       */
+      route?: { harness: string; note?: string };
       /** Already-resolved docVersion to stamp on the agent turn; caller owns the 3-way override logic. */
       docVersion?: string;
       context: BuildContextOpts;
@@ -418,12 +439,35 @@ export class Orchestrator {
   }> {
     const context = await buildAgentContext(spec.context);
     spec.afterContext?.(context);
-    if (context.handoffNote && this.liveTurn(docPath, spec.threadId)?.cancelled) throw new Error("Handoff cancelled");
-    const { turn, sessionId } = await spec.invoke(runner, context, spec.onToken);
+    const stopped = () => this.liveTurn(docPath, spec.threadId)?.cancelled === true;
+    // What the agent streamed so far: a stopped turn keeps it as its reply.
+    let partial = "";
+    let partialThinking = "";
+    const onToken: TokenSink = (ev) => {
+      if (ev.type === "token") partial += ev.text;
+      else if (ev.type === "thinking") partialThinking += ev.text;
+      spec.onToken?.(ev);
+    };
+    let turn: AgentTurn;
+    let sessionId: string;
+    try {
+      if (context.handoffNote && stopped()) throw new Error("Handoff cancelled");
+      ({ turn, sessionId } = await spec.invoke(runner, context, onToken));
+    } catch (e) {
+      // Pi settles a stopped turn with its partial reply; Codex and ACP agents reject it.
+      // Stop is never a failure: every harness ends the turn the way Pi does. An empty
+      // session id means "no new session" (the caller keeps the one it had, if any).
+      if (!stopped()) throw e;
+      turn = { reply: partial, ...(partialThinking ? { thinking: partialThinking } : {}) };
+      sessionId = "";
+    }
+    const meta = spec.route
+      ? [spec.agentMeta, spec.route.harness, context.modelId, spec.route.note].filter(Boolean).join(" · ")
+      : spec.agentMeta;
     const agentTurn: ThreadTurn = {
       role: "agent",
       timestamp: this.deps.now(),
-      meta: spec.agentMeta,
+      meta,
       docVersion: spec.docVersion,
       ...(turn.thinking ? { thinking: turn.thinking } : {}),
       body: turn.reply,
@@ -468,7 +512,8 @@ export class Orchestrator {
   ): Promise<{ turn: AgentTurn; sessionId: string }> {
     const { db, now } = this.deps;
     const { threadId } = spec;
-    const runner = (await this.harnessForDoc(docPath, spec.preferredHarness)).runner;
+    const harness = await this.harnessForDoc(docPath, spec.preferredHarness);
+    const runner = harness.runner;
     const live = this.liveTurn(docPath, threadId);
     if (live) live.runner = runner;
 
@@ -500,6 +545,7 @@ export class Orchestrator {
       const step = await this.runAgentStep(docPath, runner, {
         threadId,
         agentMeta: spec.agentMeta,
+        route: { harness: harness.label, ...(spec.routeNote ? { note: spec.routeNote } : {}) },
         docVersion,
         context: { ...spec.context, harnessId: spec.preferredHarness, raw },
         invoke: spec.invoke,
@@ -507,7 +553,7 @@ export class Orchestrator {
         afterContext: spec.afterContext,
       });
       turn = step.turn;
-      sessionId = step.sessionId;
+      sessionId = step.sessionId || sessionId;
     } catch (e) {
       await transition({ db, docPath }, threadId, "error", {
         piSessionId: sessionId,
@@ -530,7 +576,8 @@ export class Orchestrator {
         baseBody: documentBody(raw, docPath),
       });
     }
-    return { turn, sessionId };
+    // "" when a stopped fresh start never got a session: the next reply replays the thread.
+    return { turn, sessionId: sessionId ?? "" };
   }
 
   discuss(docPath: string, args: DiscussArgs, onToken?: TokenSink): Promise<void> {
@@ -552,7 +599,7 @@ export class Orchestrator {
       });
       if (existing?.turns.length) return this.replyTurn(docPath, args.threadId, args.comment, onToken, args.stance, args.modelId, args.harness);
     }
-    const harness = await this.harnessForDoc(docPath, args.harness);
+    const harness = await this.harnessForNewWork(docPath, args.harness);
     const ann = (await readAnnotations(docPath)).annotations.find(
       (a) => a.id === args.annotationId,
     );
@@ -622,7 +669,19 @@ export class Orchestrator {
     onToken?: TokenSink,
   ): Promise<void> {
     const { db, now } = this.deps;
-    const harness = await this.harnessForDoc(docPath);
+    // Asked in a discussion that already has turns, the panel joins it: same harness, the
+    // transcript kept, and every model answers with the discussion so far as context.
+    const existing = await readThread(docPath, args.threadId).catch((e: NodeJS.ErrnoException) => {
+      if (e.code !== "ENOENT") throw e;
+      return undefined;
+    });
+    const prior = (existing?.turns ?? [])
+      .filter((t) => t.role !== "system")
+      .map((t) => ({ role: t.role as "you" | "agent", body: t.body }));
+    const harness = await this.harnessForNewWork(docPath, existing?.frontmatter.harness);
+    if (!harness.capabilities.multiModelPanel) {
+      throw new Error(`${harness.label} can't ask several models at once. Ask all models needs a Pi discussion.`);
+    }
     const runner = harness.runner;
     const ann = (await readAnnotations(docPath)).annotations.find(
       (a) => a.id === args.annotationId,
@@ -631,14 +690,16 @@ export class Orchestrator {
 
     const docVersion = await this.currentDocVersion(docPath);
 
-    await initThread(docPath, {
-      id: args.threadId,
-      anchorExact: ann.anchor.exact,
-      stance: args.stance,
-      status: "running",
-      piSession: `sessions/${args.threadId}.session.jsonl`,
-      harness: harness.id,
-    });
+    if (!prior.length) {
+      await initThread(docPath, {
+        id: args.threadId,
+        anchorExact: ann.anchor.exact,
+        stance: args.stance,
+        status: "running",
+        piSession: `sessions/${args.threadId}.session.jsonl`,
+        harness: harness.id,
+      });
+    }
     await appendTurn(docPath, args.threadId, {
       role: "you",
       timestamp: now(),
@@ -672,6 +733,7 @@ export class Orchestrator {
             comment: args.comment,
             modelId: mid,
           },
+          afterContext: prior.length ? (ctx) => void (ctx.history = prior) : undefined,
           invoke: (runner, ctx, tok) => runner.start(ctx, tok),
           onToken: tagged,
         });
@@ -727,7 +789,7 @@ export class Orchestrator {
     onToken?: TokenSink,
   ): Promise<{ batchId: string; findings: MaterializedFinding[] }> {
     const { db, now } = this.deps;
-    const harness = await this.harnessForDoc(docPath);
+    const harness = await this.harnessForNewWork(docPath);
     const runner = harness.runner;
     // The document the reviewer reads: every finding's proposal is checked against it.
     const raw = await readFile(docPath, "utf8");
@@ -916,7 +978,7 @@ export class Orchestrator {
     onToken?: TokenSink,
   ): Promise<{ count: number; proposed: boolean; applied: number; reply: string }> {
     const { db, now } = this.deps;
-    const harness = await this.harnessForDoc(docPath);
+    const harness = await this.harnessForNewWork(docPath);
     const runner = harness.runner;
     const body = documentBody(await readFile(docPath, "utf8"), docPath);
     const directives = findDirectives(body);
@@ -1170,9 +1232,10 @@ export class Orchestrator {
       ann: ann ?? this.syntheticAnnotation(threadId),
       preferredHarness: destination?.id ?? thread.frontmatter.harness,
       youTurn: { body: message },
-      agentMeta: handoffFrom && destination
-        ? effectiveStance + " · handoff to " + destination.label + (modelId ? " · " + modelId.replace(/^(?:claude-code|codex):/, "") : "")
-        : effectiveStance,
+      agentMeta: effectiveStance,
+      ...(handoffFrom && destination
+        ? { routeNote: handoffFrom === destination.id ? "new model" : "from " + this.harnessLabel(handoffFrom) }
+        : {}),
       context: {
         docPath,
         ann,

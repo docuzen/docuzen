@@ -1,4 +1,4 @@
-import { fillHarnessModels, modelDisplayId, supportsModelPicker } from "./harness-models.js";
+import { fillHarnessModels, harnessModelName, modelDisplayId, supportsModelPicker } from "./harness-models.js";
 // The chat pane: the conversation with an agent about one thread. This module owns the
 // pane's own state and the flows that send messages; everything else in the "chat
 // region" lives in a focused module that reaches the pane only through `deps`:
@@ -178,6 +178,10 @@ interface DocScope {
   readonly busy: Set<string>;
   /** The elements of each thread's in-flight turn, put back when the thread is re-opened. */
   readonly live: Map<string, Set<LiveElement>>;
+  /** When this generation began: a task running since before it is a turn none of its own (see followRunningTasks). */
+  readonly bornAt: string;
+  /** Turns this generation follows but did not start, by thread: its claim and working bubble. */
+  readonly adopted: Map<string, { turn: ExclusiveTurn; bubble: StreamingTurn }>;
 }
 
 interface LiveElement {
@@ -291,7 +295,7 @@ export function initChat(deps: ChatDeps): ChatApi {
 
   // --- the two generations (see the file header) ---
   function newScope(): DocScope {
-    return { queue: new SendQueue(), stopped: new Set(), busy: new Set(), live: new Map() };
+    return { queue: new SendQueue(), stopped: new Set(), busy: new Set(), live: new Map(), bornAt: new Date().toISOString(), adopted: new Map() };
   }
   let scope = newScope();
   let paneGen = 0;
@@ -380,7 +384,52 @@ export function initChat(deps: ChatDeps): ChatApi {
     hasComment: (id) => comments.has(id),
     promoteToChat: (id) => promoteToChat(id),
     openThreadById: (id, title) => openThreadById(id, title),
+    onTasks: (docPath, tasks) => followRunningTasks(docPath, tasks),
   });
+
+  /**
+   * Comment turns already running when this document generation began: started before a
+   * tab switch or a page reload. The sidecar finishes them on disk, but nothing of this
+   * generation follows them, so the Agents poll does. While one runs, its card says
+   * running and its thread holds the queue (a message sent meanwhile waits), with a working
+   * bubble and Stop; when it ends, the card and the open transcript are read again.
+   */
+  function followRunningTasks(docPath: string, tasks: readonly { threadId: string; status: string; updatedAt: string }[]): void {
+    if (deps.getDocPath() !== docPath) return;
+    const s = scope;
+    const running = new Map(tasks.filter((t) => t.status === "running").map((t) => [t.threadId, t]));
+    for (const [id, row] of running) {
+      if (s.adopted.has(id) || !comments.has(id) || s.queue.isInFlight(id) || !(row.updatedAt < s.bornAt)) continue;
+      const turn = claimTurn(id, "follow running turn", true);
+      if (!turn) continue;
+      s.adopted.set(id, { turn, bubble: turnBubble({ scope: s, docPath, threadId: id }, "still working", undefined) });
+      setCommentActionState(comments.get(id)!, "running");
+    }
+    for (const [id, followed] of s.adopted) {
+      if (running.has(id)) continue;
+      s.adopted.delete(id);
+      void settleFollowed(s, docPath, id, followed);
+    }
+  }
+
+  /**
+   * A followed turn ended: drop its working bubble, show the saved transcript, then release
+   * the thread so a message held behind it goes out, as a reply now the card is discussed.
+   */
+  async function settleFollowed(s: DocScope, docPath: string, id: string, followed: { turn: ExclusiveTurn; bubble: StreamingTurn }): Promise<void> {
+    const thread = await deps.api.getThread({ docPath, threadId: id }).catch(() => null);
+    const ok = !!thread && thread.frontmatter?.status !== "error";
+    const live = s.live.get(id);
+    for (const l of live ?? []) if (l.el === followed.bubble.el) live!.delete(l);
+    followed.bubble.el.remove();
+    const entry = s === scope && deps.getDocPath() === docPath ? comments.get(id) : undefined;
+    if (entry) {
+      if (ok) entry.discussed = true;
+      setCommentActionState(entry, ok ? "responded" : "error");
+      if (activeChatId === id) await promoteToChat(id);
+    }
+    followed.turn.end(ok);
+  }
 
   // --- document-wide passes: Review + Resolve [[ ]] (chat-doc-passes.ts) ---
   const passes = initDocPasses({
@@ -393,7 +442,11 @@ export function initChat(deps: ChatDeps): ChatApi {
     setDirectivesWorking: (on) => deps.setDirectivesWorking(on),
     fillModelPicker: (sel) => modelSelectOptions(sel, defaultModelKey),
     agents,
-    showDirectiveResult: (headline, reply, threadId) => showDirectiveResult(headline, reply, threadId),
+    showDirectiveResult: (headline, reply, threadId, label) => showDirectiveResult(headline, reply, threadId, label),
+    reviewHarness: () => {
+      const h = harnessList.find((x) => x.id === documentHarness);
+      return h ? { label: h.label, filesFindings: h.capabilities.reviewFindings } : undefined;
+    },
   });
 
   // --- per-thread model picker (Mode A) ---
@@ -486,6 +539,21 @@ export function initChat(deps: ChatDeps): ChatApi {
   /** See ui.ts's lastAgentReply — read from the turn's own document, whatever is active now. */
   const fetchLastAgentReply = (docPath: string, threadId: string) =>
     lastAgentReply({ getThread: (p) => deps.api.getThread({ ...p, docPath }) }, () => docPath, threadId);
+
+  /**
+   * A discussion started in this session has no saved harness on the pane until its thread
+   * is read back, so the composer would keep naming the document's harness (and route a
+   * Settings change as if it applied here). Read the one its first turn was saved with.
+   */
+  async function adoptThreadRoute(docPath: string, threadId: string): Promise<void> {
+    const pending = () => threadHarness === undefined && activeChatId === threadId && deps.getDocPath() === docPath;
+    if (!pending()) return;
+    const thread = await deps.api.getThread({ docPath, threadId }).catch(() => null);
+    if (!thread?.frontmatter?.harness || !pending()) return;
+    threadHarness = thread.frontmatter.harness;
+    savedThreadModel = thread.frontmatter.model;
+    refreshMoreLabel();
+  }
 
   /** Drop a not-yet-sent message: out of the queue and off the screen. */
   function removePending(s: DocScope, item: QueuedTurn): boolean {
@@ -869,11 +937,7 @@ export function initChat(deps: ChatDeps): ChatApi {
       const threadModel = thread.frontmatter?.model;
       if (!nextHarness && !modelPicked) modelSelectOptions(chatModelEl, threadModel ?? threadDefaultModel());
       refreshMoreLabel();
-      // After a handoff the current thread model no longer describes older replies.
-      const singleRoute = !thread.turns.some(t => t.role === "agent" && t.meta?.includes(" · handoff to "));
-      renderThreadTurns(id, thread, (tn) =>
-        tn.role === "agent" && singleRoute && threadModel ? `${tn.meta ?? "agent"} · ${modelName(threadModel)}` : tn.meta,
-      );
+      renderThreadTurns(id, thread, savedTurnLabel(thread));
       const lastUser = lastUserTurn(thread.turns);
       if (thread.frontmatter?.status === "error" && lastUser && !chatInputEl.value.trim()) {
         chatInputEl.value = lastUser.body;
@@ -916,7 +980,13 @@ export function initChat(deps: ChatDeps): ChatApi {
     t.scope.stopped.delete(threadId); // a turn only now starting cannot be the one Stop cancelled
     const stripChip = turnElByItemId.get(item.id);
     if (stripChip) setPendingChip(stripChip, item, "live");
-    const bubble = turnBubble(t, item.stance, item.modelId);
+    // The harness and model this turn will run on, as best the pane knows them; the saved
+    // reply carries the exact ones (see savedTurnLabel).
+    const shownThread = threadId === activeChatId;
+    const fresh = !!entry && !entry.discussed;
+    const routeHarness = item.harness ?? (shownThread ? threadHarness : undefined) ?? (fresh ? documentHarness : undefined);
+    const routeModel = item.modelId ?? (item.harness ? undefined : shownThread && savedThreadModel ? savedThreadModel : fresh ? defaultModelKey || undefined : undefined);
+    const bubble = turnBubble(t, routeMeta(item.stance, routeHarness, routeModel), item.modelId);
     const onEvent = (e: RpcEvent) => {
       if (!isCurrent(t)) return;
       if (deps.routeProposal(e)) return;
@@ -948,6 +1018,7 @@ export function initChat(deps: ChatDeps): ChatApi {
           refreshMoreLabel();
         }
         const finalText = await fetchLastAgentReply(docPath, threadId);
+        await adoptThreadRoute(docPath, threadId);
         if (!isCurrent(t)) return; // the reply is on disk; the document re-reads it when reopened
         turnElByItemId.delete(item.id); // reached a terminal (sent) state — no more failure/removal to wire up
         bubble.done(finalText);
@@ -1234,7 +1305,7 @@ export function initChat(deps: ChatDeps): ChatApi {
         if (!nextHarness && !modelPicked) modelSelectOptions(chatModelEl, thread.frontmatter?.model ?? threadDefaultModel());
         refreshMoreLabel();
         if (!thread.turns.length) chatTurn("system", "No transcript for this agent task yet.");
-        renderThreadTurns(id, thread, (tn) => tn.meta);
+        renderThreadTurns(id, thread, savedTurnLabel(thread));
       } else if (/ENOENT|no such file/.test(failure)) {
         chatTurn(
           "system",
@@ -1295,7 +1366,7 @@ export function initChat(deps: ChatDeps): ChatApi {
    * null, same as before — reply from the Agents panel's per-directive row instead
    * (fully repliable via `openThreadById`).
    */
-  function showDirectiveResult(headline: string, reply: string, threadId?: string): void {
+  function showDirectiveResult(headline: string, reply: string, threadId?: string, label = "Resolve [[ ]]"): void {
     setPaneSubject(threadId ?? null);
     if (threadId) modelSelectOptions(chatModelEl, threadDefaultModel());
     chatQuoteEl.hidden = true;
@@ -1304,7 +1375,7 @@ export function initChat(deps: ChatDeps): ChatApi {
     chatFootEl.hidden = threadId === undefined;
     chatEmptyEl.hidden = true;
     chatTurn("system", headline);
-    if (reply.trim()) chatTurn("agent", reply, "Resolve [[ ]]");
+    if (reply.trim()) chatTurn("agent", reply, label);
   }
   /**
    * A card's "Ask agent" for a thread's FIRST message: promote the thread into the chat
@@ -1323,7 +1394,7 @@ export function initChat(deps: ChatDeps): ChatApi {
     refreshMoreLabel();
     setCommentActionState(entry, "running");
     chatTurn("you", ask.comment);
-    const bubble = turn.bubble(ask.stance, ask.modelId);
+    const bubble = turn.bubble(routeMeta(ask.stance, documentHarness, ask.modelId ?? (defaultModelKey || undefined)), ask.modelId);
     try {
       await deps.api.discuss(
         {
@@ -1341,6 +1412,7 @@ export function initChat(deps: ChatDeps): ChatApi {
         },
       );
       const finalText = await fetchLastAgentReply(turn.docPath, id);
+      await adoptThreadRoute(turn.docPath, id);
       if (!turn.isCurrent()) return; // persisted; the document re-reads it when reopened
       bubble.done(finalText);
       entry.discussed = true;
@@ -1443,7 +1515,30 @@ export function initChat(deps: ChatDeps): ChatApi {
 
   /** Resolve a model key to its display name (falls back to the raw key). */
   function modelName(key: string): string {
-    return threadModels.find((m) => m.key === key)?.name ?? modelDisplayId(key);
+    return threadModels.find((m) => m.key === key)?.name ?? harnessModelName(key) ?? modelDisplayId(key);
+  }
+
+  /** "stance · Harness · Model", the label a reply is saved under (Orchestrator.runAgentStep), for its live bubble. */
+  function routeMeta(stance: string, harnessId: string | undefined, modelId: string | undefined): string {
+    const harness = harnessList.find((h) => h.id === harnessId)?.label ?? harnessId;
+    return [stance, harness, modelId ? modelName(modelId) : ""].filter(Boolean).join(" · ");
+  }
+
+  /**
+   * The label of a saved turn. A reply stamped with its harness and model (every reply
+   * since they were) is shown as saved, model ids as names. An older one gets the thread's
+   * model appended, unless the thread has changed harness or model since.
+   */
+  function savedTurnLabel(thread: ThreadView): (tn: ThreadTurn) => string | undefined {
+    const labels = new Set(["Pi", "Codex", "Claude Code", ...harnessList.map((h) => h.label)]);
+    const threadModel = thread.frontmatter?.model;
+    const singleRoute = !thread.turns.some((t) => t.role === "agent" && t.meta?.includes(" · handoff to "));
+    return (tn) => {
+      if (tn.role !== "agent") return tn.meta;
+      const parts = tn.meta?.split(" · ") ?? [];
+      if (parts.some((p) => labels.has(p))) return parts.map((p) => (/[:/]/.test(p) ? modelName(p) : p)).join(" · ");
+      return singleRoute && threadModel ? `${tn.meta ?? "agent"} · ${modelName(threadModel)}` : tn.meta;
+    };
   }
 
   /**

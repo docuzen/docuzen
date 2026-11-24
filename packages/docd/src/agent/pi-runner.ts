@@ -212,6 +212,23 @@ export function captureSessionEvent(entry: SessionEntry, event: PiEvent): void {
  * (the user's Stop button) is also exempt: it must keep resolving normally, per
  * `entry.aborted`'s doc comment.
  */
+/**
+ * Pi's own auth errors are written for its CLI ("Use /login …", then paths into its
+ * installed docs). Say instead what a Docuzen user can do; any other error passes through.
+ */
+export function piErrorForUser(message: string): string {
+  const noKey = /^No API key found for (.+?)\.(?:\s|$)/.exec(message);
+  if (noKey) {
+    const provider = noKey[1] === "the selected model" ? "this model's provider" : noKey[1];
+    return `Pi has no API key for ${provider}. Add it in File ▸ Settings ▸ Manage model providers.` +
+      ` If the key in models.json is a $VARIABLE, that variable is not set where Docuzen runs.`;
+  }
+  if (/^No models? (?:available|selected)\b/.test(message)) {
+    return "Pi has no model to use. Add one in File ▸ Settings ▸ Manage model providers.";
+  }
+  return message.replace(/\n*Use \/login to log into a provider[\s\S]*$/, "").trim() || message;
+}
+
 export function finishTurn(entry: SessionEntry, promptError?: unknown): AgentTurn {
   if (promptError !== undefined) {
     entry.error ??= promptError instanceof Error ? promptError.message : String(promptError);
@@ -220,7 +237,7 @@ export function finishTurn(entry: SessionEntry, promptError?: unknown): AgentTur
   // If the turn produced no content but pi (or session.prompt() itself) reported an error,
   // surface it (e.g. a misconfigured/forbidden model) instead of returning a silent empty
   // reply.
-  if (noContent && entry.error) throw new Error(entry.error);
+  if (noContent && entry.error) throw new Error(piErrorForUser(entry.error));
   // Genuinely no content and no error, and not a user-initiated stop: never resolve with a
   // silent empty reply — an honest "no content" throw beats a blank bubble the user can't
   // interpret.

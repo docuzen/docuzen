@@ -72,10 +72,9 @@ export function buildHarnessPrompt(ctx: AgentContext, label: string): string {
     "## Current document text",
     ctx.docText,
     "",
-    "## Highlight / local context",
-    `Highlighted text: ${ctx.anchorExact}`,
-    ctx.surrounding,
-    "",
+    // A whole-document pass (review, a directive thread) has no highlight: saying
+    // "Highlighted text:" with nothing after it makes the agent answer about that.
+    ...(ctx.anchorExact?.trim() ? ["## Highlight / local context", `Highlighted text: ${ctx.anchorExact}`, ctx.surrounding, ""] : []),
     "## Reviewer request",
     ctx.comment,
     "",

@@ -1,5 +1,27 @@
 import { readJsonFile, withFileLock, writeJsonFile } from "../had/io.js";
 
+const KEY_REFERENCE = /\$\$|\$!|\$\{([A-Za-z_][A-Za-z0-9_]*)\}|\$([A-Za-z_][A-Za-z0-9_]*)/g;
+
+/**
+ * The key a models.json `apiKey` stands for, read the way pi reads it: "$NAME" and
+ * "${NAME}" are environment variables, "$$" is a literal "$" and "$!" a literal "!". A
+ * value starting with "!" is a shell command to pi; runners outside pi refuse it rather
+ * than run it.
+ */
+export function resolveApiKeyValue(value: string, env: Record<string, string | undefined> = process.env): string {
+  if (value.startsWith("!")) {
+    throw new Error("its API key is a shell command, which only Pi can run. Use the key itself or a $VARIABLE.");
+  }
+  return value.replace(KEY_REFERENCE, (m: string, braced?: string, bare?: string) => {
+    if (m === "$$") return "$";
+    if (m === "$!") return "!";
+    const name = (braced ?? bare) as string;
+    const v = env[name];
+    if (!v) throw new Error(`its API key names $${name}, which is not set in Docuzen's environment.`);
+    return v;
+  });
+}
+
 /**
  * A single model row, flattened from pi's provider-keyed models.json. `key`
  * (`provider/modelId`) is the stable identity the Settings UI edits against.

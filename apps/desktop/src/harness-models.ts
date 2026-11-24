@@ -5,17 +5,32 @@ type Choice = { key: string; name: string };
 type Load = { path: string; until: number; result: Promise<Choice[]> };
 const catalogues = new WeakMap<DocdApi, Map<string, Load>>();
 const revisions = new WeakMap<HTMLSelectElement, number>();
+/** Display names of every native harness model seen in a catalogue, for labelling saved replies. */
+const knownNames = new Map<string, string>();
+
+/** A native harness model's display name, once its harness's catalogue has been loaded. */
+export function harnessModelName(key: string): string | undefined {
+  return knownNames.get(key);
+}
 
 function nativeCatalogue(api: DocdApi, harness: string, path: string) {
   let cache = catalogues.get(api);
   if (!cache) catalogues.set(api, cache = new Map());
   const existing = cache.get(harness);
   if (existing && existing.path === path && Date.now() < existing.until) return existing.result;
-  const result = Promise.resolve().then(() => api.listHarnessModels({ harness, docPath: path }));
+  const result = Promise.resolve().then(() => api.listHarnessModels({ harness, docPath: path })).then((rows) => {
+    for (const r of rows) knownNames.set(r.key, r.name);
+    return rows;
+  });
   const entry = { path, until: Date.now() + 30_000, result };
   cache.set(harness, entry);
   void result.catch(() => { if (cache.get(harness) === entry) cache.delete(harness); });
   return result;
+}
+
+/** Load a native harness's model names (for labels) without a picker to fill; resolves once known. */
+export function loadHarnessModelNames(api: DocdApi, harness: string, path: string): Promise<void> {
+  return nativeCatalogue(api, harness, path).then(() => undefined, () => undefined);
 }
 
 export function supportsModelPicker(id: string) {

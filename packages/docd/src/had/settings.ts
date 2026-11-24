@@ -65,3 +65,18 @@ export async function writeSettings(docPath: string, settings: HadSettings): Pro
   const path = hadPaths(docPath).settings;
   await withFileLock(path, () => writeJsonFile(path, settings));
 }
+
+/**
+ * Record the harness a document's first agent work ran on, unless the document already
+ * names one. A document without its own harness follows the app default, and choosing a
+ * harness for another document moves that default (setSettings writes it through), so
+ * without this an untouched document would switch harness under its existing discussions.
+ */
+export async function pinHarness(docPath: string, harness: HarnessId): Promise<void> {
+  const path = hadPaths(docPath).settings;
+  await withFileLock(path, async () => {
+    const saved = await readJsonFile<Partial<HadSettings>>(path, () => ({}));
+    if (saved.harness) return;
+    await writeJsonFile(path, { ...DEFAULTS, ...saved, harness });
+  });
+}

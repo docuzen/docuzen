@@ -601,7 +601,8 @@ describe("Orchestrator.switchStance", () => {
     const systemTurn = thread.turns.find((t) => t.role === "system");
     expect(systemTurn?.body).toContain("supporter");
     const lastAgent = [...thread.turns].reverse().find((t) => t.role === "agent");
-    expect(lastAgent?.meta).toBe("supporter");
+    // The stance, then the harness that answered.
+    expect(lastAgent?.meta).toBe("supporter · Pi");
   });
 });
 

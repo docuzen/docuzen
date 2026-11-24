@@ -44,7 +44,8 @@ import type { AgentContext, AgentRunner, AgentTurn, TokenSink } from "./types.js
 
 export const ACP_CAPABILITIES: HarnessCapabilities = {
   proposeEdits: true,
-  directEdit: false,
+  // Editing mode applies the edits it proposes as they arrive, as for Pi (Docuzen applies them).
+  directEdit: true,
   reviewFindings: false,
   webSearch: "harness-managed",
   documentTools: "none",
@@ -188,6 +189,8 @@ export class AcpRunner implements AgentRunner {
   private live: Promise<Live> | null = null;
   private sessions = new Map<string, Session>();
   private byAcpId = new Map<string, Session>();
+  /** Each model id the agent has offered, by its display name (see applySessionModel). */
+  private modelNames = new Map<string, string>();
   /** Sessions still being created, by cancel key: a Stop pressed then is honoured before the first prompt. */
   private starting = new Map<string, { cancelled: boolean }>();
 
@@ -343,20 +346,29 @@ export class AcpRunner implements AgentRunner {
     if (starting.cancelled) throw new Error(`${this.spec.label} run cancelled`);
   }
 
+  /**
+   * Select the thread's model in a new or resumed session. A resumed Claude session falls
+   * back to the default model and can list the chosen one under an alias ("haiku" for
+   * "claude-haiku-5-5"), so a model missing by id is looked up by the name it was offered as.
+   */
   private async applySessionModel(session: Session, res: Pick<NewSessionResponse, "configOptions">): Promise<void> {
+    const option = modelOption(res);
+    const choices = option ? selectChoices(option) : [];
+    for (const c of choices) if (!this.modelNames.has(c.value)) this.modelNames.set(c.value, c.name);
     const key = session.ctx.modelId;
     const prefix = this.spec.id + ":";
     if (!key?.startsWith(prefix)) return;
     const model = key.slice(prefix.length);
-    const option = modelOption(res);
-    if (!option || !selectValues(option).includes(model)) {
+    const name = this.modelNames.get(model);
+    const choice = choices.find((c) => c.value === model) ?? (name ? choices.find((c) => c.name === name) : undefined);
+    if (!option || !choice) {
       throw new Error(`${this.spec.label} does not offer model "${model}". Choose another model in Settings.`);
     }
-    if (option.currentValue !== model) {
+    if (option.currentValue !== choice.value) {
       const result = await session.live.connection.agent.request(methods.agent.session.setConfigOption, {
-        sessionId: session.acpId, configId: option.id, value: model,
+        sessionId: session.acpId, configId: option.id, value: choice.value,
       });
-      if (modelOption(result)?.currentValue !== model) throw new Error(`${this.spec.label} did not select "${model}".`);
+      if (modelOption(result)?.currentValue !== choice.value) throw new Error(`${this.spec.label} did not select "${model}".`);
     }
   }
 

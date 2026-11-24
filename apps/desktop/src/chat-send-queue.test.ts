@@ -104,7 +104,7 @@ describe("dispatchQueuedTurn: resolves the thread from the queue key, never from
     // Checked when it matters, not snapshotted at dispatch start (H27): the bubble is
     // kept aside while another thread is shown and re-attached when this one reopens.
     expect(dispatchSource).not.toContain("const isActive = ");
-    expect(dispatchSource).toContain("const bubble = turnBubble(t, item.stance, item.modelId);");
+    expect(dispatchSource).toContain("const bubble = turnBubble(t, routeMeta(item.stance, routeHarness, routeModel), item.modelId);");
     expect(chatSource).toContain("const bubble = streamingAgentTurn(meta, modelId, { detached: !isShown(t) });");
     const onSuccessSource = sourceBetween(dispatchSource, "onSuccess: async () => {", "onError: (e) => {");
     expect(onSuccessSource).toContain("if (!isCurrent(t)) return;");

@@ -72,7 +72,7 @@ describe("streamingAgentTurn's fail()/empty-reply bubbles: real detail prominent
 
 describe("streamingAgentTurn call sites pass the actual model driving each bubble", () => {
   it("dispatchQueuedTurn (discuss/reply) passes item.modelId alongside item.stance", () => {
-    expect(chatSource).toContain("const bubble = turnBubble(t, item.stance, item.modelId);");
+    expect(chatSource).toContain("const bubble = turnBubble(t, routeMeta(item.stance, routeHarness, routeModel), item.modelId);");
     // turnBubble hands both straight to the transcript's streamingAgentTurn.
     expect(chatSource).toContain("const bubble = streamingAgentTurn(meta, modelId, { detached: !isShown(t) });");
   });
@@ -97,10 +97,34 @@ describe("streamingAgentTurn call sites pass the actual model driving each bubbl
     expect(cardSource).toContain("modelId: modelSel.value || undefined");
     // ...and the pane-side flow labels the bubble with that stance + model.
     const flowSource = sourceBetween(chatSource, "async function askAgentFromCard(", "async function resendFromCard(");
-    expect(flowSource).toContain("const bubble = turn.bubble(ask.stance, ask.modelId);");
+    expect(flowSource).toContain("const bubble = turn.bubble(routeMeta(ask.stance, documentHarness, ask.modelId ?? (defaultModelKey || undefined)), ask.modelId);");
   });
 
   it("the panel fan-out passes the same per-bubble model id it already uses as meta", () => {
     expect(chatSource).toContain("b = turn.bubble(modelName(model) || model, model);");
+  });
+});
+
+describe("the generic 'check the model' hint shows only where it can help", () => {
+  it("is offered for model and gateway failures and the empty-reply fallback", async () => {
+    const { wantsModelHint } = await import("./chat-transcript.js");
+    for (const e of [
+      "Error: 404 model not found: litellm/gpt-9",
+      "Error: 429 Too Many Requests",
+      "fetch failed (ECONNREFUSED 127.0.0.1:4001)",
+      "No response from Pi — it returned no content.",
+    ]) expect(wantsModelHint(e), e).toBe(true);
+  });
+
+  it("is left off a Stop and off errors that already say what to do", async () => {
+    const { wantsModelHint } = await import("./chat-transcript.js");
+    for (const e of [
+      "Error: Codex run cancelled",
+      "Error: codex not found on PATH (install it with: npm install -g @openai/codex)",
+      "Error: Claude Code is unavailable: install Claude Code and sign in with its CLI",
+      'Error: Claude Code does not offer model "claude-x". Choose another model in Settings.',
+      "Error: Codex can't ask several models at once. Ask all models needs a Pi discussion.",
+      "Error: Pi received no model or tool activity for 60 seconds. Check your model provider or gateway connection, then retry.",
+    ]) expect(wantsModelHint(e), e).toBe(e.startsWith("Error: Pi received"));
   });
 });

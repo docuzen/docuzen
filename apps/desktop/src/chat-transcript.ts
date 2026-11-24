@@ -49,6 +49,18 @@ export interface TranscriptApi {
   streamingAgentTurn: (meta?: string, modelId?: string, opts?: { detached?: boolean }) => StreamingTurn;
 }
 
+/**
+ * Whether an agent error could be the model or its gateway, so "check the model in
+ * Settings" can help. An error that already names its fix (install a CLI, sign in, pick
+ * an offered model, switch harness) or a Stop gets no generic hint under it.
+ */
+export function wantsModelHint(error: string): boolean {
+  if (/cancelled|not found on PATH|unavailable|install|sign in|signed out|does not offer|can't ask several|can't use model|permission mode|File ▸ Settings|in Settings/i.test(error)) {
+    return false;
+  }
+  return /no response|returned no content|\b[45]\d\d\b|rate.?limit|model|gateway|provider|ECONN|ETIMEDOUT|ENOTFOUND|fetch failed|timed? ?out|overloaded|quota/i.test(error);
+}
+
 export function initTranscript(deps: TranscriptDeps): TranscriptApi {
   const chatTurnsEl = document.querySelector<HTMLDivElement>("#chatTurns")!;
   const chatEmptyEl = document.querySelector<HTMLDivElement>("#chatEmpty")!;
@@ -223,10 +235,12 @@ export function initTranscript(deps: TranscriptDeps): TranscriptApi {
       const head = document.createElement("div");
       head.className = "tbody-fail-headline";
       head.textContent = `⚠ ${headline}`;
+      body.append(head);
+      if (!wantsModelHint(headline)) return;
       const hint = document.createElement("div");
       hint.className = "tbody-fail-hint";
       hint.textContent = AGENT_FAIL_HINT;
-      body.append(head, hint);
+      body.append(hint);
     };
     return {
       onEvent: (e) => {

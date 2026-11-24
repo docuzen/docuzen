@@ -8,11 +8,12 @@ import type { AgentContext, AgentRunner, AgentTurn, ProposedEdit, TokenSink } fr
 import type { AgentHarness, HarnessCapabilities } from "./harness-registry.js";
 import { SessionCounter } from "./runner-base.js";
 import { buildHarnessPrompt, canProposeEdits, extractTrailingProposal } from "./harness-prompt.js";
-import { readModelWithKey } from "./model-registry.js";
+import { readModelWithKey, resolveApiKeyValue } from "./model-registry.js";
 
 export const CODEX_CAPABILITIES: HarnessCapabilities = {
   proposeEdits: true,
-  directEdit: false,
+  // Editing mode applies the edits it proposes as they arrive, as for Pi (Docuzen applies them).
+  directEdit: true,
   reviewFindings: false,
   webSearch: "harness-managed",
   documentTools: "none",
@@ -366,6 +367,13 @@ export class CodexRunner implements AgentRunner {
       if (!model.apiKey) {
         throw new Error(`Codex model ${ctx.modelId} is missing an API key`);
       }
+      // models.json keys are often "$LITELLM_API_KEY": pi expands them, so must we.
+      let apiKey: string;
+      try {
+        apiKey = resolveApiKeyValue(model.apiKey);
+      } catch (e) {
+        throw new Error(`Codex can't use model ${ctx.modelId}: ${(e as Error).message}`);
+      }
       const configOverrides: Record<string, string | undefined> = {
         model: model.modelId,
         model_provider: "docuzen",
@@ -378,7 +386,7 @@ export class CodexRunner implements AgentRunner {
       }
       return {
         configOverrides,
-        env: { ...process.env, LLM_API_KEY: model.apiKey },
+        env: { ...process.env, LLM_API_KEY: apiKey },
       };
     }
     return { model: this.cfg.model ?? process.env.CODEX_MODEL };

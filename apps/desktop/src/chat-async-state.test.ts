@@ -385,6 +385,22 @@ describe("H30: document-wide passes", () => {
     expect($("#reviewStatus").hidden).toBe(true);
   });
 
+  it("a review on a harness that can't file findings shows its written review instead of an empty rail", async () => {
+    const { chat, calls, threads } = setup();
+    chat.setHarnessContext("codex", [
+      { id: "codex", label: "Codex", available: true, capabilities: { reviewFindings: false, multiModelPanel: false } },
+    ] as Parameters<typeof chat.setHarnessContext>[1]);
+    $<HTMLButtonElement>("#reviewDocBtn").click();
+    expect($("#reviewStatus").textContent).toMatch(/Codex can't add findings to the rail yet/);
+    $<HTMLButtonElement>("#reviewRun").click();
+    await settle();
+    (threads["/d/a.md"] ??= {}).review = { frontmatter: {}, turns: [{ role: "you", body: "Review" }, { role: "agent", body: "The rollout lacks a rollback step." }] };
+    calls.reviewDocument[0].resolve({ batchId: "b", findings: [] });
+    await settle();
+    expect($("#reviewStatus").textContent).toMatch(/its review is in the discussion pane/);
+    expect(turnsText()).toEqual(["turn-system:Codex reviewed the document.", "turn-agent:The rollout lacks a rollback step."]);
+  });
+
   it("names its document even when the tab changes while the editor is being saved", async () => {
     const { calls, deps, doc } = setup();
     let saved!: () => void;
@@ -716,5 +732,65 @@ describe("L14: smaller state defects", () => {
     second?.();
     await settle();
     expect($<HTMLTextAreaElement>("#chatInput").value).toBe("");
+  });
+});
+
+describe("a turn still running when its document is opened again (tab switch, reload)", () => {
+  const poll = async () => {
+    $<HTMLButtonElement>("#agentsBtn").click(); // opening the panel lists the tasks
+    await settle();
+    $<HTMLButtonElement>("#agentsBtn").click();
+    await settle();
+  };
+
+  it("shows as running with Stop, holds a new message, then shows its reply and sends the message", async () => {
+    const { chat, api, calls, persist, switchDoc } = setup();
+    askFromCard(chat, "c0001", "Count to 150.");
+    await settle();
+    expect(calls.discuss).toHaveLength(1);
+    // Away and back: a new document generation. The sidecar is still answering.
+    switchDoc("/d/b.md");
+    switchDoc("/d/a.md");
+    const c = addCard(chat, "c0001"); // the cards come back from listThreads
+    persist("/d/a.md", "c0001", [{ role: "you", body: "Count to 150." }], { status: "running" });
+    api.listTasks.mockResolvedValue([{ threadId: "c0001", status: "running", piSessionId: null, updatedAt: "2000-01-01T00:00:00.000Z" }]);
+    await poll();
+    expect(c.chip.textContent).toBe("running");
+    await chat.promoteToChat("c0001");
+    await settle();
+    expect(stopShown()).toBe(true);
+    expect(document.querySelectorAll("#chatTurns .turn-agent.working")).toHaveLength(1);
+    footerSend("And to 200?");
+    await settle();
+    expect(calls.reply ?? []).toHaveLength(0); // waits behind the running turn
+    expect(document.querySelectorAll("#chatTurns .chip.queued")).toHaveLength(1);
+
+    persist("/d/a.md", "c0001", [{ role: "you", body: "Count to 150." }, { role: "agent", body: "1 2 3 … 150" }], { status: "responded" });
+    api.listTasks.mockResolvedValue([]);
+    await poll();
+    expect(turnsText().slice(0, 2)).toEqual(["turn-you:Count to 150.", "turn-agent:1 2 3 … 150"]);
+    expect(document.querySelectorAll("#chatTurns .turn-agent.working")).toHaveLength(1); // the reply's own bubble
+    expect(calls.discuss).toHaveLength(1); // never a second discuss over the thread
+    expect(calls.reply).toHaveLength(1); // the held message went out as a reply
+    expect(calls.reply[0].params.message).toBe("And to 200?");
+    expect(c.chip.textContent).toBe("running"); // ... which is now running
+    persist("/d/a.md", "c0001", [
+      { role: "you", body: "Count to 150." }, { role: "agent", body: "1 2 3 … 150" },
+      { role: "you", body: "And to 200?" }, { role: "agent", body: "… 200" },
+    ], { status: "responded" });
+    calls.reply[0].resolve();
+    await settle();
+    expect(c.chip.textContent).toBe("responded");
+    expect(stopShown()).toBe(false);
+  });
+
+  it("leaves alone a turn this generation started itself", async () => {
+    const { chat, api } = setup();
+    const c = askFromCard(chat, "c0001", "q");
+    await settle();
+    api.listTasks.mockResolvedValue([{ threadId: "c0001", status: "running", piSessionId: null, updatedAt: new Date(Date.now() + 1000).toISOString() }]);
+    await poll();
+    expect(document.querySelectorAll("#chatTurns .turn-agent.working")).toHaveLength(1); // its own bubble only
+    expect(c.chip.textContent).toBe("running");
   });
 });

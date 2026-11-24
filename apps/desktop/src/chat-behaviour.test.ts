@@ -212,7 +212,8 @@ describe("review rail cards", () => {
     c.ask.click();
     await settle();
     expect(calls.discuss[0].params).toMatchObject({ stance: "critiquer", modelId: "p/m1" });
-    expect($("#chatTurns .turn-agent .rolename").textContent).toBe("Agent · critiquer");
+    // The live label names the model too (the harness once the pane knows the harness list).
+    expect($("#chatTurns .turn-agent .rolename").textContent).toBe("Agent · critiquer · Model One");
   });
 
   it("deleting a comment removes its card and closes its open thread", async () => {
@@ -443,6 +444,26 @@ describe("opening threads", () => {
     expect(more.hidden).toBe(true);
   });
 
+  it("after a new discussion's first reply, the composer names the harness it was saved with, not the document's", async () => {
+    const { chat, calls, threads } = setup();
+    const ctx = (doc: string) => chat.setHarnessContext(doc, [
+      { id: "pi", label: "Pi", available: true, capabilities: { multiModelPanel: true } },
+      { id: "codex", label: "Codex", available: true, capabilities: { multiModelPanel: false } },
+    ] as Parameters<typeof chat.setHarnessContext>[1]);
+    ctx("pi");
+    const c = addCard(chat, "c0001");
+    c.input.value = "Why Redis?";
+    c.ask.click();
+    await settle();
+    threads.c0001 = { frontmatter: { harness: "pi" }, turns: [{ role: "you", body: "Why Redis?" }, { role: "agent", body: "Counters." }] };
+    calls.discuss[0].resolve();
+    await settle();
+    // Settings now moves the document to Codex; this discussion still replies on Pi.
+    ctx("codex");
+    expect($("#chatHarnessLabel").textContent).toBe("Harness: Pi");
+    expect($("#chatPanel").hidden).toBe(false);
+  });
+
   it("a new Claude thread offers Claude models in the composer", async () => {
     const { chat } = setup();
     chat.setHarnessContext("claude-code", [{
@@ -618,6 +639,25 @@ describe("transcript", () => {
     expect(you.querySelector<HTMLTextAreaElement>(".turnedit-box textarea")!.value).toBe("original ask");
     you.dispatchEvent(new MouseEvent("dblclick", { bubbles: true }));
     expect(you.querySelectorAll(".turnedit-box")).toHaveLength(1); // re-entry does not stack a second editor
+  });
+
+  it("a saved reply is labelled with the harness and model that wrote it, the model by name", async () => {
+    const { chat, threads } = setup();
+    addCard(chat, "c0001");
+    threads.c0001 = { frontmatter: { harness: "codex", model: "codex:gpt-test" }, turns: [
+      { role: "you", body: "q" },
+      { role: "agent", body: "a", meta: "none · Pi · p/m1" },
+      { role: "you", body: "again" },
+      { role: "agent", body: "b", meta: "none · Codex · codex:gpt-test · from Pi" },
+    ] };
+    await chat.refreshThreadModels(); // main.ts loads Pi's models at boot
+    await chat.promoteToChat("c0001");
+    await settle();
+    const labels = [...document.querySelectorAll("#chatTurns .turn-agent .trole")].map((e) => e.textContent?.trim());
+    expect(labels).toEqual([
+      "Agent · none · Pi · Model One",
+      expect.stringMatching(/^Agent · none · Codex · (GPT Test|gpt-test) · from Pi$/),
+    ]);
   });
 
   it("persisted reasoning is shown collapsed under its turn", async () => {

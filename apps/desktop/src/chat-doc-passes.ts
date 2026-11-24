@@ -33,7 +33,9 @@ export interface DocPassesDeps {
   fillModelPicker: (sel: HTMLSelectElement) => void;
   agents: Pick<AgentsPanelApi, "setOptimisticTask" | "clearOptimisticTask" | "markStarting" | "refreshAgents">;
   /** Show a directive-pass outcome banner in the chat pane (see chat.ts). */
-  showDirectiveResult: (headline: string, reply: string, threadId?: string) => void;
+  showDirectiveResult: (headline: string, reply: string, threadId?: string, label?: string) => void;
+  /** The harness a review of this document runs on, and whether it can put findings in the rail. */
+  reviewHarness: () => { label: string; filesFindings: boolean } | undefined;
 }
 
 export interface DocPassesApi {
@@ -89,6 +91,13 @@ export function initDocPasses(deps: DocPassesDeps): DocPassesApi {
     if (!reviewForm.hidden) {
       reviewAreaDoc = deps.getDocPath();
       deps.fillModelPicker(reviewModelEl);
+      const who = deps.reviewHarness();
+      if (who && !who.filesFindings && !reviews.has(reviewAreaDoc!)) {
+        statusClock?.stop();
+        statusClock = null;
+        reviewStatusEl.hidden = false;
+        reviewStatusEl.textContent = `${who.label} can't add findings to the rail yet: its review will appear in the discussion pane.`;
+      }
       reviewRubricEl.focus();
     }
   });
@@ -149,6 +158,17 @@ export function initDocPasses(deps: DocPassesDeps): DocPassesApi {
       const appliedCount = res.findings.filter((x) => x.applied).length;
       deps.log(`review pass added ${n} finding(s)`);
       if (!onScreen(docPath)) return; // the findings are on disk: they load with the document
+      // Codex and Claude Code can't file findings: their review is prose in the "review"
+      // thread. Show it instead of reporting an empty rail.
+      const who = deps.reviewHarness();
+      if (n === 0 && who && !who.filesFindings) {
+        const thread = await deps.api.getThread({ docPath, threadId: "review" }).catch(() => null);
+        const reply = [...(thread?.turns ?? [])].reverse().find((t) => t.role === "agent")?.body ?? "";
+        if (!onScreen(docPath)) return;
+        settleReviewStatus(`Review complete. ${who.label} can't add findings to the rail yet, so its review is in the discussion pane.`);
+        if (reply.trim()) deps.showDirectiveResult(`${who.label} reviewed the document.`, reply, "review", "Review");
+        return;
+      }
       settleReviewStatus(
         `Review complete — ${n} finding${n === 1 ? "" : "s"} added to the rail.` +
           (appliedCount ? ` ${appliedCount} edit${appliedCount === 1 ? "" : "s"} applied (Editing mode).` : ""),

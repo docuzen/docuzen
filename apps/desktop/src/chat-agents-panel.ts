@@ -17,6 +17,8 @@ export interface AgentsPanelDeps {
   promoteToChat: (threadId: string) => Promise<void>;
   /** Open a directive/review pseudo-thread in the chat pane. */
   openThreadById: (threadId: string, title: string) => Promise<void>;
+  /** Every fresh task listing of the active document (the chat follows turns it didn't start). */
+  onTasks?: (docPath: string, tasks: TaskRow[]) => void;
 }
 
 export interface AgentsPanelApi {
@@ -135,6 +137,7 @@ export function initAgentsPanel(deps: AgentsPanelDeps): AgentsPanelApi {
     const optimistic = optimisticFor(docPath);
     agentsPanel.replaceChildren();
     updateAgentsBadge(tasks);
+    deps.onTasks?.(docPath, tasks);
 
     // Pin the doc-wide pseudo-tasks (directives, review) ahead of per-comment threads so
     // they're never buried under the capped Recent list.
@@ -236,7 +239,10 @@ export function initAgentsPanel(deps: AgentsPanelDeps): AgentsPanelApi {
     }
     try {
       const tasks = await mergedTasks(docPath);
-      if (isFresh(seq, docPath)) updateAgentsBadge(tasks);
+      if (isFresh(seq, docPath)) {
+        updateAgentsBadge(tasks);
+        deps.onTasks?.(docPath, tasks);
+      }
     } catch {
       /* ignore transient poll errors */
     }

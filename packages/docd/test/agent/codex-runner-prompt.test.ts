@@ -221,3 +221,11 @@ describe("buildCodexPrompt — byte-exact capture (pre-refactor baseline)", () =
     `);
   });
 });
+
+describe("a whole-document pass has no highlight section", () => {
+  it("a review names no highlighted text, so the agent doesn't answer about one", () => {
+    const prompt = buildCodexPrompt({ ...base, anchorExact: "", surrounding: "", reviewMode: true, comment: "Review the document." });
+    expect(prompt).not.toContain("Highlight");
+    expect(prompt).toContain("## Current document text\n# Title\n\nBody text about Redis caching.\n\n## Reviewer request\nReview the document.");
+  });
+});

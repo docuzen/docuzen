@@ -156,20 +156,20 @@
         <div class="srow">
           <label for="setHarness">Document harness</label>
           <select id="setHarness"></select>
-          <span class="smuted">Used for new discussions and new documents. To switch an existing thread with its history, choose Reply with in chat Options.</span>
+          <span class="smuted">For this document's new discussions. It also becomes the default for documents no agent has worked on yet. Existing discussions keep theirs: to move one, with its history, use Reply with in chat Options.</span>
         </div>
         <div class="settings-scroll">
           <div id="harnessCaps" class="caprow"></div>
           <div class="srow" id="permissionModeRow" hidden>
             <label for="setPermissionMode">Harness permission mode</label>
             <select id="setPermissionMode"></select>
-            <span class="smuted" id="permissionModeHint">Applies to the next turn. Document changes use Docuzen proposals.</span>
+            <span class="smuted" id="permissionModeHint">Applies to the next turn, in every document. Document changes use Docuzen proposals.</span>
           </div>
           <div class="srow">
             <label for="setDefaultModel">Default model</label>
             <select id="setDefaultModel"></select>
             <span id="setDefaultModelHint" class="smuted"></span>
-            <button id="useDiscussionRoute" class="action" type="button" hidden>Use for current discussion</button>
+            <button id="useDiscussionRoute" class="action" type="button" title="The document already uses this harness and model. This also moves the open discussion, with its history." hidden>Also switch the open discussion</button>
           </div>
           <details id="modelProviders" class="model-providers">
             <summary>Manage model providers <span id="modelCount"></span></summary>

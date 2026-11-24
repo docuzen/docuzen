@@ -5,7 +5,9 @@ export type HarnessId = "pi" | "codex" | "claude-code" | `acp:${string}`;
 
 export interface HarnessCapabilities {
   proposeEdits: boolean;
+  /** Editing mode applies this harness's edits directly (versioned) instead of proposing them. */
   directEdit: boolean;
+  /** A Review pass files findings into the review rail (add_review_finding); without it the review is prose. */
   reviewFindings: boolean;
   webSearch: "docuzen-managed" | "harness-managed" | "none";
   /** Vetted document-type toolchain handling; users do not configure MCP directly. */

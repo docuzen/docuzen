@@ -1,4 +1,4 @@
-import { fillHarnessModels, modelDisplayId, supportsModelPicker } from "./harness-models.js";
+import { fillHarnessModels, harnessModelName, loadHarnessModelNames, modelDisplayId, supportsModelPicker } from "./harness-models.js";
 // The Settings modal (per-document harness, tool scope, edit mode, default model,
 // standing instructions, web search), the model manager inside it (pi's models.json,
 // keys write-only), and the active document’s harness in the status bar.
@@ -55,7 +55,7 @@ export function initSettings(deps: SettingsDeps): SettingsApi {
       for (const mode of result.modes) modeSelect.append(el("option", { value: mode.id, textContent: mode.name }));
       modeSelect.value = result.selected;
       modeSelect.disabled = !result.modes.length;
-      modeHint.textContent = modeSelect.value ? "Applies to the next turn. Document changes use Docuzen proposals." : "Choose a mode supported by this session.";
+      modeHint.textContent = modeSelect.value ? "Applies to the next turn, in every document. Document changes use Docuzen proposals." : "Choose a mode supported by this session.";
     } catch (err) {
       if (query === modeQuery && settingsDocPath === docPath) modeHint.textContent = String(err);
     }
@@ -107,7 +107,7 @@ export function initSettings(deps: SettingsDeps): SettingsApi {
     const caps = [
       h.capabilities.proposeEdits ? "Proposals" : "",
       h.capabilities.directEdit ? "Direct edit" : "",
-      h.capabilities.reviewFindings ? "Review" : "",
+      h.capabilities.reviewFindings ? "Review findings" : "Review: prose",
       h.capabilities.webSearch === "docuzen-managed"
         ? "Web: Docuzen"
         : h.capabilities.webSearch === "harness-managed"
@@ -436,6 +436,13 @@ export function initSettings(deps: SettingsDeps): SettingsApi {
     harnessBadgeEl.title = [h?.unavailableReason ?? h?.status, "Used for new discussions. Click to change in Settings."].filter(Boolean).join("\n");
     deps.setDefaultModelKey(modelKey ?? "");
     deps.setHarnessContext(id, list);
+    // Right after a launch the harness's model names aren't loaded yet: show the name, not
+    // the id, as soon as they are.
+    if (h && modelKey && (id === "codex" || id === "claude-code") && !harnessModelName(modelKey)) {
+      void loadHarnessModelNames(deps.api, h.id, docPath).then(() => {
+        if (query === badgeQuery && harnessModelName(modelKey)) void refreshHarnessBadge();
+      });
+    }
   }
 
   return { openSettings, closeSettings, refreshHarnessBadge };
