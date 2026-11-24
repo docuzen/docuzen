@@ -31,7 +31,7 @@ export interface DocPassesDeps {
   setDirectivesWorking: (on: boolean) => void;
   /** Fill a model <select> with the configured models, defaulting to the doc's model. */
   fillModelPicker: (sel: HTMLSelectElement) => void;
-  agents: Pick<AgentsPanelApi, "setOptimisticTask" | "clearOptimisticTask" | "markStarting">;
+  agents: Pick<AgentsPanelApi, "setOptimisticTask" | "clearOptimisticTask" | "markStarting" | "refreshAgents">;
   /** Show a directive-pass outcome banner in the chat pane (see chat.ts). */
   showDirectiveResult: (headline: string, reply: string, threadId?: string) => void;
 }
@@ -174,9 +174,8 @@ export function initDocPasses(deps: DocPassesDeps): DocPassesApi {
     }
     directivePasses.add(docPath);
     resolveDirectivesBtn.disabled = true;
-    setPulse(true); // pulse the [[ … ]] chips while the pass runs
-    deps.agents.setOptimisticTask("directives", "running", docPath);
-    deps.agents.markStarting(); // instant feedback; the poll reconciles the real count
+    // Pulse the markers immediately. The Agents panel gets one task per marker from the backend.
+    setPulse(true);
     const outcome = await runStreamingTurn({
       run: async () => {
         await deps.syncDocToDisk(); // ensure just-typed [[ … ]] directives are on disk for the backend
@@ -193,8 +192,8 @@ export function initDocPasses(deps: DocPassesDeps): DocPassesApi {
       onError: (e) => reportError("resolve directives", e, deps.log),
       onSettled: () => {
         directivePasses.delete(docPath);
-        deps.agents.clearOptimisticTask("directives", docPath);
         if (!onScreen(docPath)) return;
+        void deps.agents.refreshAgents();
         resolveDirectivesBtn.disabled = false;
         setPulse(false);
       },

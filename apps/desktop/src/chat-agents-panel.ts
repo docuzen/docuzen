@@ -73,7 +73,6 @@ export function initAgentsPanel(deps: AgentsPanelDeps): AgentsPanelApi {
 
   /** Human label for a task's thread id (comment quote, or a name for pseudo-threads). */
   function taskTitle(threadId: string): string {
-    if (threadId === "directives") return "Inline directives";
     if (/^directive-\d+$/.test(threadId)) return `Inline directive ${threadId.slice("directive-".length)}`;
     if (threadId === "review") return "Review pass";
     const q = deps.commentQuoted(threadId);
@@ -140,8 +139,7 @@ export function initAgentsPanel(deps: AgentsPanelDeps): AgentsPanelApi {
     // Pin the doc-wide pseudo-tasks (directives, review) ahead of per-comment threads so
     // they're never buried under the capped Recent list.
     const pseudoFirst = (rows: TaskRow[]): TaskRow[] => {
-      const isPseudo = (t: TaskRow) =>
-        t.threadId === "directives" || t.threadId === "review" || /^directive-\d+$/.test(t.threadId);
+      const isPseudo = (t: TaskRow) => t.threadId === "review" || /^directive-\d+$/.test(t.threadId);
       return [...rows.filter(isPseudo), ...rows.filter((t) => !isPseudo(t))];
     };
     const active = pseudoFirst(tasks.filter((t) => t.status === "running"));

@@ -87,17 +87,6 @@ describe("Optimistic task lifecycle (item 6)", () => {
     const finallyBlock = sourceBetween(runReviewSource, "} finally {", "\n  }");
     expect(finallyBlock).toContain('clearOptimisticTask("review", docPath)');
   });
-
-  it("clears the directives optimistic task via runStreamingTurn's onSettled (fires on rejection too)", () => {
-    const runResolveSource = sourceBetween(
-      chatSource,
-      "async function runResolveDirectives(",
-      "resolveDirectivesBtn.addEventListener",
-    );
-    expect(runResolveSource).toContain('setOptimisticTask("directives", "running", docPath)');
-    const onSettled = sourceBetween(runResolveSource, "onSettled: () => {", "},");
-    expect(onSettled).toContain('clearOptimisticTask("directives", docPath)');
-  });
 });
 
 describe("Errored agent rows surface errorText (part of the original brief)", () => {

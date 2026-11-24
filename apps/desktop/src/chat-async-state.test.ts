@@ -462,6 +462,32 @@ describe("H30: document-wide passes", () => {
 });
 
 describe("M30: the Agents panel", () => {
+  it.each([0, 1, 2])("counts %i directive workers without counting the Resolve command", async (count) => {
+    const { api, chat, calls } = setup();
+    const names = Array.from({ length: count }, (_, i) => "Inline directive " + (i + 1));
+    const rows = names.map((_, i) => ({
+      threadId: "directive-" + (i + 1), status: "running", piSessionId: null, updatedAt: "t",
+    }));
+    api.listTasks.mockResolvedValue(rows);
+    const pass = chat.runResolveDirectives();
+    await settle();
+    $<HTMLButtonElement>("#agentsBtn").click();
+    await settle();
+    expect($("#agentsBtn").textContent).toBe(count ? `Agents (${count})` : "Agents");
+    expect($$("#agentsPanel .agentshead").map(e => e.textContent)).toEqual(count ? ["Active"] : []);
+    expect($$("#agentsPanel .agenttitle").map(e => e.textContent)).toEqual(names);
+    expect($$("#agentsPanel .agentrow.clickable")).toHaveLength(count);
+
+    api.listTasks.mockResolvedValue(rows.map(r => ({ ...r, status: "responded" })));
+    calls.resolveDirectives[0].resolve({ count, proposed: count > 0, applied: 0, reply: "" });
+    await pass;
+    await settle();
+    expect($("#agentsBtn").textContent).toBe("Agents");
+    expect($$("#agentsPanel .agentshead").map(e => e.textContent)).toEqual(count ? ["Recent"] : []);
+    expect($$("#agentsPanel .agenttitle").map(e => e.textContent)).toEqual(names);
+    $<HTMLButtonElement>("#agentsBtn").click();
+  });
+
   it("a running pass on one document is not listed for another", async () => {
     const { switchDoc } = setup();
     $<HTMLButtonElement>("#reviewRun").click();
