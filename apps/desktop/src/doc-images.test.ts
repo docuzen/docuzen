@@ -119,6 +119,7 @@ describe("HTML documents", () => {
     const readImage = vi.fn(async () => ({ mime: "image/png", dataBase64: "AQID" }));
     const onHtmlEdited = vi.fn();
     const notify = vi.fn();
+    const onDocumentsDropped = vi.fn();
     const mode = { editable: true };
     const log: string[] = [];
     const api = initDocImages({
@@ -134,20 +135,23 @@ describe("HTML documents", () => {
       saveImage,
       readImage,
       onHtmlEdited,
+      onDocumentsDropped,
       ...over,
     });
     api.wireHtmlDocument(doc);
-    return { api, saveImage, readImage, onHtmlEdited, notify, mode, log };
+    return { api, saveImage, readImage, onHtmlEdited, notify, onDocumentsDropped, mode, log };
   }
 
-  function fire(doc: Document, type: string, key: "dataTransfer" | "clipboardData", data: unknown): Event {
+  function fire(doc: Document | Window, type: string, key: "dataTransfer" | "clipboardData", data: unknown): Event {
     const ev = new Event(type, { bubbles: true, cancelable: true });
     Object.defineProperty(ev, key, { value: data });
     Object.defineProperty(ev, "clientX", { value: 10 });
     Object.defineProperty(ev, "clientY", { value: 10 });
-    doc.body.dispatchEvent(ev);
+    ("body" in doc ? doc.body : doc).dispatchEvent(ev);
     return ev;
   }
+  const png = (name = "a.png") => new File([new Uint8Array([1])], name, { type: "image/png" });
+  const md = (name = "notes.md") => new File(["# Notes\n"], name, { type: "text/markdown" });
   const settle = async () => {
     for (let i = 0; i < 10; i++) await new Promise((r) => setTimeout(r, 0));
   };
@@ -254,14 +258,75 @@ describe("HTML documents", () => {
     expect(doc.querySelector("img")).toBeNull();
   });
 
-  it("a non-image drop is refused without navigating away", async () => {
+  it("a drop of a file docuzen can't use is refused without navigating away, and the user is told why", async () => {
     const doc = htmlDoc("<p>Body</p>");
-    const { saveImage, log } = setup(doc);
+    const { saveImage, notify, onDocumentsDropped } = setup(doc);
     const ev = fire(doc, "drop", "dataTransfer", { types: ["Files"], files: [new File(["x"], "notes.txt", { type: "text/plain" })] });
     await settle();
     expect(ev.defaultPrevented).toBe(true);
     expect(saveImage).not.toHaveBeenCalled();
-    expect(log.join("\n")).toContain("only image files");
+    expect(onDocumentsDropped).not.toHaveBeenCalled();
+    expect(notify.mock.calls[0][0]).toMatch(/notes\.txt.*\.md, \.html and \.hadz/);
+  });
+
+  it("a document dropped onto a document opens it, in review mode too; images dropped with it are not added", async () => {
+    const doc = htmlDoc("<p>Body</p>");
+    const { saveImage, onDocumentsDropped, mode, log } = setup(doc);
+    mode.editable = false;
+    const files = [md("plan.md"), png(), new File(["<p/>"], "Page.HTML", { type: "text/html" }), new File(["z"], "b.hadz")];
+    const ev = fire(doc, "drop", "dataTransfer", { types: ["Files"], files });
+    await settle();
+    expect(ev.defaultPrevented).toBe(true);
+    expect(onDocumentsDropped).toHaveBeenCalledTimes(1);
+    expect(onDocumentsDropped.mock.calls[0][0].map((f: File) => f.name)).toEqual(["plan.md", "Page.HTML", "b.hadz"]);
+    expect(saveImage).not.toHaveBeenCalled();
+    expect(doc.querySelector("img")).toBeNull();
+    expect(log.join("\n")).toContain("not added: a.png");
+  });
+
+  it("while a drag is over a review-mode document, only an images-only drag is refused", () => {
+    const doc = htmlDoc("<p>Body</p>");
+    const { mode } = setup(doc);
+    mode.editable = false;
+    const over = (items: { kind: string; type: string }[]) => {
+      const dt = { types: ["Files"], items, dropEffect: "" };
+      fire(doc, "dragover", "dataTransfer", dt);
+      return dt.dropEffect;
+    };
+    expect(over([{ kind: "file", type: "image/png" }])).toBe("none");
+    expect(over([{ kind: "file", type: "text/markdown" }])).toBe("copy");
+    expect(over([{ kind: "file", type: "" }])).toBe("copy"); // an unknown type may be a document
+    mode.editable = true;
+    expect(over([{ kind: "file", type: "image/png" }])).toBe("copy");
+  });
+
+  it("an image dragged over the markdown editor stays droppable: the window doesn't overrule the editor", () => {
+    const rootEl = document.createElement("div");
+    document.body.appendChild(rootEl);
+    setup(htmlDoc("<p/>"), { rootEl, getFormat: () => "markdown", getHtmlSurface: () => null });
+    const dt = { types: ["Files"], items: [{ kind: "file", type: "image/png" }], dropEffect: "" };
+    const ev = new Event("dragover", { bubbles: true, cancelable: true });
+    Object.defineProperty(ev, "dataTransfer", { value: dt });
+    rootEl.dispatchEvent(ev);
+    expect(ev.defaultPrevented).toBe(true);
+    expect(dt.dropEffect).toBe("copy");
+    rootEl.remove();
+  });
+
+  it("outside the document, a dropped document opens and anything else is explained", async () => {
+    const doc = htmlDoc("<p>Body</p>");
+    const { onDocumentsDropped, notify, saveImage } = setup(doc);
+    const docDrop = fire(window, "drop", "dataTransfer", { types: ["Files"], files: [md()] });
+    expect(docDrop.defaultPrevented).toBe(true);
+    expect(onDocumentsDropped.mock.calls[0][0].map((f: File) => f.name)).toEqual(["notes.md"]);
+    fire(window, "drop", "dataTransfer", { types: ["Files"], files: [png()] });
+    fire(window, "drop", "dataTransfer", { types: ["Files"], files: [new File(["%PDF"], "r.pdf", { type: "application/pdf" })] });
+    await settle();
+    expect(saveImage).not.toHaveBeenCalled();
+    expect(notify.mock.calls.map((c) => c[0])).toEqual([expect.stringMatching(/onto the document/), expect.stringMatching(/r\.pdf/)]);
+    const dt = { types: ["Files"], items: [{ kind: "file", type: "text/markdown" }], dropEffect: "" };
+    expect(fire(window, "dragover", "dataTransfer", dt).defaultPrevented).toBe(true);
+    expect(dt.dropEffect).toBe("copy");
   });
 
   it("a pasted screenshot is inserted; pasted text with a preview image is left to the editor", async () => {

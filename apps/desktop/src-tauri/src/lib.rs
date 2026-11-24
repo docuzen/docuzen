@@ -1,3 +1,4 @@
+mod drag_paths;
 mod pending;
 mod sidecar;
 
@@ -23,6 +24,13 @@ fn restart_sidecar(state: tauri::State<SidecarState>) {
 #[tauri::command]
 fn take_pending_opens(state: tauri::State<pending::PendingOpens>) -> Vec<String> {
     state.drain()
+}
+
+/// The files of the drag that just ended on the page, for opening a dropped document.
+/// Sync commands run on the main thread, where AppKit expects pasteboard reads.
+#[tauri::command]
+fn dropped_file_paths() -> Vec<String> {
+    drag_paths::last_drag_file_paths()
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -78,8 +86,9 @@ pub fn run() {
             )
             .title("docuzen")
             .inner_size(1100.0, 760.0)
-            // Leave file drops to the page: the native handler would swallow them, and
-            // the document surfaces take dropped images themselves (doc-images.ts).
+            // Leave file drops to the page: the native handler would swallow every drag,
+            // including ones inside a document. The page inserts dropped images itself
+            // (doc-images.ts) and opens dropped documents by asking dropped_file_paths.
             .disable_drag_drop_handler()
             .center();
             if !init_script.is_empty() {
@@ -171,7 +180,7 @@ pub fn run() {
             // Forward custom menu clicks to the webview.
             let _ = app.emit("menu-action", event.id().0.as_str());
         })
-        .invoke_handler(tauri::generate_handler![get_docd_port, restart_sidecar, take_pending_opens])
+        .invoke_handler(tauri::generate_handler![get_docd_port, restart_sidecar, take_pending_opens, dropped_file_paths])
         .build(tauri::generate_context!())
         .expect("error while building tauri application")
         .run(|app, event| {

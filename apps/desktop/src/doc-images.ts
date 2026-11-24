@@ -12,6 +12,7 @@
 // Placement: a drop has no visible caret on either surface, so a dropped image becomes its
 // own block next to the block it was dropped on (above when dropped on its top half). A
 // paste or File ▸ Insert Image has a caret, so it goes there.
+import { isDocumentName } from "./doc-drop.js";
 import type { Editor } from "@milkdown/kit/core";
 import { editorViewCtx } from "@milkdown/kit/core";
 import { imageSchema } from "@milkdown/kit/preset/commonmark";
@@ -129,6 +130,26 @@ export function imageFilesFrom(dt: DataTransfer | null | undefined): File[] {
 /** True while a drag carries files (their names are not readable until the drop). */
 function dragHasFiles(dt: DataTransfer | null): boolean {
   return !!dt && Array.from(dt.types ?? []).includes("Files");
+}
+
+/** Dropped files docuzen opens as documents rather than inserting. */
+export function documentFilesFrom(dt: DataTransfer | null | undefined): File[] {
+  return Array.from(dt?.files ?? []).filter((f) => isDocumentName(f.name));
+}
+
+/**
+ * Whether a drag in progress is images only. Names are hidden until the drop, but WebKit
+ * and Chromium report each file's MIME type; an unknown type might be a document.
+ */
+function dragIsOnlyImages(dt: DataTransfer | null): boolean {
+  const files = Array.from(dt?.items ?? []).filter((i) => i.kind === "file");
+  return files.length > 0 && files.every((i) => i.type.startsWith("image/"));
+}
+
+/** What the user is told when a drop holds nothing docuzen can use. */
+function unusableDropMessage(files: File[]): string {
+  const names = files.map((f) => f.name).join(", ");
+  return `Can't use ${names || "that"} here: docuzen opens .md, .html and .hadz files, and adds images dropped onto a document.`;
 }
 
 /**
@@ -330,6 +351,8 @@ export interface DocImagesDeps {
   notify: (message: string) => void;
   /** An image was inserted into the HTML document (marks the tab dirty). */
   onHtmlEdited: () => void;
+  /** Document files (.md, .html, .hadz) were dropped anywhere in the window: open them. */
+  onDocumentsDropped: (files: File[]) => void;
 }
 
 export type Placement = { kind: "drop"; x: number; y: number } | { kind: "caret" };
@@ -479,7 +502,8 @@ export function initDocImages(deps: DocImagesDeps): DocImagesApi {
       const ev = e as DragEvent;
       if (!dragHasFiles(ev.dataTransfer)) return;
       ev.preventDefault();
-      if (ev.dataTransfer) ev.dataTransfer.dropEffect = refusal() ? "none" : "copy";
+      // Refuse only an image drop the document can't take now; a document always opens.
+      if (ev.dataTransfer) ev.dataTransfer.dropEffect = refusal() && dragIsOnlyImages(ev.dataTransfer) ? "none" : "copy";
     });
     target.addEventListener(
       "drop",
@@ -489,8 +513,10 @@ export function initDocImages(deps: DocImagesDeps): DocImagesApi {
         // A dropped file must never reach the editor's own handling or navigate the webview.
         ev.preventDefault();
         ev.stopPropagation();
+        // Documents open in their own tab; images dropped with them are not added here.
+        if (openDroppedDocuments(ev.dataTransfer)) return;
         const files = imageFilesFrom(ev.dataTransfer);
-        if (!files.length) return void deps.log("drop ignored: only image files can be dropped into a document");
+        if (!files.length) return void deps.notify(unusableDropMessage(Array.from(ev.dataTransfer?.files ?? [])));
         void addFiles(files, { kind: "drop", x: ev.clientX, y: ev.clientY });
       },
       true,
@@ -512,13 +538,34 @@ export function initDocImages(deps: DocImagesDeps): DocImagesApi {
     );
   }
 
-  wire(deps.rootEl);
-  // Anywhere else in the window, a dropped file would replace the app with that file.
-  for (const type of ["dragover", "drop"] as const) {
-    window.addEventListener(type, (e) => {
-      if (dragHasFiles((e as DragEvent).dataTransfer)) e.preventDefault();
-    });
+  /** Hand dropped documents to the shell; true when the drop held any. */
+  function openDroppedDocuments(dt: DataTransfer | null): boolean {
+    const docs = documentFilesFrom(dt);
+    if (!docs.length) return false;
+    const skipped = Array.from(dt?.files ?? []).filter((f) => !docs.includes(f));
+    if (skipped.length) deps.log(`dropped with documents, not added: ${skipped.map((f) => f.name).join(", ")}`);
+    deps.onDocumentsDropped(docs);
+    return true;
   }
+
+  wire(deps.rootEl);
+  // Anywhere else in the window (chat, rails, the empty state), a dropped file would
+  // otherwise replace the app with that file. Documents open; anything else is explained.
+  window.addEventListener("dragover", (e) => {
+    const dt = (e as DragEvent).dataTransfer;
+    // Already answered by a document surface it bubbled up from.
+    if (!dragHasFiles(dt) || e.defaultPrevented) return;
+    e.preventDefault();
+    if (dt) dt.dropEffect = dragIsOnlyImages(dt) ? "none" : "copy";
+  });
+  window.addEventListener("drop", (e) => {
+    const dt = (e as DragEvent).dataTransfer;
+    if (!dragHasFiles(dt)) return;
+    e.preventDefault();
+    if (openDroppedDocuments(dt)) return;
+    if (imageFilesFrom(dt).length) return void deps.notify("Drop images onto the document to add them.");
+    deps.notify(unusableDropMessage(Array.from(dt?.files ?? [])));
+  });
 
   function wireHtmlDocument(doc: Document): void {
     wire(doc);

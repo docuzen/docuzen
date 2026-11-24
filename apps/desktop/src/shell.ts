@@ -167,6 +167,8 @@ export interface ShellApi {
    * no-op until main.ts's boot drain (`{ boot: true }`, right after session restore) has run.
    */
   drainExternalOpens(opts?: { boot?: boolean }): Promise<void>;
+  /** Open one document path the user handed over (a dropped file): .hadz imports first. */
+  openExternalPath(path: string): Promise<void>;
 }
 
 /** IO surface for routing an OS-delivered or dialog-picked document path. */
@@ -199,6 +201,11 @@ export function filterOpenablePaths(paths: string[], log: (line: string) => void
     if (!ok) log(`ignoring unsupported file from OS open: ${p}`);
     return ok;
   });
+}
+
+/** Two spellings of one path: equal once Unicode-normalised (APFS ignores the difference). */
+export function samePath(a: string, b: string): boolean {
+  return a === b || a.normalize("NFC") === b.normalize("NFC");
 }
 
 /** Path for a new document: markdown unless the chosen name is already .md/.markdown/.html/.htm. */
@@ -863,7 +870,7 @@ export function initShell(deps: ShellDeps): ShellApi {
 
   /** Add an opened document to the tab strip, once: a second open of the same file reuses its tab. */
   function addTab(path: string, opened: { text: string; format?: string }): number {
-    const existing = tabs.findIndex((t) => t.docPath === path);
+    const existing = tabs.findIndex((t) => samePath(t.docPath, path));
     if (existing >= 0) return existing;
     const format = opened.format === "html" ? "html" : "markdown";
     tabs.push({ docPath: path, name: path.split("/").pop() ?? path, format, markdown: tabContent(opened.text, format) });
@@ -875,7 +882,9 @@ export function initShell(deps: ShellDeps): ShellApi {
   /** Open a document in a tab (activating an existing tab if already open). */
   async function openInTab(path: string): Promise<void> {
     if (!deps.getEditor()) return;
-    const existing = tabs.findIndex((t) => t.docPath === path);
+    // macOS treats "é" spelled as one code point or two as the same file name, and a dropped
+    // file's path can use either spelling: never open one file in two tabs.
+    const existing = tabs.findIndex((t) => samePath(t.docPath, path));
     if (existing >= 0) return void (await activateTab(existing));
     try {
       const opened = await deps.api.openDoc({ docPath: path });
@@ -1050,5 +1059,6 @@ export function initShell(deps: ShellDeps): ShellApi {
     uncollapseRightRail,
     refreshHarnessBadge,
     drainExternalOpens,
+    openExternalPath: (path) => routeExternalPath(path, externalOpenIo),
   };
 }

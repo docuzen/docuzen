@@ -50,3 +50,10 @@ test("unsupported extensions are logged and skipped, case-insensitively", () => 
   expect(log).toHaveBeenCalledTimes(2);
   expect(log).toHaveBeenCalledWith("ignoring unsupported file from OS open: /b.pdf");
 });
+
+test("one file reached through two Unicode spellings of its name is the same path (no second tab)", async () => {
+  const { samePath } = await import("./shell.js");
+  expect(samePath("/d/Café plan.md", "/d/Café plan.md")).toBe(true);
+  expect(samePath("/d/a.md", "/d/a.md")).toBe(true);
+  expect(samePath("/d/a.md", "/d/b.md")).toBe(false);
+});

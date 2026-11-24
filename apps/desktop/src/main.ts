@@ -52,6 +52,7 @@ import { initProposals } from "./proposals.js";
 import { initDocZoom } from "./doc-zoom.js";
 import { connect, docdPort } from "./rpc.js";
 import { initDocImages } from "./doc-images.js";
+import { openDroppedDocuments, tauriDroppedPaths } from "./doc-drop.js";
 import { maybeShowFirstRun } from "./first-run.js";
 
 const logEl = document.querySelector<HTMLPreElement>("#log")!;
@@ -274,6 +275,11 @@ const docImages = initDocImages({
   readImage: (path) => api.readImage({ path }),
   notify: showDocNotice,
   onHtmlEdited: () => shell.markActiveHtmlTabDirty(),
+  onDocumentsDropped: (files) =>
+    void openDroppedDocuments(
+      files.map((f) => f.name),
+      { droppedPaths: tauriDroppedPaths, open: (path) => shell.openExternalPath(path), notify: showDocNotice, log },
+    ),
 });
 
 // --- links: ⌘-click (or a click in HTML review mode) opens what a link points at (doc-links.ts).

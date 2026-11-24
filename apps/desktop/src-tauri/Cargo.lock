@@ -775,6 +775,9 @@ version = "0.4.0-nightly.20261123.4"
 dependencies = [
  "getrandom 0.3.4",
  "libc",
+ "objc2",
+ "objc2-app-kit",
+ "objc2-foundation",
  "tauri",
  "tauri-build",
  "tauri-plugin-dialog",

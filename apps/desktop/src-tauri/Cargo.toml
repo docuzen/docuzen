@@ -24,6 +24,13 @@ tauri-plugin-dialog = "2"
 # The per-launch docd token comes from the OS RNG.
 getrandom = "0.3"
 
+[target.'cfg(target_os = "macos")'.dependencies]
+# Reading a dropped file's path from the drag pasteboard (src/drag_paths.rs). The same
+# versions tao and wry already use.
+objc2 = "0.6"
+objc2-foundation = { version = "0.3", default-features = false, features = ["std", "NSArray", "NSString", "NSURL"] }
+objc2-app-kit = { version = "0.3", default-features = false, features = ["std", "NSPasteboard", "NSPasteboardItem"] }
+
 [target.'cfg(unix)'.dependencies]
 # kill(2) on the sidecar's process group: std can only SIGKILL a single child.
 libc = "0.2"
